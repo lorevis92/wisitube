@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, VOICES, fetchTTS, getPolliToken, setPolliToken } from '../lib/pollinations';
+import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
+import { KOKORO_VOICES, generateSpeech } from '../lib/tts';
 
 const LENGTHS = [
   { id: 'short', label: 'Short · ~60s' },
@@ -24,7 +25,7 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
     if (voiceTest === settings.voice) return;
     setVoiceTest(settings.voice);
     try {
-      const blob = await fetchTTS('Hi! This is the voice that will narrate your video.', settings.voice, { retries: 0 });
+      const blob = await generateSpeech('Hi! This is the voice that will narrate your video.', settings.voice);
       if (audioRef.current) {
         audioRef.current.src = URL.createObjectURL(blob);
         audioRef.current.play();
@@ -99,10 +100,14 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
             <div style={label}>Voice</div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <select value={settings.voice} onChange={(e) => set('voice', e.target.value)} style={inputStyle}>
-                {VOICES.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
+                {Object.entries(KOKORO_VOICES).map(([group, voices]) => (
+                  <optgroup key={group} label={group}>
+                    {voices.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
               <button onClick={testVoice} style={{ ...btnGhost, padding: '10px 14px', whiteSpace: 'nowrap' }}>
@@ -163,7 +168,8 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
             <div style={{ marginTop: 12 }}>
               <div style={label}>Pollinations token (optional)</div>
               <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 8px', fontFamily: FONT.ui }}>
-                Images and voiceover use the free Pollinations.ai tier. If you hit rate limits, get a free token at{' '}
+                Images use the free Pollinations.ai tier (voiceover now runs locally in your browser via Kokoro TTS
+                and needs no token). If you hit image rate limits, get a free token at{' '}
                 <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary }}>
                   enter.pollinations.ai
                 </a>{' '}
@@ -178,13 +184,6 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
                 placeholder="token…"
                 style={{ ...inputStyle, ...mono }}
               />
-              <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 8, fontFamily: FONT.ui }}>
-                Con un token gratuito il limite sale a 1 richiesta ogni 5 secondi — molto più veloce. Registrati su{' '}
-                <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary }}>
-                  enter.pollinations.ai
-                </a>
-                .
-              </div>
             </div>
           )}
         </div>

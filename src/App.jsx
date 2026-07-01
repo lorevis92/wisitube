@@ -15,7 +15,7 @@ export default function App() {
   const [settings, setSettings] = useState({
     topic: '',
     style: 'facestick',
-    voice: 'nova',
+    voice: 'af_heart',
     length: 'short',
     format: '16:9',
     language: 'English',

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, buildImageUrl, fetchTTS, loadImage, decodeAudio } from '../lib/pollinations';
+import { STYLES, buildImageUrl, loadImage, decodeAudio } from '../lib/pollinations';
+import { generateSpeech, onLoadProgress } from '../lib/tts';
 import { ANIMATION_LIST } from '../lib/engine';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,7 +39,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   async function genAudio(scene) {
     updateScene(scene.id, { audioStatus: 'loading', audioError: null });
     try {
-      const blob = await fetchTTS(scene.narration, settings.voice);
+      const blob = await generateSpeech(scene.narration, settings.voice);
       const audioUrl = URL.createObjectURL(blob);
       const buffer = await decodeAudio(audioUrl);
       updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioDuration: buffer.duration, audioError: null });
@@ -62,13 +63,21 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       if (i < imgScenes.length - 1) await sleep(1500);
     }
 
-    // Voiceover after — the anonymous tier allows only ~1 request/15s on the audio endpoint.
+    // Voiceover — Kokoro runs fully in-browser, no rate limit, so no pause needed between scenes.
     const audioScenes = scenes.filter((s) => s.audioStatus !== 'ready');
-    for (let i = 0; i < audioScenes.length; i++) {
-      const scene = project.scenes.find((s) => s.id === audioScenes[i].id) || audioScenes[i];
-      setProgressMsg(`Generating voiceover… scene ${i + 1}/${audioScenes.length}, ~16s each`);
-      await genAudio(scene);
-      if (i < audioScenes.length - 1) await sleep(16000);
+    const unsubscribe = onLoadProgress((info) => {
+      if (info.status === 'progress') {
+        setProgressMsg(`Downloading voice model (~90MB, one time)… ${Math.round(info.progress)}%`);
+      }
+    });
+    try {
+      for (let i = 0; i < audioScenes.length; i++) {
+        const scene = project.scenes.find((s) => s.id === audioScenes[i].id) || audioScenes[i];
+        setProgressMsg(`Generating voiceover… scene ${i + 1}/${audioScenes.length}`);
+        await genAudio(scene);
+      }
+    } finally {
+      unsubscribe();
     }
 
     setProgressMsg('');

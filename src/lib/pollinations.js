@@ -1,8 +1,6 @@
-// Pollinations.ai — free image generation + free TTS.
+// Pollinations.ai — free image generation.
 // Anonymous tier works without a key; an optional free token from enter.pollinations.ai
 // can be saved in localStorage ('wisitube_polli_token') to lift rate limits.
-
-export const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'];
 
 export const STYLES = {
   facestick: {
@@ -54,51 +52,6 @@ export function buildImageUrl(prompt, { width = 1280, height = 720, seed = 42 } 
     `?width=${width}&height=${height}&seed=${seed}&nologo=true&model=flux&referrer=wisitube` +
     (tk ? `&token=${encodeURIComponent(tk)}` : '')
   );
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function readErrBody(res) {
-  try {
-    return (await res.text()).slice(0, 200);
-  } catch {
-    return '';
-  }
-}
-
-async function blobFromAudioResponse(res, label) {
-  if (!res.ok) {
-    const body = await readErrBody(res);
-    throw new Error(`TTS HTTP ${res.status} (${label}): ${body || res.statusText || 'no response body'}`);
-  }
-  const ct = res.headers.get('content-type') || '';
-  const blob = await res.blob();
-  if (!ct.includes('audio') && blob.size < 2000) {
-    throw new Error(`TTS returned no audio (${label}, rate limit?)`);
-  }
-  return blob;
-}
-
-// Fetch TTS audio for a piece of narration. Returns a Blob (mp3).
-export async function fetchTTS(text, voice = 'nova', { retries = 2 } = {}) {
-  const tk = polliToken();
-  const url =
-    'https://text.pollinations.ai/' +
-    encodeURIComponent(text) +
-    `?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=wisitube` +
-    (tk ? `&token=${encodeURIComponent(tk)}` : '');
-
-  let lastErr = null;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url);
-      return await blobFromAudioResponse(res, 'text.pollinations.ai');
-    } catch (e) {
-      lastErr = e;
-      if (attempt < retries) await sleep(2500 * (attempt + 1));
-    }
-  }
-  throw lastErr || new Error('TTS failed');
 }
 
 // ---- media caches (module-level, survive re-renders) ----
