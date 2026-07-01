@@ -178,6 +178,13 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
                 placeholder="token…"
                 style={{ ...inputStyle, ...mono }}
               />
+              <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 8, fontFamily: FONT.ui }}>
+                Con un token gratuito il limite sale a 1 richiesta ogni 5 secondi — molto più veloce. Registrati su{' '}
+                <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary }}>
+                  enter.pollinations.ai
+                </a>
+                .
+              </div>
             </div>
           )}
         </div>

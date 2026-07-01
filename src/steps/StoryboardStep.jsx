@@ -52,17 +52,25 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   async function generateAll() {
     setRunning(true);
     const scenes = project.scenes;
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = project.scenes.find((s) => s.id === scenes[i].id) || scenes[i];
-      setProgressMsg(`Scene ${i + 1} of ${scenes.length}…`);
-      const jobs = [];
-      if (scene.imageStatus !== 'ready') jobs.push(genImage(scene));
-      if (scene.audioStatus !== 'ready') jobs.push(genAudio(scene));
-      if (jobs.length) {
-        await Promise.all(jobs);
-        await sleep(1200); // be gentle with the free tier
-      }
+
+    // Images first, one at a time — short pause is enough for the image endpoint.
+    const imgScenes = scenes.filter((s) => s.imageStatus !== 'ready');
+    for (let i = 0; i < imgScenes.length; i++) {
+      const scene = project.scenes.find((s) => s.id === imgScenes[i].id) || imgScenes[i];
+      setProgressMsg(`Generating images… scene ${i + 1}/${imgScenes.length}`);
+      await genImage(scene);
+      if (i < imgScenes.length - 1) await sleep(1500);
     }
+
+    // Voiceover after — the anonymous tier allows only ~1 request/15s on the audio endpoint.
+    const audioScenes = scenes.filter((s) => s.audioStatus !== 'ready');
+    for (let i = 0; i < audioScenes.length; i++) {
+      const scene = project.scenes.find((s) => s.id === audioScenes[i].id) || audioScenes[i];
+      setProgressMsg(`Generating voiceover… scene ${i + 1}/${audioScenes.length}, ~16s each`);
+      await genAudio(scene);
+      if (i < audioScenes.length - 1) await sleep(16000);
+    }
+
     setProgressMsg('');
     setRunning(false);
   }

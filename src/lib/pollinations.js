@@ -80,44 +80,23 @@ async function blobFromAudioResponse(res, label) {
 }
 
 // Fetch TTS audio for a piece of narration. Returns a Blob (mp3).
-// Tries the new unified endpoint first, falling back to the legacy GET endpoint on failure.
 export async function fetchTTS(text, voice = 'nova', { retries = 2 } = {}) {
   const tk = polliToken();
-
-  async function tryUnifiedEndpoint() {
-    const res = await fetch('https://gen.pollinations.ai/v1/audio/speech', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(tk ? { Authorization: `Bearer ${tk}` } : {}),
-      },
-      body: JSON.stringify({ model: 'tts-1', input: text, voice }),
-    });
-    return blobFromAudioResponse(res, 'unified endpoint');
-  }
-
-  async function tryLegacyEndpoint() {
-    const url =
-      'https://text.pollinations.ai/' +
-      encodeURIComponent(text) +
-      `?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=wisitube` +
-      (tk ? `&token=${encodeURIComponent(tk)}` : '');
-    const res = await fetch(url);
-    return blobFromAudioResponse(res, 'legacy endpoint');
-  }
+  const url =
+    'https://text.pollinations.ai/' +
+    encodeURIComponent(text) +
+    `?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=wisitube` +
+    (tk ? `&token=${encodeURIComponent(tk)}` : '');
 
   let lastErr = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await tryUnifiedEndpoint();
-    } catch (eNew) {
-      try {
-        return await tryLegacyEndpoint();
-      } catch (eOld) {
-        lastErr = new Error(`${eNew.message}; fallback failed: ${eOld.message}`);
-      }
+      const res = await fetch(url);
+      return await blobFromAudioResponse(res, 'text.pollinations.ai');
+    } catch (e) {
+      lastErr = e;
+      if (attempt < retries) await sleep(2500 * (attempt + 1));
     }
-    if (attempt < retries) await sleep(2500 * (attempt + 1));
   }
   throw lastErr || new Error('TTS failed');
 }
