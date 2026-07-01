@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/logo-wisitube.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="WisiTube — Create animated faceless YouTube videos with AI in minutes. Script, voiceover, images, animation and editing in one place." />
+    <title>WisiTube — AI Faceless Video Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: #FFFFFF; color: #111111; }
+      body { font-family: 'Syne', sans-serif; }
+      button { font-family: 'Syne', sans-serif; cursor: pointer; }
+      input, select, textarea { font-family: 'Syne', sans-serif; }
+      input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid rgba(232,53,42,0.4); outline-offset: 1px; }
+      ::selection { background: rgba(232,53,42,0.18); }
+      input[type="range"] { accent-color: #E8352A; }
+      @keyframes wisiPulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
