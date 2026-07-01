@@ -37,10 +37,12 @@ function loadTTS() {
   if (!ttsPromise) {
     ttsPromise = (async () => {
       const { KokoroTTS } = await import('kokoro-js');
-      const useWebGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
+      // Always use the WASM backend, even when navigator.gpu is available. onnxruntime's WebGPU
+      // backend has been observed to crash the GPU driver on Windows (DXGI_ERROR_DEVICE_HUNG) —
+      // this is a stability tradeoff, not a performance choice.
       return KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
-        dtype: useWebGPU ? 'fp32' : 'q8',
-        device: useWebGPU ? 'webgpu' : 'wasm',
+        dtype: 'q8',
+        device: 'wasm',
         progress_callback: (info) => emitProgress(info),
       });
     })();

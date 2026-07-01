@@ -54,27 +54,30 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     setRunning(true);
     const scenes = project.scenes;
 
-    // Images first, one at a time — short pause is enough for the image endpoint.
-    const imgScenes = scenes.filter((s) => s.imageStatus !== 'ready');
-    for (let i = 0; i < imgScenes.length; i++) {
-      const scene = project.scenes.find((s) => s.id === imgScenes[i].id) || imgScenes[i];
-      setProgressMsg(`Generating images… scene ${i + 1}/${imgScenes.length}`);
-      await genImage(scene);
-      if (i < imgScenes.length - 1) await sleep(1500);
-    }
-
-    // Voiceover — Kokoro runs fully in-browser, no rate limit, so no pause needed between scenes.
-    const audioScenes = scenes.filter((s) => s.audioStatus !== 'ready');
     const unsubscribe = onLoadProgress((info) => {
       if (info.status === 'progress') {
         setProgressMsg(`Downloading voice model (~90MB, one time)… ${Math.round(info.progress)}%`);
       }
     });
+
+    // Interleave image + voice per scene — Kokoro runs locally with no rate limit, so only the
+    // Pollinations image call needs spacing out.
+    let imageCallsMade = 0;
     try {
-      for (let i = 0; i < audioScenes.length; i++) {
-        const scene = project.scenes.find((s) => s.id === audioScenes[i].id) || audioScenes[i];
-        setProgressMsg(`Generating voiceover… scene ${i + 1}/${audioScenes.length}`);
-        await genAudio(scene);
+      for (let i = 0; i < scenes.length; i++) {
+        const scene = project.scenes.find((s) => s.id === scenes[i].id) || scenes[i];
+        if (scene.imageStatus !== 'ready') {
+          if (imageCallsMade > 0) await sleep(1500);
+          setProgressMsg(`Scene ${i + 1} of ${scenes.length}: image…`);
+          await genImage(scene);
+          imageCallsMade++;
+        }
+
+        const sceneAfterImage = project.scenes.find((s) => s.id === scenes[i].id) || scene;
+        if (sceneAfterImage.audioStatus !== 'ready') {
+          setProgressMsg(`Scene ${i + 1} of ${scenes.length}: voice…`);
+          await genAudio(sceneAfterImage);
+        }
       }
     } finally {
       unsubscribe();
