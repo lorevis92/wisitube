@@ -58,30 +58,66 @@ export function buildImageUrl(prompt, { width = 1280, height = 720, seed = 42 } 
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function readErrBody(res) {
+  try {
+    return (await res.text()).slice(0, 200);
+  } catch {
+    return '';
+  }
+}
+
+async function blobFromAudioResponse(res, label) {
+  if (!res.ok) {
+    const body = await readErrBody(res);
+    throw new Error(`TTS HTTP ${res.status} (${label}): ${body || res.statusText || 'no response body'}`);
+  }
+  const ct = res.headers.get('content-type') || '';
+  const blob = await res.blob();
+  if (!ct.includes('audio') && blob.size < 2000) {
+    throw new Error(`TTS returned no audio (${label}, rate limit?)`);
+  }
+  return blob;
+}
+
 // Fetch TTS audio for a piece of narration. Returns a Blob (mp3).
+// Tries the new unified endpoint first, falling back to the legacy GET endpoint on failure.
 export async function fetchTTS(text, voice = 'nova', { retries = 2 } = {}) {
   const tk = polliToken();
-  const url =
-    'https://text.pollinations.ai/' +
-    encodeURIComponent(text) +
-    `?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=wisitube` +
-    (tk ? `&token=${encodeURIComponent(tk)}` : '');
+
+  async function tryUnifiedEndpoint() {
+    const res = await fetch('https://gen.pollinations.ai/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(tk ? { Authorization: `Bearer ${tk}` } : {}),
+      },
+      body: JSON.stringify({ model: 'tts-1', input: text, voice }),
+    });
+    return blobFromAudioResponse(res, 'unified endpoint');
+  }
+
+  async function tryLegacyEndpoint() {
+    const url =
+      'https://text.pollinations.ai/' +
+      encodeURIComponent(text) +
+      `?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=wisitube` +
+      (tk ? `&token=${encodeURIComponent(tk)}` : '');
+    const res = await fetch(url);
+    return blobFromAudioResponse(res, 'legacy endpoint');
+  }
 
   let lastErr = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`TTS HTTP ${res.status}`);
-      const ct = res.headers.get('content-type') || '';
-      const blob = await res.blob();
-      if (!ct.includes('audio') && blob.size < 2000) {
-        throw new Error('TTS returned no audio (rate limit?)');
+      return await tryUnifiedEndpoint();
+    } catch (eNew) {
+      try {
+        return await tryLegacyEndpoint();
+      } catch (eOld) {
+        lastErr = new Error(`${eNew.message}; fallback failed: ${eOld.message}`);
       }
-      return blob;
-    } catch (e) {
-      lastErr = e;
-      if (attempt < retries) await sleep(2500 * (attempt + 1));
     }
+    if (attempt < retries) await sleep(2500 * (attempt + 1));
   }
   throw lastErr || new Error('TTS failed');
 }

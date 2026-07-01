@@ -36,15 +36,15 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   }
 
   async function genAudio(scene) {
-    updateScene(scene.id, { audioStatus: 'loading' });
+    updateScene(scene.id, { audioStatus: 'loading', audioError: null });
     try {
       const blob = await fetchTTS(scene.narration, settings.voice);
       const audioUrl = URL.createObjectURL(blob);
       const buffer = await decodeAudio(audioUrl);
-      updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioDuration: buffer.duration });
+      updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioDuration: buffer.duration, audioError: null });
       return true;
-    } catch {
-      updateScene(scene.id, { audioStatus: 'error' });
+    } catch (e) {
+      updateScene(scene.id, { audioStatus: 'error', audioError: e?.message || String(e) });
       return false;
     }
   }
@@ -71,8 +71,9 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const allReady = readyCount === project.scenes.length;
   const totalSec = project.scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
 
-  const statusDot = (st) => (
+  const statusDot = (st, title) => (
     <span
+      title={title}
       style={{
         display: 'inline-block',
         width: 8,
@@ -168,7 +169,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               </span>
               <span style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase' }}>
                 <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{statusDot(scene.imageStatus)} img</span>
-                <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{statusDot(scene.audioStatus)} voice</span>
+                <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{statusDot(scene.audioStatus, scene.audioStatus === 'error' ? scene.audioError : undefined)} voice</span>
                 {scene.audioDuration ? <span style={mono}>{scene.audioDuration.toFixed(1)}s</span> : null}
               </span>
             </div>
