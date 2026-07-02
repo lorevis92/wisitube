@@ -2,7 +2,7 @@
 // CRITICAL: this is a Serverless Function: handler(req, res) + res.status().json().
 // Never convert to Edge (runtime: 'edge' / new Response()) — the two APIs are incompatible.
 
-export const config = { maxDuration: 60 };
+export const config = { maxDuration: 90 };
 
 const SCENE_COUNTS = { short: 10, medium: 16, long: 24 };
 
@@ -62,7 +62,9 @@ When reference_id is set, image_prompt MUST be an editing instruction, never a f
 
     const characterBibleSection = `
 
-Character bible: identify every character that appears in more than one scene — including the narrator/protagonist even if not explicitly named by the user. For well-known real figures, use your own knowledge of their actual appearance. If the user provided character hints in their message, prioritize those details over your own assumptions. Create at least 2 variants when the story spans different life stages, time periods, or notable appearance changes (e.g. young vs old, before/after a transformation) — otherwise a single variant is enough. Every variant must preserve the base_description's core identifying traits while adapting era-specific details, so the character stays recognizable across variants.
+Character bible: identify every character that appears in more than one scene — including the narrator/protagonist even if not explicitly named by the user. If the user provided character hints in their message, prioritize those details over your own assumptions. Create at least 2 variants when the story spans different life stages, time periods, or notable appearance changes (e.g. young vs old, before/after a transformation) — otherwise a single variant is enough. Every variant must preserve the base_description's core identifying traits while adapting era-specific details, so the character stays recognizable across variants.
+
+For every real, named, identifiable person in the character_bible (historical figures, celebrities, public figures) — search the web to verify their actual physical appearance before writing descriptions. Identify which traits are constant identity anchors that persist across their entire life (bone structure, ear shape, distinctive permanent marks, eye shape/color, general build proportions) versus which traits change by era (hair length/color/style, facial hair, weight, clothing, age-related features). The base_description must contain only the constant anchors. Each variant's description must contain only the era-specific changes — never repeat the constant anchors in variants, they're inherited automatically. This ensures a character stays recognizable from childhood through old age, or through any dramatic appearance change, while still looking accurate to each specific period. For fictional characters or figures the search doesn't surface reliable information about, fall back on your own knowledge or reasonable invention guided by any user-provided character_hints.
 
 For EVERY image beat where a character_bible character is visibly present — as the focal subject, in the background, or partially visible — character_id and variant_label are REQUIRED, same assertive logic as reference_id above: do NOT leave them null just because no variant is a perfect match, pick the closest one by that beat's narrative context. Only set character_id and variant_label to null when no character_bible character is genuinely depicted in that specific beat. If a beat has both a valid reference_id and a valid character_id for the same character, reference_id (a real photo) takes priority for the final image — character_id and variant_label are still saved as information regardless.`;
 
@@ -110,6 +112,7 @@ Rules for scenes:
         model: 'claude-sonnet-4-6',
         max_tokens: 6000,
         system: systemPrompt,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [
           {
             role: 'user',
