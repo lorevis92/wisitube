@@ -50,6 +50,9 @@ export default function App() {
         topic: settings.topic,
         settings,
         ...project,
+        // Frozen at save time so the Projects dashboard never has to re-derive it (and risk
+        // picking the raw topic — which can repeat across projects — over the generated title).
+        displayTitle: project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled project',
       });
     }, 800);
     return () => clearTimeout(timer);

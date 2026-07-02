@@ -79,7 +79,7 @@ export default function ProjectsStep({ onResume, onNewProject, isMobile }) {
         {projects.map((p) => {
           const sceneCount = p.scenes?.length || 0;
           const readyCount = p.scenes?.filter((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready').length || 0;
-          const title = p.topic || p.titles?.[0] || 'Untitled project';
+          const title = p.displayTitle || 'Untitled project';
           return (
             <div key={p.id} style={{ ...card, padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div
