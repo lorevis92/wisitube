@@ -19,7 +19,6 @@ export default async function handler(req, res) {
 
   try {
     const { topic, language = 'English', length = 'short', format = '16:9', style = 'facestick', references } = req.body || {};
-    console.log('[generate] references received:', JSON.stringify(references));
     if (!topic || typeof topic !== 'string' || topic.length > 500) {
       return res.status(400).json({ error: 'Invalid topic' });
     }
