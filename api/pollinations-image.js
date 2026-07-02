@@ -70,16 +70,26 @@ export default async function handler(req, res) {
       fs.unlink(uploaded.filepath, () => {});
     }
 
-    // Phase 3: forward the image + prompt to Pollinations' image-edit endpoint in one call.
-    let response;
+    // Phase 3: re-package the bytes formidable wrote to disk into the outbound multipart body.
+    // Kept separate from the fetch below so a failure constructing the Blob/FormData (bad bytes,
+    // an unexpected mimetype, an OOM on a huge buffer) is never confused with a network failure.
+    let forward;
     try {
       const blob = new Blob([buffer], { type: uploaded.mimetype || 'application/octet-stream' });
-      const forward = new FormData();
+      forward = new FormData();
       forward.append('image', blob, uploaded.originalFilename || 'reference.jpg');
       forward.append('prompt', prompt);
       forward.append('model', 'kontext');
       forward.append('size', `${width}x${height}`);
       forward.append('response_format', 'url');
+    } catch (err) {
+      console.error('[pollinations-image] phase=build-formdata', err?.message, err?.stack);
+      return res.status(500).json({ error: 'Could not prepare the outbound request', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    // Phase 4: forward the image + prompt to Pollinations' image-edit endpoint in one call.
+    let response;
+    try {
       const targetUrl = 'https://gen.pollinations.ai/v1/images/edits';
       console.log('[proxy] outgoing request URL:', targetUrl);
       response = await fetch(targetUrl, {
@@ -92,7 +102,7 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Could not reach the Pollinations image-edit endpoint', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    // Phase 4: read the raw response body — never assume it's JSON before checking.
+    // Phase 5: read the raw response body — never assume it's JSON before checking.
     let rawText;
     try {
       rawText = await response.text();
@@ -106,7 +116,7 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: `Pollinations image edit failed (HTTP ${response.status})`, detail: rawText.slice(0, 300) });
     }
 
-    // Phase 5: parse JSON in its own try/catch — a 200 response isn't guaranteed to be JSON.
+    // Phase 6: parse JSON in its own try/catch — a 200 response isn't guaranteed to be JSON.
     let data;
     try {
       data = JSON.parse(rawText);
@@ -115,7 +125,7 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Pollinations returned a non-JSON response', detail: rawText.slice(0, 300) });
     }
 
-    // Phase 6: extract the image URL — CreateImageResponse shape is { data: [{ url }] }.
+    // Phase 7: extract the image URL — CreateImageResponse shape is { data: [{ url }] }.
     const url = data?.data?.[0]?.url;
     if (!url) {
       console.error('[pollinations-image] phase=extract-url no data[0].url in body=', JSON.stringify(data).slice(0, 300));
