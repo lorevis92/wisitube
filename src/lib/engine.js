@@ -14,6 +14,21 @@ const ANIMATIONS = {
   static: () => ({ scale: 1.04, dx: 0, dy: 0 }),
 };
 
+// Mid-scene cut: the second half of every scene switches to a different move, picked so it never
+// reads as a continuation of the first half (e.g. zoom_in never pairs with zoom_out).
+const CUT_ANIMATION = {
+  zoom_in: 'pan_left',
+  zoom_out: 'drift_up',
+  pan_left: 'zoom_in',
+  pan_right: 'drift_up',
+  drift_up: 'pan_right',
+  static: 'zoom_in',
+};
+
+// Instant (not eased) scale bump applied for the whole second half, so the cut reads as a hard
+// edit — a tiny punch-in — rather than a smooth continuation of the first half's motion.
+const CUT_SCALE_BUMP = 1.015;
+
 function ease(p) {
   return p * p * (3 - 2 * p); // smoothstep
 }
@@ -36,38 +51,106 @@ function drawCover(ctx, img, W, H, scale, dx, dy) {
   ctx.drawImage(img, x, y, dw, dh);
 }
 
-function wrapLines(ctx, text, maxWidth) {
-  const words = String(text || '').split(/\s+/);
+// Wraps by word while keeping each word's original index, so the active word can be picked out
+// and re-positioned individually without reflowing the rest of the line.
+function wrapWordIndices(ctx, words, maxWidth) {
   const lines = [];
-  let line = '';
-  for (const w of words) {
-    const test = line ? line + ' ' + w : w;
-    if (ctx.measureText(test).width > maxWidth && line) {
-      lines.push(line);
-      line = w;
+  let current = [];
+  let currentText = '';
+  words.forEach((w, i) => {
+    const test = currentText ? currentText + ' ' + w : w;
+    if (ctx.measureText(test).width > maxWidth && currentText) {
+      lines.push(current);
+      current = [i];
+      currentText = w;
     } else {
-      line = test;
+      current.push(i);
+      currentText = test;
     }
-  }
-  if (line) lines.push(line);
+  });
+  if (current.length) lines.push(current);
   return lines;
 }
 
-function drawSubtitle(ctx, W, H, text) {
+// Splits the scene's duration across its words proportionally to word length — a reasonable
+// stand-in for real word-level audio timing without needing forced alignment.
+function computeWordTimings(words, duration) {
+  const weights = words.map((w) => Math.max(1, w.length));
+  const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
+  let acc = 0;
+  return words.map((w, i) => {
+    const start = (acc / totalWeight) * duration;
+    acc += weights[i];
+    const end = (acc / totalWeight) * duration;
+    return { start, end };
+  });
+}
+
+function easeOutBack(x) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+}
+
+// Pops in at 1.3x and settles to the 1.15x resting emphasis size within ~150ms, with a slight
+// elastic dip below 1.15x on the way there for a bit of energy.
+function wordPopScale(elapsedMs) {
+  const t = Math.min(1, Math.max(0, elapsedMs / 150));
+  return 1.15 + 0.15 * (1 - easeOutBack(t));
+}
+
+function drawSubtitle(ctx, W, H, text, localTime, duration) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  if (!words.length) return;
+
   const fontSize = Math.round(H * 0.038);
   ctx.font = `700 ${fontSize}px Syne, sans-serif`;
-  ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  const lines = wrapLines(ctx, text, W * 0.86).slice(0, 3);
+  ctx.lineWidth = Math.max(3, fontSize * 0.16);
+
+  const timings = computeWordTimings(words, duration);
+  const clampedTime = Math.min(Math.max(localTime, 0), duration);
+  let activeIdx = timings.findIndex((t) => clampedTime >= t.start && clampedTime < t.end);
+  if (activeIdx === -1 && clampedTime >= duration) activeIdx = words.length - 1;
+
+  const maxWidth = W * 0.86;
+  const lineGroups = wrapWordIndices(ctx, words, maxWidth).slice(0, 3);
+  const spaceWidth = ctx.measureText(' ').width;
   const lineH = fontSize * 1.28;
   const baseY = H - H * 0.055;
-  lines.forEach((ln, i) => {
-    const y = baseY - (lines.length - 1 - i) * lineH;
-    ctx.lineWidth = Math.max(3, fontSize * 0.16);
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-    ctx.strokeText(ln, W / 2, y);
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(ln, W / 2, y);
+
+  lineGroups.forEach((indices, li) => {
+    const y = baseY - (lineGroups.length - 1 - li) * lineH;
+    const widths = indices.map((i) => ctx.measureText(words[i]).width);
+    const totalWidth = widths.reduce((a, b) => a + b, 0) + spaceWidth * (indices.length - 1);
+    let x = W / 2 - totalWidth / 2;
+
+    ctx.textAlign = 'left';
+    indices.forEach((wordIdx, k) => {
+      const word = words[wordIdx];
+      const wWidth = widths[k];
+
+      if (wordIdx === activeIdx) {
+        const elapsedMs = Math.max(0, (clampedTime - timings[wordIdx].start) * 1000);
+        const scale = wordPopScale(elapsedMs);
+        const cx = x + wWidth / 2;
+        ctx.save();
+        ctx.translate(cx, y);
+        ctx.scale(scale, scale);
+        ctx.translate(-cx, -y);
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(word, x, y);
+        ctx.fillStyle = '#E8352A';
+        ctx.fillText(word, x, y);
+        ctx.restore();
+      } else {
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(word, x, y);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillText(word, x, y);
+      }
+      x += wWidth + spaceWidth;
+    });
   });
 }
 
@@ -139,9 +222,13 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
   const FADE = 0.35;
 
   function drawScene(item, p, alpha = 1) {
-    const tr = (ANIMATIONS[item.animation] || ANIMATIONS.zoom_in)(ease(p));
+    const isSecondHalf = p >= 0.5;
+    const animName = isSecondHalf ? CUT_ANIMATION[item.animation] || 'zoom_in' : item.animation;
+    const phaseP = isSecondHalf ? (p - 0.5) * 2 : p * 2; // each half plays its animation start-to-end
+    const tr = (ANIMATIONS[animName] || ANIMATIONS.zoom_in)(ease(Math.min(1, phaseP)));
+    const scale = isSecondHalf ? tr.scale * CUT_SCALE_BUMP : tr.scale;
     ctx.globalAlpha = alpha;
-    drawCover(ctx, item.img, W, H, tr.scale, tr.dx, tr.dy);
+    drawCover(ctx, item.img, W, H, scale, tr.dx, tr.dy);
     ctx.globalAlpha = 1;
   }
 
@@ -164,7 +251,7 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
     if (idx > 0 && local < FADE) {
       drawScene(items[idx - 1], 1, 1 - local / FADE);
     }
-    if (subtitles) drawSubtitle(ctx, W, H, it.narration);
+    if (subtitles) drawSubtitle(ctx, W, H, it.narration, local, it.duration);
 
     if (onProgress) onProgress(tt, total, idx);
 
