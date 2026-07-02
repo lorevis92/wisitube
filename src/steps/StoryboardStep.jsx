@@ -8,6 +8,11 @@ import { ANIMATION_LIST } from '../lib/engine';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
+// entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
+const isSceneReady = (s) =>
+  Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
+
 export default function StoryboardStep({ project, setProject, settings, onReady, isMobile }) {
   const [running, setRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
@@ -21,13 +26,23 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       scenes: p.scenes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
     }));
 
-  const fullPrompt = (scene) =>
-    `${scene.imagePrompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image`;
+  const updateImage = (sceneId, beatIndex, patch) =>
+    setProject((p) => ({
+      ...p,
+      scenes: p.scenes.map((s) =>
+        s.id === sceneId ? { ...s, images: s.images.map((im, i) => (i === beatIndex ? { ...im, ...patch } : im)) } : s
+      ),
+    }));
 
-  async function genImage(scene, newSeed = false) {
-    const seed = newSeed ? Math.floor(Math.random() * 999999) : scene.seed;
-    const url = buildImageUrl(fullPrompt(scene), { ...dims, seed });
-    updateScene(scene.id, { imageStatus: 'loading', seed });
+  const fullPrompt = (prompt) => `${prompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image`;
+
+  async function genImage(sceneId, beatIndex, newSeed = false) {
+    const scene = project.scenes.find((s) => s.id === sceneId);
+    if (!scene) return false;
+    const beat = scene.images[beatIndex];
+    const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
+    const url = buildImageUrl(fullPrompt(beat.prompt), { ...dims, seed });
+    updateImage(sceneId, beatIndex, { status: 'loading', seed });
     const startedAt = performance.now();
     try {
       await loadImage(url);
@@ -35,10 +50,10 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       const imageBlob = await (await fetch(url)).blob();
       const imageUrl = URL.createObjectURL(imageBlob);
       recordImageTime((performance.now() - startedAt) / 1000);
-      updateScene(scene.id, { imageStatus: 'ready', imageUrl, imageBlob });
+      updateImage(sceneId, beatIndex, { status: 'ready', url: imageUrl, blob: imageBlob });
       return true;
     } catch {
-      updateScene(scene.id, { imageStatus: 'error' });
+      updateImage(sceneId, beatIndex, { status: 'error' });
       return false;
     }
   }
@@ -74,22 +89,26 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     });
 
     try {
-      // Interleave image + voice per scene — Kokoro runs locally with no rate limit, so only the
-      // Pollinations image call needs spacing out.
+      // Per scene: voice first, then its two image beats — Kokoro is local (no rate limit), so
+      // only the Pollinations image calls need spacing out.
       let imageCallsMade = 0;
       for (let i = 0; i < scenes.length; i++) {
-        const scene = project.scenes.find((s) => s.id === scenes[i].id) || scenes[i];
-        if (scene.imageStatus !== 'ready') {
-          if (imageCallsMade > 0) await sleep(1500);
-          setProgressMsg(`Scene ${i + 1} of ${scenes.length}: image…`);
-          await genImage(scene);
-          imageCallsMade++;
+        let scene = project.scenes.find((s) => s.id === scenes[i].id) || scenes[i];
+
+        if (scene.audioStatus !== 'ready') {
+          setProgressMsg(`Scene ${i + 1} of ${scenes.length}: voice…`);
+          await genAudio(scene);
+          scene = project.scenes.find((s) => s.id === scenes[i].id) || scene;
         }
 
-        const sceneAfterImage = project.scenes.find((s) => s.id === scenes[i].id) || scene;
-        if (sceneAfterImage.audioStatus !== 'ready') {
-          setProgressMsg(`Scene ${i + 1} of ${scenes.length}: voice…`);
-          await genAudio(sceneAfterImage);
+        for (let b = 0; b < scene.images.length; b++) {
+          if (scene.images[b].status !== 'ready') {
+            if (imageCallsMade > 0) await sleep(1500);
+            setProgressMsg(`Scene ${i + 1} of ${scenes.length}: image ${b + 1}/${scene.images.length}…`);
+            await genImage(scene.id, b);
+            imageCallsMade++;
+            scene = project.scenes.find((s) => s.id === scenes[i].id) || scene;
+          }
         }
       }
     } finally {
@@ -101,7 +120,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     setRunning(false);
   }
 
-  const readyCount = project.scenes.filter((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready').length;
+  const readyCount = project.scenes.filter(isSceneReady).length;
   const allReady = readyCount === project.scenes.length;
   const totalSec = project.scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
   const remainingSeconds = useMemo(() => estimateRemainingSeconds(project.scenes, isModelWarm()), [project.scenes]);
@@ -211,33 +230,68 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                 Scene <span style={mono}>{String(i + 1).padStart(2, '0')}</span>
               </span>
               <span style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase' }}>
-                <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{statusDot(scene.imageStatus)} img</span>
+                {scene.images.map((im, b) => (
+                  <span key={im.id} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    {statusDot(im.status)} img{b + 1}
+                  </span>
+                ))}
                 <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{statusDot(scene.audioStatus, scene.audioStatus === 'error' ? scene.audioError : undefined)} voice</span>
                 {scene.audioDuration ? <span style={mono}>{scene.audioDuration.toFixed(1)}s</span> : null}
               </span>
             </div>
 
-            <div
-              style={{
-                marginTop: 10,
-                borderRadius: 4,
-                overflow: 'hidden',
-                border: `1px solid ${T.border}`,
-                background: T.surfaceAlt,
-                aspectRatio: settings.format === '9:16' ? '9/16' : '16/9',
-                maxHeight: settings.format === '9:16' ? 260 : undefined,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              {scene.imageStatus === 'ready' ? (
-                <img src={scene.imageUrl} alt={`Scene ${i + 1}`} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              ) : (
-                <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', animation: scene.imageStatus === 'loading' ? 'wisiPulse 1.2s infinite' : 'none' }}>
-                  {scene.imageStatus === 'loading' ? 'Drawing…' : scene.imageStatus === 'error' ? 'Failed — retry' : 'Not generated'}
-                </span>
-              )}
+            {/* Two image beats, side by side */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+              {scene.images.map((beat, b) => (
+                <div key={beat.id}>
+                  <div
+                    style={{
+                      borderRadius: 4,
+                      overflow: 'hidden',
+                      border: `1px solid ${T.border}`,
+                      background: T.surfaceAlt,
+                      aspectRatio: settings.format === '9:16' ? '9/16' : '16/9',
+                      maxHeight: settings.format === '9:16' ? 220 : undefined,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {beat.status === 'ready' ? (
+                      <img src={beat.url} alt={`Scene ${i + 1} · beat ${b + 1}`} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    ) : (
+                      <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', textAlign: 'center', padding: 4, animation: beat.status === 'loading' ? 'wisiPulse 1.2s infinite' : 'none' }}>
+                        {beat.status === 'loading' ? 'Drawing…' : beat.status === 'error' ? 'Failed — retry' : `Beat ${b + 1}`}
+                      </span>
+                    )}
+                  </div>
+
+                  <textarea
+                    value={beat.prompt}
+                    onChange={(e) => updateImage(scene.id, b, { prompt: e.target.value, status: 'idle' })}
+                    rows={2}
+                    style={{ ...inputStyle, marginTop: 6, fontSize: 10, color: T.textSecondary, resize: 'vertical' }}
+                    title={`Image prompt for beat ${b + 1} (English)`}
+                  />
+
+                  <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                    <button onClick={() => genImage(scene.id, b, true)} disabled={running} style={{ ...btnGhost, padding: '5px 8px', fontSize: 9 }}>
+                      ↻ Image
+                    </button>
+                    <select
+                      value={beat.animation}
+                      onChange={(e) => updateImage(scene.id, b, { animation: e.target.value })}
+                      style={{ ...inputStyle, width: 'auto', padding: '4px 6px', fontSize: 9, marginLeft: 'auto' }}
+                    >
+                      {ANIMATION_LIST.map((a) => (
+                        <option key={a} value={a}>
+                          {a.replace('_', ' ')}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              ))}
             </div>
 
             <textarea
@@ -246,18 +300,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               rows={2}
               style={{ ...inputStyle, marginTop: 10, fontSize: 12, resize: 'vertical' }}
             />
-            <textarea
-              value={scene.imagePrompt}
-              onChange={(e) => updateScene(scene.id, { imagePrompt: e.target.value, imageStatus: 'idle' })}
-              rows={2}
-              style={{ ...inputStyle, marginTop: 6, fontSize: 11, color: T.textSecondary, resize: 'vertical' }}
-              title="Image prompt (English)"
-            />
 
             <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-              <button onClick={() => genImage(scene, true)} disabled={running} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
-                ↻ Image
-              </button>
               <button onClick={() => genAudio(scene)} disabled={running} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
                 ↻ Voice
               </button>
@@ -266,17 +310,6 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                   ▶ Listen
                 </button>
               )}
-              <select
-                value={scene.animation}
-                onChange={(e) => updateScene(scene.id, { animation: e.target.value })}
-                style={{ ...inputStyle, width: 'auto', padding: '5px 8px', fontSize: 10, marginLeft: 'auto' }}
-              >
-                {ANIMATION_LIST.map((a) => (
-                  <option key={a} value={a}>
-                    {a.replace('_', ' ')}
-                  </option>
-                ))}
-              </select>
             </div>
           </div>
         ))}

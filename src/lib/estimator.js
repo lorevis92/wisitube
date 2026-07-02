@@ -3,6 +3,7 @@
 // vary a lot with the user's machine and network.
 
 const SCENE_COUNTS = { short: 10, medium: 16, long: 24 };
+const IMAGE_BEATS_PER_SCENE = 2;
 const MAX_SAMPLES = 20;
 const DEFAULT_IMAGE_S = 4;
 const DEFAULT_AUDIO_S = 7;
@@ -63,7 +64,7 @@ export function estimateTotalSeconds({ length, modelWarm }) {
   const sceneCount = estimateSceneCount(length);
   const avgImage = getAvgImageTime();
   const avgAudio = getAvgAudioTime();
-  return sceneCount * (avgImage + 1.5) + sceneCount * avgAudio + (modelWarm ? 0 : 90);
+  return sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5) + sceneCount * avgAudio + (modelWarm ? 0 : 90);
 }
 
 export function estimateRemainingSeconds(scenes, modelWarm) {
@@ -72,7 +73,10 @@ export function estimateRemainingSeconds(scenes, modelWarm) {
   let total = 0;
   let hasAudioToGenerate = false;
   for (const s of scenes || []) {
-    if (s.imageStatus !== 'ready') total += avgImage + 1.5;
+    const images = Array.isArray(s.images) ? s.images : [];
+    for (const im of images) {
+      if (im.status !== 'ready') total += avgImage + 1.5;
+    }
     if (s.audioStatus !== 'ready') {
       total += avgAudio;
       hasAudioToGenerate = true;

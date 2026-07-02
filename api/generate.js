@@ -39,8 +39,10 @@ JSON schema:
   "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator, one strong focal subject, exaggerated emotion, no text in image" }],
   "scenes": [exactly ${sceneCount} objects: {
     "narration": "what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}",
-    "image_prompt": "concrete visual description in English of ONE clear image illustrating this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.",
-    "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static"
+    "image_beats": [exactly 2 objects: {
+      "image_prompt": "concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.",
+      "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static"
+    }]
   }]
 }
 
@@ -48,7 +50,8 @@ Rules for scenes:
 - Scene 1 is the HOOK: open with the most surprising fact or question.
 - Build a clear arc: hook, development, payoff, and a final scene with a call to action (subscribe / watch next).
 - Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers.
-- Vary the animations; never use the same one twice in a row.
+- Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes.
+- Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles (e.g. narration "Rome conquered most of the known world, then collapsed in decades" → beat 1: the empire at its peak, beat 2: its ruins / the collapse). Never make the two beats the same image concept restated.
 - image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {

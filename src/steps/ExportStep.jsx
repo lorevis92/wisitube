@@ -33,11 +33,12 @@ export default function ExportStep({ project, settings, isMobile }) {
     try {
       const items = await Promise.all(
         scenes.map(async (s) => ({
-          img: await loadImage(s.imageUrl),
+          images: await Promise.all(
+            s.images.map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))
+          ),
           buffer: await decodeAudio(s.audioUrl),
           duration: (s.audioDuration || 0) + s.pad,
           narration: s.narration,
-          animation: s.animation,
         }))
       );
       const controller = await playTimeline({

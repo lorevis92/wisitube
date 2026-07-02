@@ -29,7 +29,7 @@ export default function ProjectsStep({ onResume, onNewProject, isMobile }) {
       setProjects(list);
       const urls = {};
       for (const p of list) {
-        const blob = p.scenes?.[0]?.imageBlob;
+        const blob = p.scenes?.[0]?.images?.[0]?.blob;
         if (blob) urls[p.id] = URL.createObjectURL(blob);
       }
       setThumbUrls(urls);
@@ -78,7 +78,7 @@ export default function ProjectsStep({ onResume, onNewProject, isMobile }) {
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
         {projects.map((p) => {
           const sceneCount = p.scenes?.length || 0;
-          const readyCount = p.scenes?.filter((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready').length || 0;
+          const readyCount = p.scenes?.filter((s) => s.images?.every((im) => im.status === 'ready') && s.audioStatus === 'ready').length || 0;
           const title = p.displayTitle || 'Untitled project';
           return (
             <div key={p.id} style={{ ...card, padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>

@@ -14,21 +14,6 @@ const ANIMATIONS = {
   static: () => ({ scale: 1.04, dx: 0, dy: 0 }),
 };
 
-// Mid-scene cut: the second half of every scene switches to a different move, picked so it never
-// reads as a continuation of the first half (e.g. zoom_in never pairs with zoom_out).
-const CUT_ANIMATION = {
-  zoom_in: 'pan_left',
-  zoom_out: 'drift_up',
-  pan_left: 'zoom_in',
-  pan_right: 'drift_up',
-  drift_up: 'pan_right',
-  static: 'zoom_in',
-};
-
-// Instant (not eased) scale bump applied for the whole second half, so the cut reads as a hard
-// edit — a tiny punch-in — rather than a smooth continuation of the first half's motion.
-const CUT_SCALE_BUMP = 1.015;
-
 function ease(p) {
   return p * p * (3 - 2 * p); // smoothstep
 }
@@ -163,8 +148,9 @@ export function pickMime() {
 }
 
 /**
- * items: [{ img: HTMLImageElement, buffer: AudioBuffer, duration: number, narration, animation }]
- * duration already includes any per-scene padding (>= buffer.duration).
+ * items: [{ images: [{img: HTMLImageElement, animation}, {img, animation}], buffer: AudioBuffer, duration: number, narration }]
+ * Each item's duration is split evenly between its two image beats, with a short crossfade at
+ * the midpoint. duration already includes any per-scene padding (>= buffer.duration).
  * Returns a controller: { stop(), total, blobPromise (only when record=true) }
  */
 export async function playTimeline({ canvas, items, subtitles = false, record = false, onProgress, onDone }) {
@@ -219,17 +205,28 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
     recorder.start(300);
   }
 
-  const FADE = 0.35;
+  const FADE = 0.35; // crossfade between scenes
+  const BEAT_FADE = 0.3; // shorter crossfade between a scene's two image beats
 
-  function drawScene(item, p, alpha = 1) {
-    const isSecondHalf = p >= 0.5;
-    const animName = isSecondHalf ? CUT_ANIMATION[item.animation] || 'zoom_in' : item.animation;
-    const phaseP = isSecondHalf ? (p - 0.5) * 2 : p * 2; // each half plays its animation start-to-end
-    const tr = (ANIMATIONS[animName] || ANIMATIONS.zoom_in)(ease(Math.min(1, phaseP)));
-    const scale = isSecondHalf ? tr.scale * CUT_SCALE_BUMP : tr.scale;
+  function drawBeat(beat, p, alpha) {
+    const tr = (ANIMATIONS[beat.animation] || ANIMATIONS.zoom_in)(ease(p));
     ctx.globalAlpha = alpha;
-    drawCover(ctx, item.img, W, H, scale, tr.dx, tr.dy);
+    drawCover(ctx, beat.img, W, H, tr.scale, tr.dx, tr.dy);
     ctx.globalAlpha = 1;
+  }
+
+  // local: seconds elapsed since this scene started (clamped to [0, item.duration] by the caller).
+  function drawScene(item, local, alpha = 1) {
+    const half = Math.max(0.0001, item.duration / 2);
+    const inSecondBeat = local >= half;
+    const beatLocal = inSecondBeat ? local - half : local;
+    const beatP = Math.min(1, Math.max(0, beatLocal / half));
+
+    drawBeat(item.images[inSecondBeat ? 1 : 0], beatP, alpha);
+    if (inSecondBeat && beatLocal < BEAT_FADE) {
+      // Cross-fade the outgoing beat 1's final frame out on top of the incoming beat 2.
+      drawBeat(item.images[0], 1, alpha * (1 - beatLocal / BEAT_FADE));
+    }
   }
 
   function frame() {
@@ -243,13 +240,13 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
     }
     const it = items[idx];
     const local = tt - starts[idx];
-    const p = Math.min(1, Math.max(0, local / it.duration));
 
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, W, H);
-    drawScene(it, p, 1);
+    drawScene(it, local, 1);
     if (idx > 0 && local < FADE) {
-      drawScene(items[idx - 1], 1, 1 - local / FADE);
+      const prev = items[idx - 1];
+      drawScene(prev, prev.duration, 1 - local / FADE);
     }
     if (subtitles) drawSubtitle(ctx, W, H, it.narration, local, it.duration);
 

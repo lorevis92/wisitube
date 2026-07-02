@@ -10,6 +10,12 @@ import { T, FONT } from './theme';
 import { createId, saveProject } from './lib/db';
 
 let sceneIdCounter = 1;
+let beatIdCounter = 1;
+
+// Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
+// entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
+const isSceneMediaReady = (s) =>
+  Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
 
 export default function App() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
@@ -69,19 +75,28 @@ export default function App() {
       tags: plan.tags || [],
       thumbnails: plan.thumbnail_concepts || [],
       subtitles: settings.format === '9:16',
-      scenes: (plan.scenes || []).map((s) => ({
-        id: sceneIdCounter++,
-        narration: s.narration || '',
-        imagePrompt: s.image_prompt || '',
-        animation: s.animation || 'zoom_in',
-        seed: Math.floor(Math.random() * 999999),
-        pad: 0.3,
-        imageStatus: 'idle',
-        imageUrl: '',
-        audioStatus: 'idle',
-        audioUrl: '',
-        audioDuration: 0,
-      })),
+      scenes: (plan.scenes || []).map((s) => {
+        const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
+        while (beats.length < 2) beats.push({});
+        return {
+          id: sceneIdCounter++,
+          narration: s.narration || '',
+          images: beats.map((b) => ({
+            id: beatIdCounter++,
+            prompt: b.image_prompt || '',
+            animation: b.animation || 'zoom_in',
+            seed: Math.floor(Math.random() * 999999),
+            status: 'idle',
+            url: '',
+            blob: null,
+          })),
+          pad: 0.3,
+          audioStatus: 'idle',
+          audioUrl: '',
+          audioBlob: null,
+          audioDuration: 0,
+        };
+      }),
     });
     setTab('storyboard');
   }
@@ -92,7 +107,10 @@ export default function App() {
     generationRef.current += 1;
     const scenes = (record.scenes || []).map((s) => ({
       ...s,
-      imageUrl: s.imageBlob ? URL.createObjectURL(s.imageBlob) : s.imageUrl,
+      images: (s.images || []).map((im) => ({
+        ...im,
+        url: im.blob ? URL.createObjectURL(im.blob) : im.url,
+      })),
       audioUrl: s.audioBlob ? URL.createObjectURL(s.audioBlob) : s.audioUrl,
     }));
     setSettings(record.settings || settings);
@@ -107,7 +125,7 @@ export default function App() {
     });
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
-    const hasAllMedia = scenes.length > 0 && scenes.every((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready');
+    const hasAllMedia = scenes.length > 0 && scenes.every(isSceneMediaReady);
     setTab(hasAllMedia ? 'editor' : 'storyboard');
   }
 
@@ -122,7 +140,7 @@ export default function App() {
   }
 
   const hasPlan = !!project;
-  const hasMedia = hasPlan && project.scenes.every((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready');
+  const hasMedia = hasPlan && project.scenes.every(isSceneMediaReady);
 
   const tabs = [
     { id: 'projects', label: 'Projects' },

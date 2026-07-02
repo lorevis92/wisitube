@@ -28,11 +28,12 @@ export default function EditorStep({ project, setProject, settings, onExport, is
     const slice = scenes.slice(fromIdx);
     return Promise.all(
       slice.map(async (s) => ({
-        img: await loadImage(s.imageUrl),
+        images: await Promise.all(
+          s.images.map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))
+        ),
         buffer: await decodeAudio(s.audioUrl),
         duration: (s.audioDuration || 0) + s.pad,
         narration: s.narration,
-        animation: s.animation,
       }))
     );
   }
@@ -71,6 +72,14 @@ export default function EditorStep({ project, setProject, settings, onExport, is
 
   const updateScene = (id, patch) =>
     setProject((p) => ({ ...p, scenes: p.scenes.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
+
+  const updateImage = (sceneId, beatIndex, patch) =>
+    setProject((p) => ({
+      ...p,
+      scenes: p.scenes.map((s) =>
+        s.id === sceneId ? { ...s, images: s.images.map((im, i) => (i === beatIndex ? { ...im, ...patch } : im)) } : s
+      ),
+    }));
 
   const move = (idx, dir) => {
     setProject((p) => {
@@ -166,7 +175,7 @@ export default function EditorStep({ project, setProject, settings, onExport, is
                   borderRight: `1px solid ${T.border}`,
                   outline: i === selected ? `2px solid ${T.primary}` : 'none',
                   outlineOffset: -2,
-                  backgroundImage: s.imageUrl ? `url(${s.imageUrl})` : 'none',
+                  backgroundImage: s.images?.[0]?.url ? `url(${s.images[0].url})` : 'none',
                   backgroundColor: T.surfaceAlt,
                   backgroundSize: 'cover',
                   backgroundPosition: 'center',
@@ -227,7 +236,7 @@ export default function EditorStep({ project, setProject, settings, onExport, is
                 </button>
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14, marginTop: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 14, marginTop: 12 }}>
               <div>
                 <div style={label}>Extra pause after voice: <span style={mono}>{sel.pad.toFixed(1)}s</span></div>
                 <input
@@ -240,16 +249,22 @@ export default function EditorStep({ project, setProject, settings, onExport, is
                   style={{ width: '100%', marginTop: 8 }}
                 />
               </div>
-              <div>
-                <div style={label}>Animation</div>
-                <select value={sel.animation} onChange={(e) => updateScene(sel.id, { animation: e.target.value })} style={{ ...inputStyle, marginTop: 8 }}>
-                  {ANIMATION_LIST.map((a) => (
-                    <option key={a} value={a}>
-                      {a.replace('_', ' ')}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {sel.images.map((beat, b) => (
+                <div key={beat.id}>
+                  <div style={label}>Beat {b + 1} animation</div>
+                  <select
+                    value={beat.animation}
+                    onChange={(e) => updateImage(sel.id, b, { animation: e.target.value })}
+                    style={{ ...inputStyle, marginTop: 8 }}
+                  >
+                    {ANIMATION_LIST.map((a) => (
+                      <option key={a} value={a}>
+                        {a.replace('_', ' ')}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
             </div>
           </div>
         )}
