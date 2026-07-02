@@ -18,7 +18,16 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
 
   try {
-    const { topic, language = 'English', length = 'short', format = '16:9', style = 'facestick', references } = req.body || {};
+    const {
+      topic,
+      language = 'English',
+      length = 'short',
+      format = '16:9',
+      style = 'facestick',
+      references,
+      character_hints: characterHints,
+      general_notes: generalNotes,
+    } = req.body || {};
     if (!topic || typeof topic !== 'string' || topic.length > 500) {
       return res.status(400).json({ error: 'Invalid topic' });
     }
@@ -33,6 +42,13 @@ export default async function handler(req, res) {
           .map((r) => ({ id: r.id, label: r.label.trim() }))
       : [];
 
+    const hints = Array.isArray(characterHints)
+      ? characterHints
+          .filter((c) => c && typeof c === 'object' && ((typeof c.name === 'string' && c.name.trim()) || (typeof c.details === 'string' && c.details.trim())))
+          .map((c) => ({ name: typeof c.name === 'string' ? c.name.trim() : '', details: typeof c.details === 'string' ? c.details.trim() : '' }))
+      : [];
+    const notes = typeof generalNotes === 'string' ? generalNotes.trim() : '';
+
     const referenceSection = refs.length
       ? `
 
@@ -43,6 +59,12 @@ For EVERY image beat where the main subject (the person these references depict)
 
 When reference_id is set, image_prompt MUST be an editing instruction, never a fresh description that ignores the photo: state explicitly to keep the subject's face, hairstyle and distinctive features from the reference photo, and describe ONLY what changes — in the exact form "keep the subject's face, hairstyle and distinctive features from the reference photo; change only: [scene/setting/action]". When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`
       : '';
+
+    const characterBibleSection = `
+
+Character bible: identify every character that appears in more than one scene — including the narrator/protagonist even if not explicitly named by the user. For well-known real figures, use your own knowledge of their actual appearance. If the user provided character hints in their message, prioritize those details over your own assumptions. Create at least 2 variants when the story spans different life stages, time periods, or notable appearance changes (e.g. young vs old, before/after a transformation) — otherwise a single variant is enough. Every variant must preserve the base_description's core identifying traits while adapting era-specific details, so the character stays recognizable across variants.
+
+For EVERY image beat where a character_bible character is visibly present — as the focal subject, in the background, or partially visible — character_id and variant_label are REQUIRED, same assertive logic as reference_id above: do NOT leave them null just because no variant is a perfect match, pick the closest one by that beat's narrative context. Only set character_id and variant_label to null when no character_bible character is genuinely depicted in that specific beat. If a beat has both a valid reference_id and a valid character_id for the same character, reference_id (a real photo) takes priority for the final image — character_id and variant_label are still saved as information regardless.`;
 
     const systemPrompt = `You are a YouTube strategist and scriptwriter for successful faceless animated channels.
 You create videos that hook viewers in the first 3 seconds and keep retention high with a clear narrative arc.
@@ -55,12 +77,15 @@ JSON schema:
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end",
   "tags": [15 short SEO tag strings],
   "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator, one strong focal subject, exaggerated emotion, no text in image" }],
+  "character_bible": [array of objects, one per recurring character: { "id": string, "name": string, "base_description": "distinctive traits that NEVER change: face shape, build, defining features — 1-2 sentences", "variants": [{ "label": "e.g. Young Napoleon, 1790s", "description": "traits specific to this era/stage: hair, clothing, age markers — 1-2 sentences" }] }],
   "scenes": [exactly ${sceneCount} objects: {
     "narration": "what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}",
     "image_beats": [exactly 2 objects: {
       "image_prompt": "concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.",
       "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
-      "reference_id": string | null
+      "reference_id": string | null,
+      "character_id": string | null,
+      "variant_label": string | null
     }]
   }]
 }
@@ -72,7 +97,7 @@ Rules for scenes:
 - Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes.
 - Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles (e.g. narration "Rome conquered most of the known world, then collapsed in decades" → beat 1: the empire at its peak, beat 2: its ruins / the collapse). Never make the two beats the same image concept restated.
 - image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.
-- If no reference photos are listed below, always set reference_id to null.${referenceSection}`;
+- If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterBibleSection}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -83,12 +108,18 @@ Rules for scenes:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
+        max_tokens: 6000,
         system: systemPrompt,
         messages: [
           {
             role: 'user',
-            content: `Create the complete faceless video plan for this topic: "${topic}". Visual style of the channel: ${style}. Video length: ${length}. Respond with JSON only.`,
+            content: `Create the complete faceless video plan for this topic: "${topic}". Visual style of the channel: ${style}. Video length: ${length}.${
+              hints.length
+                ? `\n\nKnown characters (use these details, prioritize them over your own assumptions):\n${hints
+                    .map((h) => `- ${h.name || 'Unnamed character'}: ${h.details || '(no physical details given — infer if well-known, otherwise use your judgment)'}`)
+                    .join('\n')}`
+                : ''
+            }${notes ? `\n\nGeneral notes on tone, setting and recurring elements: ${notes}` : ''} Respond with JSON only.`,
           },
         ],
       }),

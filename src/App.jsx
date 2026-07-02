@@ -28,6 +28,8 @@ export default function App() {
     format: '16:9',
     language: 'English',
     references: [],
+    characterHints: [],
+    generalNotes: '',
   });
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
@@ -85,6 +87,13 @@ export default function App() {
       thumbnails: plan.thumbnail_concepts || [],
       subtitles: settings.format === '9:16',
       references,
+      // Text-only, no Blobs involved — survives IndexedDB round-trips with a plain passthrough.
+      characterBible: (plan.character_bible || []).map((c) => ({
+        id: c.id || crypto.randomUUID(),
+        name: c.name || '',
+        baseDescription: c.base_description || '',
+        variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
+      })),
       scenes: (plan.scenes || []).map((s) => {
         const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
         while (beats.length < 2) beats.push({});
@@ -96,6 +105,8 @@ export default function App() {
             prompt: b.image_prompt || '',
             animation: b.animation || 'zoom_in',
             referenceId: b.reference_id || null,
+            characterId: b.character_id || null,
+            variantLabel: b.variant_label || null,
             seed: Math.floor(Math.random() * 999999),
             status: 'idle',
             url: '',
@@ -133,6 +144,7 @@ export default function App() {
       thumbnails: record.thumbnails || [],
       subtitles: !!record.subtitles,
       references: record.references || [],
+      characterBible: record.characterBible || [],
       scenes,
     });
     setProjectId(record.id);

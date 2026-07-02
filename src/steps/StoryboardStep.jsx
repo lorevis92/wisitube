@@ -34,7 +34,41 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       ),
     }));
 
-  const fullPrompt = (prompt) => `${prompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image`;
+  const updateCharacter = (id, patch) =>
+    setProject((p) => ({
+      ...p,
+      characterBible: (p.characterBible || []).map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    }));
+
+  const updateVariant = (charId, variantIdx, patch) =>
+    setProject((p) => ({
+      ...p,
+      characterBible: (p.characterBible || []).map((c) =>
+        c.id === charId ? { ...c, variants: c.variants.map((v, i) => (i === variantIdx ? { ...v, ...patch } : v)) } : c
+      ),
+    }));
+
+  const addVariant = (charId) =>
+    setProject((p) => ({
+      ...p,
+      characterBible: (p.characterBible || []).map((c) =>
+        c.id === charId ? { ...c, variants: [...(c.variants || []), { label: '', description: '' }] } : c
+      ),
+    }));
+
+  // Reference photos (a real face) always win over the text-only character bible for the same
+  // beat — the bible's traits are prepended only when there's no active photo anchoring this beat.
+  function fullPrompt(beat) {
+    const hasReference = !!(beat.referenceId && (project.references || []).some((r) => r.id === beat.referenceId));
+    let basePrompt = beat.prompt;
+    if (beat.characterId && !hasReference) {
+      const character = (project.characterBible || []).find((c) => c.id === beat.characterId);
+      const variant = character && (character.variants || []).find((v) => v.label === beat.variantLabel);
+      const traits = [character?.baseDescription, variant?.description].filter(Boolean).join(' ');
+      if (traits) basePrompt = `Depict this character with these exact traits: ${traits}. Scene: ${beat.prompt}`;
+    }
+    return `${basePrompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image`;
+  }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {
     const scene = project.scenes.find((s) => s.id === sceneId);
@@ -46,8 +80,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     const startedAt = performance.now();
     try {
       const url = reference
-        ? await generateWithReference(fullPrompt(beat.prompt), reference.file, dims)
-        : buildImageUrl(fullPrompt(beat.prompt), { ...dims, seed });
+        ? await generateWithReference(fullPrompt(beat), reference.file, dims)
+        : buildImageUrl(fullPrompt(beat), { ...dims, seed });
       await loadImage(url);
       // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
       const imageBlob = await (await fetch(url)).blob();
@@ -194,6 +228,48 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         </div>
       </div>
 
+      {/* Character bible — text-based visual consistency, no photo required */}
+      {(project.characterBible || []).length > 0 && (
+        <div style={card}>
+          <div style={label}>Characters</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 12 }}>
+            {project.characterBible.map((c) => (
+              <div key={c.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: FONT.ui, marginBottom: 8 }}>{c.name}</div>
+                <textarea
+                  value={c.baseDescription}
+                  onChange={(e) => updateCharacter(c.id, { baseDescription: e.target.value })}
+                  rows={2}
+                  style={{ ...inputStyle, fontSize: 12, resize: 'vertical' }}
+                  title="Traits that never change across variants"
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                  {(c.variants || []).map((v, vi) => (
+                    <div key={vi} style={{ display: 'flex', gap: 8, flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
+                      <input
+                        value={v.label}
+                        onChange={(e) => updateVariant(c.id, vi, { label: e.target.value })}
+                        placeholder="e.g. Young Napoleon, 1790s"
+                        style={{ ...inputStyle, fontSize: 12, flex: isMobile ? '1 1 100%' : '0 0 180px' }}
+                      />
+                      <textarea
+                        value={v.description}
+                        onChange={(e) => updateVariant(c.id, vi, { description: e.target.value })}
+                        rows={1}
+                        style={{ ...inputStyle, fontSize: 12, flex: 1, resize: 'vertical' }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <button onClick={() => addVariant(c.id)} style={{ ...btnGhost, padding: '5px 10px', fontSize: 9, marginTop: 8 }}>
+                  + Add variant
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Generation control */}
       <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
@@ -248,19 +324,49 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               {scene.images.map((beat, b) => {
                 return (
                   <div key={beat.id}>
-                    <select
-                      value={beat.referenceId || ''}
-                      onChange={(e) => updateImage(scene.id, b, { referenceId: e.target.value || null, status: 'idle' })}
-                      style={{ ...inputStyle, width: '100%', padding: '4px 6px', fontSize: 9, marginBottom: 6 }}
-                      title="Reference photo to anchor this beat to"
-                    >
-                      <option value="">— No reference —</option>
-                      {(project.references || []).map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {r.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                      <select
+                        value={beat.referenceId || ''}
+                        onChange={(e) => updateImage(scene.id, b, { referenceId: e.target.value || null, status: 'idle' })}
+                        style={{ ...inputStyle, flex: 1, padding: '4px 6px', fontSize: 9 }}
+                        title="Reference photo to anchor this beat to"
+                      >
+                        <option value="">— No reference —</option>
+                        {(project.references || []).map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.label}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={beat.characterId ? `${beat.characterId}::${beat.variantLabel || ''}` : ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (!v) {
+                            updateImage(scene.id, b, { characterId: null, variantLabel: null, status: 'idle' });
+                            return;
+                          }
+                          const sep = v.indexOf('::');
+                          updateImage(scene.id, b, {
+                            characterId: v.slice(0, sep),
+                            variantLabel: v.slice(sep + 2) || null,
+                            status: 'idle',
+                          });
+                        }}
+                        style={{ ...inputStyle, flex: 1, padding: '4px 6px', fontSize: 9 }}
+                        title="Character bible entry to anchor this beat to"
+                      >
+                        <option value="">— None —</option>
+                        {(project.characterBible || []).flatMap((c) =>
+                          (c.variants && c.variants.length ? c.variants : [{ label: '' }]).map((v, vi) => (
+                            <option key={`${c.id}-${vi}`} value={`${c.id}::${v.label || ''}`}>
+                              {c.name}
+                              {v.label ? ` — ${v.label}` : ''}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
                     <div
                       style={{
                         position: 'relative',

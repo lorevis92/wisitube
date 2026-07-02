@@ -23,6 +23,9 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
   const fileInputRef = useRef(null);
 
   const references = settings.references || [];
+  const characterHints = settings.characterHints || [];
+  const mainCharacter = characterHints[0] || { name: '', details: '' };
+  const otherCharacters = characterHints.slice(1);
 
   const set = (k, v) => setSettings((s) => ({ ...s, [k]: v }));
 
@@ -34,6 +37,35 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
 
   const removeReference = (id) =>
     setSettings((s) => ({ ...s, references: (s.references || []).filter((r) => r.id !== id) }));
+
+  const updateMainCharacter = (patch) =>
+    setSettings((s) => {
+      const hints = [...(s.characterHints || [])];
+      hints[0] = { ...(hints[0] || { name: '', details: '' }), ...patch };
+      return { ...s, characterHints: hints };
+    });
+
+  const updateOtherCharacter = (idx, patch) =>
+    setSettings((s) => {
+      const hints = [...(s.characterHints || [])];
+      hints[idx + 1] = { ...(hints[idx + 1] || { name: '', details: '' }), ...patch };
+      return { ...s, characterHints: hints };
+    });
+
+  const addOtherCharacter = () =>
+    setSettings((s) => {
+      const hints = [...(s.characterHints || [])];
+      if (hints.length < 1) hints.push({ name: '', details: '' });
+      hints.push({ name: '', details: '' });
+      return { ...s, characterHints: hints };
+    });
+
+  const removeOtherCharacter = (idx) =>
+    setSettings((s) => {
+      const hints = [...(s.characterHints || [])];
+      hints.splice(idx + 1, 1);
+      return { ...s, characterHints: hints };
+    });
 
   function handleReferenceFile(e) {
     const file = e.target.files?.[0];
@@ -82,6 +114,10 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           format: settings.format,
           style: STYLES[settings.style].label,
           references: references.filter((r) => r.label.trim()).map((r) => ({ id: r.id, label: r.label })),
+          character_hints: characterHints
+            .filter((c) => c && (c.name?.trim() || c.details?.trim()))
+            .map((c) => ({ name: (c.name || '').trim(), details: (c.details || '').trim() })),
+          general_notes: (settings.generalNotes || '').trim(),
         }),
       });
       const data = await res.json();
@@ -182,6 +218,79 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
                 </option>
               ))}
             </select>
+          </div>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 16 }}>
+          <div style={label}>Video details (optional)</div>
+          <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 14px', fontFamily: FONT.ui }}>
+            Help Claude keep characters and tone consistent across scenes — everything here is optional, leave it
+            blank to let it improvise.
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>
+              Main character
+            </div>
+            <input
+              value={mainCharacter.name}
+              onChange={(e) => updateMainCharacter({ name: e.target.value })}
+              placeholder="Name, e.g. Napoleon Bonaparte"
+              style={{ ...inputStyle, marginBottom: 6 }}
+            />
+            <textarea
+              value={mainCharacter.details}
+              onChange={(e) => updateMainCharacter({ details: e.target.value })}
+              placeholder="Physical details (optional — leave blank and Claude will infer them for well-known figures)"
+              rows={2}
+              style={{ ...inputStyle, resize: 'vertical' }}
+            />
+          </div>
+
+          <div style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>
+            Other key characters
+          </div>
+          {otherCharacters.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10 }}>
+              {otherCharacters.map((c, idx) => (
+                <div key={idx} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                    <input
+                      value={c.name}
+                      onChange={(e) => updateOtherCharacter(idx, { name: e.target.value })}
+                      placeholder="Name"
+                      style={{ ...inputStyle, flex: 1 }}
+                    />
+                    <button onClick={() => removeOtherCharacter(idx)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                      ✕
+                    </button>
+                  </div>
+                  <textarea
+                    value={c.details}
+                    onChange={(e) => updateOtherCharacter(idx, { details: e.target.value })}
+                    placeholder="Physical details (optional — leave blank and Claude will infer them for well-known figures)"
+                    rows={2}
+                    style={{ ...inputStyle, resize: 'vertical' }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+          <button onClick={addOtherCharacter} style={btnGhost}>
+            + Add character
+          </button>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>
+              General notes
+            </div>
+            <textarea
+              value={settings.generalNotes || ''}
+              onChange={(e) => set('generalNotes', e.target.value)}
+              placeholder="Tone, setting, recurring objects or motifs…"
+              rows={2}
+              style={{ ...inputStyle, resize: 'vertical' }}
+            />
           </div>
         </div>
 
