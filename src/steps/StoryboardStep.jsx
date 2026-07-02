@@ -5,6 +5,7 @@ import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
 import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
 import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
 import { ANIMATION_LIST } from '../lib/engine';
+import ImageLightbox from '../components/ImageLightbox';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -17,6 +18,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const [running, setRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [showSeo, setShowSeo] = useState(false);
+  const [lightbox, setLightbox] = useState(null);
 
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
 
@@ -67,7 +69,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       const traits = [character?.baseDescription, variant?.description].filter(Boolean).join(' ');
       if (traits) basePrompt = `Depict this character with these exact traits: ${traits}. Scene: ${beat.prompt}`;
     }
-    return `${basePrompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image`;
+    return `${basePrompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image, anatomically correct, single coherent figure, correct number of limbs and fingers`;
   }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {
@@ -382,7 +384,14 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                       }}
                     >
                       {beat.status === 'ready' ? (
-                        <img src={beat.url} alt={`Scene ${i + 1} · beat ${b + 1}`} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        <img
+                          src={beat.url}
+                          alt={`Scene ${i + 1} · beat ${b + 1}`}
+                          crossOrigin="anonymous"
+                          className="wisi-lightbox-trigger"
+                          onClick={() => setLightbox({ url: beat.url, alt: `Scene ${i + 1} · beat ${b + 1}` })}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
                       ) : (
                         <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', textAlign: 'center', padding: 4, animation: beat.status === 'loading' ? 'wisiPulse 1.2s infinite' : 'none' }}>
                           {beat.status === 'loading' ? 'Drawing…' : beat.status === 'error' ? 'Failed — retry' : `Beat ${b + 1}`}
@@ -393,8 +402,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                     <textarea
                       value={beat.prompt}
                       onChange={(e) => updateImage(scene.id, b, { prompt: e.target.value, status: 'idle' })}
-                      rows={2}
-                      style={{ ...inputStyle, marginTop: 6, fontSize: 10, color: T.textSecondary, resize: 'vertical' }}
+                      rows={3}
+                      style={{ ...inputStyle, marginTop: 6, fontSize: 14, lineHeight: 1.5, minHeight: 80, color: T.textSecondary, resize: 'vertical' }}
                       title={`Image prompt for beat ${b + 1} (English)`}
                     />
 
@@ -422,8 +431,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             <textarea
               value={scene.narration}
               onChange={(e) => updateScene(scene.id, { narration: e.target.value, audioStatus: 'idle', audioDuration: 0 })}
-              rows={2}
-              style={{ ...inputStyle, marginTop: 10, fontSize: 12, resize: 'vertical' }}
+              rows={3}
+              style={{ ...inputStyle, marginTop: 10, fontSize: 14, lineHeight: 1.5, minHeight: 80, resize: 'vertical' }}
             />
 
             <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
@@ -439,6 +448,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
           </div>
         ))}
       </div>
+
+      {lightbox && <ImageLightbox src={lightbox.url} alt={lightbox.alt} onClose={() => setLightbox(null)} />}
     </div>
   );
 }
