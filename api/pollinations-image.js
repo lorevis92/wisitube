@@ -48,6 +48,7 @@ export default async function handler(req, res) {
     // Phase 2: call Pollinations.
     let response;
     try {
+      console.log('[proxy] outgoing request URL:', target);
       response = await fetch(target, { headers: { Authorization: `Bearer ${apiKey}` } });
     } catch (err) {
       console.error('[pollinations-image] phase=fetch-pollinations', err?.message, err?.stack);

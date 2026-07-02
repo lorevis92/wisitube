@@ -64,7 +64,9 @@ export default async function handler(req, res) {
       const blob = new Blob([buffer], { type: uploaded.mimetype || 'application/octet-stream' });
       const forward = new FormData();
       forward.append('file', blob, uploaded.originalFilename || 'reference.jpg');
-      response = await fetch('https://gen.pollinations.ai/upload', {
+      const targetUrl = 'https://gen.pollinations.ai/upload';
+      console.log('[proxy] outgoing request URL:', targetUrl);
+      response = await fetch(targetUrl, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}` },
         body: forward,
