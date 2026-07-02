@@ -125,11 +125,18 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Pollinations returned a non-JSON response', detail: rawText.slice(0, 300) });
     }
 
-    // Phase 7: extract the image URL — CreateImageResponse shape is { data: [{ url }] }.
-    const url = data?.data?.[0]?.url;
+    // Phase 7: extract the image — CreateImageResponse shape is { data: [{ url }] } in theory, but
+    // Pollinations' /v1/images/edits ignores response_format=url and always returns { b64_json }
+    // instead. Rather than re-uploading that base64 to Pollinations' own /upload endpoint (the
+    // same one that was unreliable enough to drop entirely a few weeks ago) for a second, fragile
+    // network hop, hand the client a data: URL directly — it works identically to a remote URL
+    // everywhere the app uses one (<img src>, crossOrigin, fetch().blob()), no second request needed.
+    const remoteUrl = data?.data?.[0]?.url;
+    const b64 = data?.data?.[0]?.b64_json;
+    const url = remoteUrl || (b64 ? `data:image/jpeg;base64,${b64}` : null);
     if (!url) {
-      console.error('[pollinations-image] phase=extract-url no data[0].url in body=', JSON.stringify(data).slice(0, 300));
-      return res.status(502).json({ error: 'Image edit succeeded but returned no image URL' });
+      console.error('[pollinations-image] phase=extract-url no data[0].url or b64_json in body=', JSON.stringify(data).slice(0, 300));
+      return res.status(502).json({ error: 'Image edit succeeded but returned no image data' });
     }
 
     return res.status(200).json({ url });
