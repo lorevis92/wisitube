@@ -11,6 +11,8 @@ const LENGTHS = [
 
 const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
 
+const LENGTH_ETA = { short: '~20 seconds', medium: '~30 seconds', long: '~45 seconds' };
+
 export default function CreateStep({ settings, setSettings, onPlan, isMobile }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -199,8 +201,27 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
         {loading ? 'Writing script, titles & storyboard…' : 'Generate video plan →'}
       </button>
       {loading && (
-        <div style={{ fontSize: 12, color: T.textMuted, textAlign: 'center', fontFamily: FONT.ui, animation: 'wisiPulse 1.6s infinite' }}>
-          Claude is writing your hook, scenes and SEO pack — about 20 seconds
+        <div style={{ ...card, textAlign: 'center', padding: 20 }}>
+          <div style={{ position: 'relative', height: 4, borderRadius: 2, background: T.surfaceAlt, overflow: 'hidden' }}>
+            <div
+              style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                width: '30%',
+                borderRadius: 2,
+                background: T.primary,
+                animation: 'wisiIndeterminate 1.3s ease-in-out infinite',
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: FONT.ui, fontWeight: 700, marginTop: 14 }}>
+            Claude is writing your script, titles and storyboard…
+          </div>
+          <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>{LENGTH_ETA[settings.length] || '~30 seconds'}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 12, lineHeight: 1.5 }}>
+            Once ready, you can leave this tab — image and voice generation will continue automatically until your video is done.
+          </div>
         </div>
       )}
     </div>

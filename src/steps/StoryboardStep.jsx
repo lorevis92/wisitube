@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, buildImageUrl, loadImage, decodeAudio } from '../lib/pollinations';
 import { generateSpeech, onLoadProgress } from '../lib/tts';
+import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
 import { ANIMATION_LIST } from '../lib/engine';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -55,6 +56,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
   async function generateAll() {
     setRunning(true);
+    await acquireWakeLock();
     const scenes = project.scenes;
 
     const unsubscribe = onLoadProgress((info) => {
@@ -63,10 +65,10 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       }
     });
 
-    // Interleave image + voice per scene — Kokoro runs locally with no rate limit, so only the
-    // Pollinations image call needs spacing out.
-    let imageCallsMade = 0;
     try {
+      // Interleave image + voice per scene — Kokoro runs locally with no rate limit, so only the
+      // Pollinations image call needs spacing out.
+      let imageCallsMade = 0;
       for (let i = 0; i < scenes.length; i++) {
         const scene = project.scenes.find((s) => s.id === scenes[i].id) || scenes[i];
         if (scene.imageStatus !== 'ready') {
@@ -84,6 +86,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       }
     } finally {
       unsubscribe();
+      await releaseWakeLock();
     }
 
     setProgressMsg('');
@@ -169,6 +172,11 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             {totalSec > 0 && ` · ~${Math.round(totalSec)}s of video`}
             {progressMsg && ` · ${progressMsg}`}
           </div>
+          {running && (
+            <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>
+              🔒 Keeping your screen awake while generating
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={generateAll} disabled={running || allReady} style={{ ...btnPrimary, opacity: running || allReady ? 0.6 : 1 }}>

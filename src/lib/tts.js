@@ -1,5 +1,6 @@
 // Kokoro TTS — free, unlimited, in-browser text-to-speech (ONNX model runs locally).
-// The model (~90MB) is downloaded once and cached by the browser.
+// The model (~90MB) is downloaded once and cached by the browser. Inference runs in a Web
+// Worker (see tts.worker.js) so the UI thread never freezes during load or generation.
 
 export const KOKORO_VOICES = {
   'English US': [
@@ -31,38 +32,38 @@ function emitProgress(info) {
   for (const cb of progressListeners) cb(info);
 }
 
-let ttsPromise = null;
+let worker = null;
+let reqId = 0;
+const pending = new Map(); // id -> { resolve, reject }
 
-function loadTTS() {
-  if (!ttsPromise) {
-    ttsPromise = (async () => {
-      const { KokoroTTS } = await import('kokoro-js');
-      // Always use the WASM backend, even when navigator.gpu is available. onnxruntime's WebGPU
-      // backend has been observed to crash the GPU driver on Windows (DXGI_ERROR_DEVICE_HUNG) —
-      // this is a stability tradeoff, not a performance choice.
-      return KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
-        dtype: 'q8',
-        device: 'wasm',
-        progress_callback: (info) => emitProgress(info),
-      });
-    })();
+function getWorker() {
+  if (!worker) {
+    worker = new Worker(new URL('./tts.worker.js', import.meta.url), { type: 'module' });
+    worker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'progress') {
+        emitProgress(msg);
+      } else if (msg.type === 'result') {
+        pending.get(msg.id)?.resolve(msg.blob);
+        pending.delete(msg.id);
+      } else if (msg.type === 'error') {
+        if (msg.id != null && pending.has(msg.id)) {
+          pending.get(msg.id).reject(new Error(msg.message));
+          pending.delete(msg.id);
+        }
+      }
+    };
+    worker.postMessage({ type: 'load' });
   }
-  return ttsPromise;
+  return worker;
 }
 
-// Serialize generations — WASM runs single-threaded, so overlapping calls would just queue anyway.
-let queue = Promise.resolve();
-
+// Generations are queued inside the worker itself (WASM must run one inference at a time) —
+// this just tracks each in-flight request by id so its result finds its way back here.
 export function generateSpeech(text, voice) {
-  const run = async () => {
-    const tts = await loadTTS();
-    const audio = await tts.generate(text, { voice });
-    return audio.toBlob();
-  };
-  const result = queue.then(run);
-  queue = result.then(
-    () => {},
-    () => {}
-  );
-  return result;
+  return new Promise((resolve, reject) => {
+    const id = ++reqId;
+    pending.set(id, { resolve, reject });
+    getWorker().postMessage({ type: 'generate', id, text, voice });
+  });
 }
