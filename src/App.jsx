@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Navbar from './components/Navbar';
 import Footer from './components/Footer';
 import ProjectsStep from './steps/ProjectsStep';
@@ -25,6 +25,11 @@ export default function App() {
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
   const [createdAt, setCreatedAt] = useState(null);
+  // Bumped every time the open project is switched (new/resume/reset) so a debounced save
+  // scheduled for the *previous* project can detect it's stale and refuse to write, even if the
+  // effect-cleanup cancellation below ever fails to fire in time (e.g. a future refactor drops a
+  // dependency from the array below — there's no exhaustive-deps lint in this project to catch it).
+  const generationRef = useRef(0);
 
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 760);
@@ -35,7 +40,9 @@ export default function App() {
   // Autosave the open project to IndexedDB, debounced so fast edits don't hammer the store.
   useEffect(() => {
     if (!project || !projectId) return;
+    const generation = generationRef.current;
     const timer = setTimeout(() => {
+      if (generationRef.current !== generation) return; // a different project took over — discard
       saveProject({
         id: projectId,
         createdAt: createdAt || Date.now(),
@@ -49,6 +56,7 @@ export default function App() {
   }, [project, settings, projectId, createdAt]);
 
   function handlePlan(plan) {
+    generationRef.current += 1;
     setProjectId(createId());
     setCreatedAt(Date.now());
     setProject({
@@ -78,6 +86,7 @@ export default function App() {
   // Resume a project loaded from IndexedDB — object URLs never survive a reload, so they're
   // rebuilt here from the stored Blobs before the project goes into state.
   function handleResume(record) {
+    generationRef.current += 1;
     const scenes = (record.scenes || []).map((s) => ({
       ...s,
       imageUrl: s.imageBlob ? URL.createObjectURL(s.imageBlob) : s.imageUrl,
@@ -101,6 +110,7 @@ export default function App() {
 
   // Explicit reset so opening the Create tab from Projects never silently overwrites the open project.
   function startNewProject() {
+    generationRef.current += 1;
     setProject(null);
     setProjectId(null);
     setCreatedAt(null);
