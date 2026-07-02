@@ -246,9 +246,21 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             {/* Two image beats, side by side */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
               {scene.images.map((beat, b) => {
-                const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
                 return (
                   <div key={beat.id}>
+                    <select
+                      value={beat.referenceId || ''}
+                      onChange={(e) => updateImage(scene.id, b, { referenceId: e.target.value || null, status: 'idle' })}
+                      style={{ ...inputStyle, width: '100%', padding: '4px 6px', fontSize: 9, marginBottom: 6 }}
+                      title="Reference photo to anchor this beat to"
+                    >
+                      <option value="">— No reference —</option>
+                      {(project.references || []).map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
                     <div
                       style={{
                         position: 'relative',
@@ -263,31 +275,6 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                         justifyContent: 'center',
                       }}
                     >
-                      {reference && (
-                        <span
-                          title={`Anchored to reference photo: ${reference.label}`}
-                          style={{
-                            position: 'absolute',
-                            top: 4,
-                            left: 4,
-                            zIndex: 1,
-                            fontSize: 9,
-                            fontFamily: FONT.ui,
-                            fontWeight: 700,
-                            textTransform: 'none',
-                            color: '#FFFFFF',
-                            background: 'rgba(0,0,0,0.65)',
-                            borderRadius: 3,
-                            padding: '2px 6px',
-                            maxWidth: 'calc(100% - 8px)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          📷 using: {reference.label}
-                        </span>
-                      )}
                       {beat.status === 'ready' ? (
                         <img src={beat.url} alt={`Scene ${i + 1} · beat ${b + 1}`} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       ) : (
