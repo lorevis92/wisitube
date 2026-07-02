@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, buildImageUrl, buildKontextImageUrl, loadImage, decodeAudio } from '../lib/pollinations';
+import { STYLES, buildImageUrl, generateWithReference, loadImage, decodeAudio } from '../lib/pollinations';
 import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
 import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
 import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
@@ -42,12 +42,12 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     const beat = scene.images[beatIndex];
     const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
     const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
-    const url = reference
-      ? buildKontextImageUrl(fullPrompt(beat.prompt), reference.uploadedUrl, { ...dims, seed })
-      : buildImageUrl(fullPrompt(beat.prompt), { ...dims, seed });
     updateImage(sceneId, beatIndex, { status: 'loading', seed });
     const startedAt = performance.now();
     try {
+      const url = reference
+        ? await generateWithReference(fullPrompt(beat.prompt), reference.file, dims)
+        : buildImageUrl(fullPrompt(beat.prompt), { ...dims, seed });
       await loadImage(url);
       // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
       const imageBlob = await (await fetch(url)).blob();

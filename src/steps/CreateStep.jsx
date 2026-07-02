@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, getPolliToken, setPolliToken, uploadReferenceImage } from '../lib/pollinations';
+import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
 import { KOKORO_VOICES, generateSpeech, isModelWarm } from '../lib/tts';
 import { estimateTotalSeconds } from '../lib/estimator';
 import FullScreenLoader from '../components/FullScreenLoader';
@@ -35,16 +35,6 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
   const removeReference = (id) =>
     setSettings((s) => ({ ...s, references: (s.references || []).filter((r) => r.id !== id) }));
 
-  async function uploadReference(id, file) {
-    updateReference(id, { uploading: true, error: null });
-    try {
-      const uploadedUrl = await uploadReferenceImage(file);
-      updateReference(id, { uploading: false, uploadedUrl, error: null });
-    } catch (e) {
-      updateReference(id, { uploading: false, error: e?.message || String(e) });
-    }
-  }
-
   function handleReferenceFile(e) {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow picking the same file again later
@@ -54,12 +44,8 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
       label: '',
       file,
       previewUrl: URL.createObjectURL(file),
-      uploadedUrl: null,
-      uploading: false,
-      error: null,
     };
     setSettings((s) => ({ ...s, references: [...(s.references || []), ref] }));
-    uploadReference(ref.id, file);
   }
 
   async function testVoice() {
@@ -83,12 +69,7 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
       setError('Enter a topic first.');
       return;
     }
-    const pendingRefs = references.some((r) => r.uploading || r.error);
-    setError(
-      pendingRefs
-        ? 'Some reference photos are still uploading or failed — those will be skipped for now (their beats will render without a reference).'
-        : ''
-    );
+    setError('');
     setLoading(true);
     try {
       const res = await fetch('/api/generate', {
@@ -100,7 +81,7 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           length: settings.length,
           format: settings.format,
           style: STYLES[settings.style].label,
-          references: references.filter((r) => r.uploadedUrl).map((r) => ({ id: r.id, label: r.label })),
+          references: references.filter((r) => r.label.trim()).map((r) => ({ id: r.id, label: r.label })),
         }),
       });
       const data = await res.json();
@@ -208,8 +189,8 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           <div style={label}>Reference photos (optional)</div>
           <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 10px', fontFamily: FONT.ui }}>
             Upload a photo and label it (e.g. "Young Agassi, long hair") — Claude will match it to the right scenes
-            automatically and use it to anchor those images to the real subject. Uploads run through WisiTube's
-            server, so there's nothing to configure here.
+            automatically and use it to anchor those images to the real subject. The photo is sent to WisiTube's
+            server in a single step at generation time, so there's nothing to configure here.
           </div>
 
           {references.length > 0 && (
@@ -220,15 +201,9 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
                   <input
                     value={r.label}
                     onChange={(e) => updateReference(r.id, { label: e.target.value })}
-                    onBlur={() => {
-                      if (!r.uploadedUrl && !r.uploading && r.file) uploadReference(r.id, r.file);
-                    }}
                     placeholder='Label, e.g. "Young Agassi, long hair"'
                     style={{ ...inputStyle, flex: 1 }}
                   />
-                  <span style={{ fontSize: 10, fontFamily: FONT.ui, textTransform: 'uppercase', whiteSpace: 'nowrap', color: r.error ? T.primary : r.uploading ? T.yellow : r.uploadedUrl ? T.green : T.textMuted }}>
-                    {r.error ? 'Failed' : r.uploading ? 'Uploading…' : r.uploadedUrl ? 'Ready' : 'Pending'}
-                  </span>
                   <button onClick={() => removeReference(r.id)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
                     ✕
                   </button>

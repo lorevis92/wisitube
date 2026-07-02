@@ -65,15 +65,18 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [project, settings, projectId, createdAt]);
 
-  function handlePlan(plan) {
+  async function handlePlan(plan) {
     generationRef.current += 1;
     setProjectId(createId());
     setCreatedAt(Date.now());
-    // Only id/label/uploadedUrl travel into the project — the File/Blob used for uploading is
-    // CreateStep-only state and never needs to leave the browser tab that picked it.
-    const references = (settings.references || [])
-      .filter((r) => r.uploadedUrl)
-      .map((r) => ({ id: r.id, label: r.label, uploadedUrl: r.uploadedUrl }));
+    // Reference files must survive reloads (IndexedDB) and later regenerations, so convert each
+    // one to a plain Blob up front — same pattern as scene images (url + blob), since File objects
+    // don't always survive structured-clone/IndexedDB round-trips as cleanly as Blobs do.
+    const references = await Promise.all(
+      (settings.references || [])
+        .filter((r) => r.file)
+        .map(async (r) => ({ id: r.id, label: r.label, file: new Blob([await r.file.arrayBuffer()], { type: r.file.type }) }))
+    );
     setProject({
       titles: plan.titles || [],
       selectedTitle: 0,

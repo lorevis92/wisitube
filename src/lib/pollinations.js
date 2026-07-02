@@ -54,36 +54,26 @@ export function buildImageUrl(prompt, { width = 1280, height = 720, seed = 42 } 
   );
 }
 
-// Kontext (image-to-image editing) needs a reference photo hosted on media.pollinations.ai first.
-// The actual Pollinations secret key lives server-side only (api/pollinations-upload.js) — this
-// just forwards the file to our own domain, same pattern as /api/generate.
-export async function uploadReferenceImage(file) {
+// Reference-photo editing (kontext) goes through our own proxy (api/pollinations-image.js) in a
+// single multipart request — the reference file + prompt go straight to Pollinations' image-edit
+// endpoint server-side, where the secret key lives. No separate upload step.
+export async function generateWithReference(prompt, referenceFile, { width = 1280, height = 720 } = {}) {
   const form = new FormData();
-  form.append('file', file);
-  const res = await fetch('/api/pollinations-upload', {
+  form.append('image', referenceFile, referenceFile.name || 'reference.jpg');
+  form.append('prompt', prompt);
+  form.append('width', String(width));
+  form.append('height', String(height));
+  const res = await fetch('/api/pollinations-image', {
     method: 'POST',
     body: form,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    throw new Error(body?.error ? `${body.error}${body.detail ? `: ${body.detail}` : ''}` : `Reference upload failed (HTTP ${res.status})`);
+    throw new Error(body?.error ? `${body.error}${body.detail ? `: ${body.detail}` : ''}` : `Reference image edit failed (HTTP ${res.status})`);
   }
   const data = await res.json();
-  if (!data.url) throw new Error('Reference upload succeeded but returned no image reference');
+  if (!data.url) throw new Error('Reference image edit succeeded but returned no image URL');
   return data.url;
-}
-
-// Points at our own kontext proxy (api/pollinations-image.js) instead of Pollinations directly —
-// that request also needs the server-side secret key, same reasoning as the upload above.
-export function buildKontextImageUrl(prompt, referenceUrl, { width = 1280, height = 720, seed = 42 } = {}) {
-  const params = new URLSearchParams({
-    prompt,
-    image: referenceUrl,
-    width: String(width),
-    height: String(height),
-    seed: String(seed),
-  });
-  return `/api/pollinations-image?${params.toString()}`;
 }
 
 // ---- media caches (module-level, survive re-renders) ----
