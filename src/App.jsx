@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Navbar from './components/Navbar';
 import Footer from './components/Footer';
-import ProjectsStep from './steps/ProjectsStep';
+import ChannelsListStep from './steps/ChannelsListStep';
+import ChannelDashboardStep from './steps/ChannelDashboardStep';
 import CreateStep from './steps/CreateStep';
 import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
-import { T, FONT } from './theme';
-import { createId, saveProject } from './lib/db';
+import { T, FONT, mono } from './theme';
+import { createId, saveVideo } from './lib/db';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -19,7 +20,9 @@ const isSceneMediaReady = (s) =>
 
 export default function App() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
-  const [tab, setTab] = useState('create');
+  const [tab, setTab] = useState('channels');
+  const [currentChannelId, setCurrentChannelId] = useState(null);
+  const [currentChannelName, setCurrentChannelName] = useState('');
   const [settings, setSettings] = useState({
     topic: '',
     style: 'facestick',
@@ -46,26 +49,27 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Autosave the open project to IndexedDB, debounced so fast edits don't hammer the store.
+  // Autosave the open video to IndexedDB, debounced so fast edits don't hammer the store.
   useEffect(() => {
     if (!project || !projectId) return;
     const generation = generationRef.current;
     const timer = setTimeout(() => {
-      if (generationRef.current !== generation) return; // a different project took over — discard
-      saveProject({
+      if (generationRef.current !== generation) return; // a different video took over — discard
+      saveVideo({
         id: projectId,
+        channelId: currentChannelId,
         createdAt: createdAt || Date.now(),
         updatedAt: Date.now(),
         topic: settings.topic,
         settings,
         ...project,
-        // Frozen at save time so the Projects dashboard never has to re-derive it (and risk
-        // picking the raw topic — which can repeat across projects — over the generated title).
-        displayTitle: project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled project',
+        // Frozen at save time so the channel dashboard never has to re-derive it (and risk
+        // picking the raw topic — which can repeat across videos — over the generated title).
+        displayTitle: project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video',
       });
     }, 800);
     return () => clearTimeout(timer);
-  }, [project, settings, projectId, createdAt]);
+  }, [project, settings, projectId, createdAt, currentChannelId]);
 
   async function handlePlan(plan) {
     generationRef.current += 1;
@@ -149,11 +153,14 @@ export default function App() {
     });
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
+    // Resume only ever happens from within a channel's dashboard, so currentChannelId is already
+    // set — this just guards against staleness (e.g. a video record whose channelId differs).
+    if (record.channelId) setCurrentChannelId(record.channelId);
     const hasAllMedia = scenes.length > 0 && scenes.every(isSceneMediaReady);
     setTab(hasAllMedia ? 'editor' : 'storyboard');
   }
 
-  // Explicit reset so opening the Create tab from Projects never silently overwrites the open project.
+  // Explicit reset so opening the Create tab from the channel dashboard never silently overwrites the open video.
   function startNewProject() {
     generationRef.current += 1;
     setProject(null);
@@ -163,23 +170,81 @@ export default function App() {
     setTab('create');
   }
 
+  function openChannel(channel) {
+    setCurrentChannelId(channel.id);
+    setCurrentChannelName(channel.name || '');
+  }
+
+  // Fully exits the current channel — used by the top-level "Channels" breadcrumb segment.
+  function backToChannels() {
+    setCurrentChannelId(null);
+    setCurrentChannelName('');
+    setTab('channels');
+  }
+
   const hasPlan = !!project;
   const hasMedia = hasPlan && project.scenes.every(isSceneMediaReady);
+  const currentVideoTitle = hasPlan ? project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video' : '';
 
   const tabs = [
-    { id: 'projects', label: 'Projects' },
-    { id: 'create', label: 'Create' },
+    { id: 'channels', label: 'Channels' },
+    { id: 'create', label: 'Create', disabled: !currentChannelId },
     { id: 'storyboard', label: 'Storyboard', disabled: !hasPlan },
     { id: 'editor', label: 'Editor', disabled: !hasMedia },
     { id: 'export', label: 'Export', disabled: !hasMedia },
   ];
+
+  const breadcrumbBtn = {
+    background: 'none',
+    border: 'none',
+    padding: 0,
+    ...mono,
+    fontSize: 12,
+    color: T.textSecondary,
+    cursor: 'pointer',
+    textDecoration: 'underline',
+  };
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: T.bg }}>
       <Navbar tabs={tabs} activeTab={tab} onTab={setTab} isMobile={isMobile} />
 
       <main style={{ flex: 1, width: '100%', maxWidth: 1200, margin: '0 auto', padding: isMobile ? '20px 14px' : '32px 20px' }}>
-        {tab === 'projects' && <ProjectsStep onResume={handleResume} onNewProject={startNewProject} isMobile={isMobile} />}
+        {currentChannelId && (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 20 }}>
+            <button onClick={backToChannels} style={breadcrumbBtn}>
+              Channels
+            </button>
+            <span style={{ ...mono, fontSize: 12, color: T.textMuted }}>/</span>
+            {tab === 'channels' ? (
+              <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>{currentChannelName || 'Channel'}</span>
+            ) : (
+              <button onClick={() => setTab('channels')} style={breadcrumbBtn}>
+                {currentChannelName || 'Channel'}
+              </button>
+            )}
+            {tab !== 'channels' && hasPlan && (
+              <>
+                <span style={{ ...mono, fontSize: 12, color: T.textMuted }}>/</span>
+                <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>{currentVideoTitle}</span>
+              </>
+            )}
+          </div>
+        )}
+
+        {tab === 'channels' &&
+          (currentChannelId ? (
+            <ChannelDashboardStep
+              channelId={currentChannelId}
+              onResume={handleResume}
+              onNewVideo={startNewProject}
+              onBack={backToChannels}
+              onChannelLoaded={(ch) => setCurrentChannelName(ch?.name || '')}
+              isMobile={isMobile}
+            />
+          ) : (
+            <ChannelsListStep onOpenChannel={openChannel} isMobile={isMobile} />
+          ))}
 
         {tab === 'create' && (
           <>
