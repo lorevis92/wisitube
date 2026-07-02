@@ -19,6 +19,7 @@ export default async function handler(req, res) {
 
   try {
     const { topic, language = 'English', length = 'short', format = '16:9', style = 'facestick', references } = req.body || {};
+    console.log('[generate] references received:', JSON.stringify(references));
     if (!topic || typeof topic !== 'string' || topic.length > 500) {
       return res.status(400).json({ error: 'Invalid topic' });
     }
@@ -36,10 +37,12 @@ export default async function handler(req, res) {
     const referenceSection = refs.length
       ? `
 
-Available reference photos (use ONLY when genuinely applicable):
+You have been given these reference photos, each with a label describing who/what they depict and in what context:
 ${refs.map((r) => `- id: "${r.id}", label: "${r.label}"`).join('\n')}
 
-For each image beat, decide if the subject or object described by one of these reference labels is genuinely depicted in that beat. If yes, set reference_id to that reference's id and match the correct label based on story context (e.g. time period, described appearance) — never use a reference for a beat where that subject isn't actually present or visible. If no reference applies, set reference_id to null. When reference_id is set, write image_prompt as an EDITING instruction, not a fresh description: describe only what changes (setting, pose, action, added elements) and explicitly say to preserve the subject's distinctive identifying features (hairstyle, facial hair, silhouette, iconic clothing) while restyling into the chosen art style. When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`
+For EVERY image beat where the main subject (the person these references depict) is visibly present — as the focal subject, in the background, or partially visible — you MUST set reference_id to the id of the reference whose label best matches that beat's time period, appearance, or context. Do NOT leave reference_id null just because no label is a perfect match: if multiple references exist for the same subject, pick the closest match by context (era, hairstyle, setting described in the narration) rather than skipping. Only set reference_id to null when the subject is genuinely NOT depicted in that specific beat — for example: a beat showing only other people, crowds, objects, empty locations, maps, or abstract concepts unrelated to the subject's physical appearance. When in doubt about which reference fits best, default to using the reference photo rather than skipping it — a close-enough match is better than a generic AI-generated face for the main subject of the video.
+
+When reference_id is set, image_prompt MUST be an editing instruction, never a fresh description that ignores the photo: state explicitly to keep the subject's face, hairstyle and distinctive features from the reference photo, and describe ONLY what changes — in the exact form "keep the subject's face, hairstyle and distinctive features from the reference photo; change only: [scene/setting/action]". When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`
       : '';
 
     const systemPrompt = `You are a YouTube strategist and scriptwriter for successful faceless animated channels.
