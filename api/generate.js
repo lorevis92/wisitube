@@ -18,13 +18,29 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
 
   try {
-    const { topic, language = 'English', length = 'short', format = '16:9', style = 'facestick' } = req.body || {};
+    const { topic, language = 'English', length = 'short', format = '16:9', style = 'facestick', references } = req.body || {};
     if (!topic || typeof topic !== 'string' || topic.length > 500) {
       return res.status(400).json({ error: 'Invalid topic' });
     }
 
     const sceneCount = SCENE_COUNTS[length] || SCENE_COUNTS.short;
     const vertical = format === '9:16';
+
+    // Client sends only { id, label } — never the file/blob — so sanitize defensively regardless.
+    const refs = Array.isArray(references)
+      ? references
+          .filter((r) => r && typeof r.id === 'string' && typeof r.label === 'string' && r.label.trim())
+          .map((r) => ({ id: r.id, label: r.label.trim() }))
+      : [];
+
+    const referenceSection = refs.length
+      ? `
+
+Available reference photos (use ONLY when genuinely applicable):
+${refs.map((r) => `- id: "${r.id}", label: "${r.label}"`).join('\n')}
+
+For each image beat, decide if the subject or object described by one of these reference labels is genuinely depicted in that beat. If yes, set reference_id to that reference's id and match the correct label based on story context (e.g. time period, described appearance) — never use a reference for a beat where that subject isn't actually present or visible. If no reference applies, set reference_id to null. When reference_id is set, write image_prompt as an EDITING instruction, not a fresh description: describe only what changes (setting, pose, action, added elements) and explicitly say to preserve the subject's distinctive identifying features (hairstyle, facial hair, silhouette, iconic clothing) while restyling into the chosen art style. When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`
+      : '';
 
     const systemPrompt = `You are a YouTube strategist and scriptwriter for successful faceless animated channels.
 You create videos that hook viewers in the first 3 seconds and keep retention high with a clear narrative arc.
@@ -41,7 +57,8 @@ JSON schema:
     "narration": "what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}",
     "image_beats": [exactly 2 objects: {
       "image_prompt": "concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.",
-      "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static"
+      "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
+      "reference_id": string | null
     }]
   }]
 }
@@ -52,7 +69,8 @@ Rules for scenes:
 - Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers.
 - Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes.
 - Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles (e.g. narration "Rome conquered most of the known world, then collapsed in decades" → beat 1: the empire at its peak, beat 2: its ruins / the collapse). Never make the two beats the same image concept restated.
-- image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.`;
+- image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.
+- If no reference photos are listed below, always set reference_id to null.${referenceSection}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',

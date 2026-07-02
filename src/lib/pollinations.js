@@ -54,6 +54,41 @@ export function buildImageUrl(prompt, { width = 1280, height = 720, seed = 42 } 
   );
 }
 
+// Kontext (image-to-image editing) needs a reference photo hosted on media.pollinations.ai first.
+export async function uploadReferenceImage(file) {
+  const tk = polliToken();
+  if (!tk) {
+    throw new Error('A free Pollinations account is required to use reference photos — add your token in Advanced settings');
+  }
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch('https://gen.pollinations.ai/upload', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tk}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Reference upload failed (HTTP ${res.status}): ${body.slice(0, 200) || res.statusText}`);
+  }
+  const data = await res.json();
+  const hash = data.hash || data.id || data.url;
+  if (!hash) throw new Error('Reference upload succeeded but returned no image reference');
+  return hash.startsWith('http') ? hash : `https://media.pollinations.ai/${hash}`;
+}
+
+// Same URL shape as buildImageUrl, but model=kontext + an `image` param anchors the generation to
+// an uploaded reference photo instead of generating from the prompt alone.
+export function buildKontextImageUrl(prompt, referenceUrl, { width = 1280, height = 720, seed = 42 } = {}) {
+  const tk = polliToken();
+  return (
+    'https://image.pollinations.ai/prompt/' +
+    encodeURIComponent(prompt) +
+    `?width=${width}&height=${height}&seed=${seed}&nologo=true&model=kontext&image=${encodeURIComponent(referenceUrl)}&referrer=wisitube` +
+    (tk ? `&token=${encodeURIComponent(tk)}` : '')
+  );
+}
+
 // ---- media caches (module-level, survive re-renders) ----
 const imageCache = new Map(); // url -> Promise<HTMLImageElement>
 const bufferCache = new Map(); // audioBlobUrl -> Promise<AudioBuffer>

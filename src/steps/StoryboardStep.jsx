@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, buildImageUrl, loadImage, decodeAudio } from '../lib/pollinations';
+import { STYLES, buildImageUrl, buildKontextImageUrl, loadImage, decodeAudio } from '../lib/pollinations';
 import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
 import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
 import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
@@ -41,7 +41,10 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     if (!scene) return false;
     const beat = scene.images[beatIndex];
     const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
-    const url = buildImageUrl(fullPrompt(beat.prompt), { ...dims, seed });
+    const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
+    const url = reference
+      ? buildKontextImageUrl(fullPrompt(beat.prompt), reference.uploadedUrl, { ...dims, seed })
+      : buildImageUrl(fullPrompt(beat.prompt), { ...dims, seed });
     updateImage(sceneId, beatIndex, { status: 'loading', seed });
     const startedAt = performance.now();
     try {
@@ -242,56 +245,85 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
             {/* Two image beats, side by side */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
-              {scene.images.map((beat, b) => (
-                <div key={beat.id}>
-                  <div
-                    style={{
-                      borderRadius: 4,
-                      overflow: 'hidden',
-                      border: `1px solid ${T.border}`,
-                      background: T.surfaceAlt,
-                      aspectRatio: settings.format === '9:16' ? '9/16' : '16/9',
-                      maxHeight: settings.format === '9:16' ? 220 : undefined,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {beat.status === 'ready' ? (
-                      <img src={beat.url} alt={`Scene ${i + 1} · beat ${b + 1}`} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    ) : (
-                      <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', textAlign: 'center', padding: 4, animation: beat.status === 'loading' ? 'wisiPulse 1.2s infinite' : 'none' }}>
-                        {beat.status === 'loading' ? 'Drawing…' : beat.status === 'error' ? 'Failed — retry' : `Beat ${b + 1}`}
-                      </span>
-                    )}
-                  </div>
-
-                  <textarea
-                    value={beat.prompt}
-                    onChange={(e) => updateImage(scene.id, b, { prompt: e.target.value, status: 'idle' })}
-                    rows={2}
-                    style={{ ...inputStyle, marginTop: 6, fontSize: 10, color: T.textSecondary, resize: 'vertical' }}
-                    title={`Image prompt for beat ${b + 1} (English)`}
-                  />
-
-                  <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
-                    <button onClick={() => genImage(scene.id, b, true)} disabled={running} style={{ ...btnGhost, padding: '5px 8px', fontSize: 9 }}>
-                      ↻ Image
-                    </button>
-                    <select
-                      value={beat.animation}
-                      onChange={(e) => updateImage(scene.id, b, { animation: e.target.value })}
-                      style={{ ...inputStyle, width: 'auto', padding: '4px 6px', fontSize: 9, marginLeft: 'auto' }}
+              {scene.images.map((beat, b) => {
+                const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
+                return (
+                  <div key={beat.id}>
+                    <div
+                      style={{
+                        position: 'relative',
+                        borderRadius: 4,
+                        overflow: 'hidden',
+                        border: `1px solid ${T.border}`,
+                        background: T.surfaceAlt,
+                        aspectRatio: settings.format === '9:16' ? '9/16' : '16/9',
+                        maxHeight: settings.format === '9:16' ? 220 : undefined,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
                     >
-                      {ANIMATION_LIST.map((a) => (
-                        <option key={a} value={a}>
-                          {a.replace('_', ' ')}
-                        </option>
-                      ))}
-                    </select>
+                      {reference && (
+                        <span
+                          title={`Anchored to reference photo: ${reference.label}`}
+                          style={{
+                            position: 'absolute',
+                            top: 4,
+                            left: 4,
+                            zIndex: 1,
+                            fontSize: 9,
+                            fontFamily: FONT.ui,
+                            fontWeight: 700,
+                            textTransform: 'none',
+                            color: '#FFFFFF',
+                            background: 'rgba(0,0,0,0.65)',
+                            borderRadius: 3,
+                            padding: '2px 6px',
+                            maxWidth: 'calc(100% - 8px)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          📷 using: {reference.label}
+                        </span>
+                      )}
+                      {beat.status === 'ready' ? (
+                        <img src={beat.url} alt={`Scene ${i + 1} · beat ${b + 1}`} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ) : (
+                        <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', textAlign: 'center', padding: 4, animation: beat.status === 'loading' ? 'wisiPulse 1.2s infinite' : 'none' }}>
+                          {beat.status === 'loading' ? 'Drawing…' : beat.status === 'error' ? 'Failed — retry' : `Beat ${b + 1}`}
+                        </span>
+                      )}
+                    </div>
+
+                    <textarea
+                      value={beat.prompt}
+                      onChange={(e) => updateImage(scene.id, b, { prompt: e.target.value, status: 'idle' })}
+                      rows={2}
+                      style={{ ...inputStyle, marginTop: 6, fontSize: 10, color: T.textSecondary, resize: 'vertical' }}
+                      title={`Image prompt for beat ${b + 1} (English)`}
+                    />
+
+                    <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                      <button onClick={() => genImage(scene.id, b, true)} disabled={running} style={{ ...btnGhost, padding: '5px 8px', fontSize: 9 }}>
+                        ↻ Image
+                      </button>
+                      <select
+                        value={beat.animation}
+                        onChange={(e) => updateImage(scene.id, b, { animation: e.target.value })}
+                        style={{ ...inputStyle, width: 'auto', padding: '4px 6px', fontSize: 9, marginLeft: 'auto' }}
+                      >
+                        {ANIMATION_LIST.map((a) => (
+                          <option key={a} value={a}>
+                            {a.replace('_', ' ')}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <textarea

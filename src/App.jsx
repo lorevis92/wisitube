@@ -27,6 +27,7 @@ export default function App() {
     length: 'short',
     format: '16:9',
     language: 'English',
+    references: [],
   });
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
@@ -68,6 +69,11 @@ export default function App() {
     generationRef.current += 1;
     setProjectId(createId());
     setCreatedAt(Date.now());
+    // Only id/label/uploadedUrl travel into the project — the File/Blob used for uploading is
+    // CreateStep-only state and never needs to leave the browser tab that picked it.
+    const references = (settings.references || [])
+      .filter((r) => r.uploadedUrl)
+      .map((r) => ({ id: r.id, label: r.label, uploadedUrl: r.uploadedUrl }));
     setProject({
       titles: plan.titles || [],
       selectedTitle: 0,
@@ -75,6 +81,7 @@ export default function App() {
       tags: plan.tags || [],
       thumbnails: plan.thumbnail_concepts || [],
       subtitles: settings.format === '9:16',
+      references,
       scenes: (plan.scenes || []).map((s) => {
         const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
         while (beats.length < 2) beats.push({});
@@ -85,6 +92,7 @@ export default function App() {
             id: beatIdCounter++,
             prompt: b.image_prompt || '',
             animation: b.animation || 'zoom_in',
+            referenceId: b.reference_id || null,
             seed: Math.floor(Math.random() * 999999),
             status: 'idle',
             url: '',
@@ -121,6 +129,7 @@ export default function App() {
       tags: record.tags || [],
       thumbnails: record.thumbnails || [],
       subtitles: !!record.subtitles,
+      references: record.references || [],
       scenes,
     });
     setProjectId(record.id);

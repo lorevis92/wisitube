@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
+import { STYLES, getPolliToken, setPolliToken, uploadReferenceImage } from '../lib/pollinations';
 import { KOKORO_VOICES, generateSpeech, isModelWarm } from '../lib/tts';
 import { estimateTotalSeconds } from '../lib/estimator';
 import FullScreenLoader from '../components/FullScreenLoader';
@@ -19,9 +19,62 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
   const [voiceTest, setVoiceTest] = useState('');
   const [token, setToken] = useState(getPolliToken());
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [refWarning, setRefWarning] = useState(false);
   const audioRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const references = settings.references || [];
 
   const set = (k, v) => setSettings((s) => ({ ...s, [k]: v }));
+
+  const updateReference = (id, patch) =>
+    setSettings((s) => ({
+      ...s,
+      references: (s.references || []).map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    }));
+
+  const removeReference = (id) =>
+    setSettings((s) => ({ ...s, references: (s.references || []).filter((r) => r.id !== id) }));
+
+  async function uploadReference(id, file) {
+    updateReference(id, { uploading: true, error: null });
+    try {
+      const uploadedUrl = await uploadReferenceImage(file);
+      updateReference(id, { uploading: false, uploadedUrl, error: null });
+    } catch (e) {
+      updateReference(id, { uploading: false, error: e?.message || String(e) });
+    }
+  }
+
+  function handlePickReference() {
+    if (!getPolliToken()) {
+      setRefWarning(true);
+      return;
+    }
+    setRefWarning(false);
+    fileInputRef.current?.click();
+  }
+
+  function handleReferenceFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow picking the same file again later
+    if (!file) return;
+    if (!getPolliToken()) {
+      setRefWarning(true);
+      return;
+    }
+    const ref = {
+      id: crypto.randomUUID(),
+      label: '',
+      file,
+      previewUrl: URL.createObjectURL(file),
+      uploadedUrl: null,
+      uploading: false,
+      error: null,
+    };
+    setSettings((s) => ({ ...s, references: [...(s.references || []), ref] }));
+    uploadReference(ref.id, file);
+  }
 
   async function testVoice() {
     if (voiceTest === settings.voice) return;
@@ -44,7 +97,12 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
       setError('Enter a topic first.');
       return;
     }
-    setError('');
+    const pendingRefs = references.some((r) => r.uploading || r.error);
+    setError(
+      pendingRefs
+        ? 'Some reference photos are still uploading or failed — those will be skipped for now (their beats will render without a reference).'
+        : ''
+    );
     setLoading(true);
     try {
       const res = await fetch('/api/generate', {
@@ -56,6 +114,7 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           length: settings.length,
           format: settings.format,
           style: STYLES[settings.style].label,
+          references: references.filter((r) => r.uploadedUrl).map((r) => ({ id: r.id, label: r.label })),
         }),
       });
       const data = await res.json();
@@ -159,6 +218,54 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           </div>
         </div>
 
+        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 16 }}>
+          <div style={label}>Reference photos (optional)</div>
+          <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 10px', fontFamily: FONT.ui }}>
+            Upload a photo and label it (e.g. "Young Agassi, long hair") — Claude will match it to the right scenes
+            automatically and use it to anchor those images to the real subject.
+          </div>
+
+          {refWarning && (
+            <div style={{ fontSize: 12, color: T.primary, background: T.primaryLight, border: `1px solid ${T.primaryBorder}`, borderRadius: 4, padding: 10, marginBottom: 10, fontFamily: FONT.ui }}>
+              A free Pollinations account is required to use reference photos. Register at{' '}
+              <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary, fontWeight: 700 }}>
+                enter.pollinations.ai
+              </a>{' '}
+              and paste your token in Advanced settings below before adding one.
+            </div>
+          )}
+
+          {references.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+              {references.map((r) => (
+                <div key={r.id} style={{ display: 'flex', gap: 10, alignItems: 'center', border: `1px solid ${T.border}`, borderRadius: 4, padding: 8 }}>
+                  <img src={r.previewUrl} alt={r.label || 'reference'} style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 3, border: `1px solid ${T.border}`, flexShrink: 0 }} />
+                  <input
+                    value={r.label}
+                    onChange={(e) => updateReference(r.id, { label: e.target.value })}
+                    onBlur={() => {
+                      if (!r.uploadedUrl && !r.uploading && r.file) uploadReference(r.id, r.file);
+                    }}
+                    placeholder='Label, e.g. "Young Agassi, long hair"'
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                  <span style={{ fontSize: 10, fontFamily: FONT.ui, textTransform: 'uppercase', whiteSpace: 'nowrap', color: r.error ? T.primary : r.uploading ? T.yellow : r.uploadedUrl ? T.green : T.textMuted }}>
+                    {r.error ? 'Failed' : r.uploading ? 'Uploading…' : r.uploadedUrl ? 'Ready' : 'Pending'}
+                  </span>
+                  <button onClick={() => removeReference(r.id)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <input ref={fileInputRef} type="file" accept="image/*" onChange={handleReferenceFile} style={{ display: 'none' }} />
+          <button onClick={handlePickReference} style={btnGhost}>
+            + Add reference photo
+          </button>
+        </div>
+
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 12 }}>
           <button
             onClick={() => setShowAdvanced((v) => !v)}
@@ -171,7 +278,8 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
               <div style={label}>Pollinations token (optional)</div>
               <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 8px', fontFamily: FONT.ui }}>
                 Images use the free Pollinations.ai tier (voiceover now runs locally in your browser via Kokoro TTS
-                and needs no token). If you hit image rate limits, get a free token at{' '}
+                and needs no token). A token is required to use reference photos, and also helps if you hit image
+                rate limits — get a free one at{' '}
                 <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary }}>
                   enter.pollinations.ai
                 </a>{' '}
