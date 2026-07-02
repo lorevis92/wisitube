@@ -36,6 +36,15 @@ let worker = null;
 let reqId = 0;
 const pending = new Map(); // id -> { resolve, reject }
 
+// Flips true once the worker confirms the model is loaded (either the proactive 'load' completes,
+// or the first generation succeeds) — lets the UI stop counting the one-time ~90MB download into
+// its time estimates once it's no longer relevant.
+let modelWarm = false;
+
+export function isModelWarm() {
+  return modelWarm;
+}
+
 function getWorker() {
   if (!worker) {
     worker = new Worker(new URL('./tts.worker.js', import.meta.url), { type: 'module' });
@@ -43,7 +52,10 @@ function getWorker() {
       const msg = e.data;
       if (msg.type === 'progress') {
         emitProgress(msg);
+      } else if (msg.type === 'ready') {
+        modelWarm = true;
       } else if (msg.type === 'result') {
+        modelWarm = true;
         pending.get(msg.id)?.resolve(msg.blob);
         pending.delete(msg.id);
       } else if (msg.type === 'error') {

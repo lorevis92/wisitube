@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, buildImageUrl, loadImage, decodeAudio } from '../lib/pollinations';
-import { generateSpeech, onLoadProgress } from '../lib/tts';
+import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
 import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
+import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
 import { ANIMATION_LIST } from '../lib/engine';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,11 +28,13 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     const seed = newSeed ? Math.floor(Math.random() * 999999) : scene.seed;
     const url = buildImageUrl(fullPrompt(scene), { ...dims, seed });
     updateScene(scene.id, { imageStatus: 'loading', seed });
+    const startedAt = performance.now();
     try {
       await loadImage(url);
       // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
       const imageBlob = await (await fetch(url)).blob();
       const imageUrl = URL.createObjectURL(imageBlob);
+      recordImageTime((performance.now() - startedAt) / 1000);
       updateScene(scene.id, { imageStatus: 'ready', imageUrl, imageBlob });
       return true;
     } catch {
@@ -42,10 +45,15 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
   async function genAudio(scene) {
     updateScene(scene.id, { audioStatus: 'loading', audioError: null });
+    const startedAt = performance.now();
+    const wasWarmBefore = isModelWarm();
     try {
       const audioBlob = await generateSpeech(scene.narration, settings.voice);
       const audioUrl = URL.createObjectURL(audioBlob);
       const buffer = await decodeAudio(audioUrl);
+      // Skip the sample if this call paid the one-time model download/load cost — that's
+      // accounted for separately (the +90s term), and would otherwise wreck the moving average.
+      if (wasWarmBefore) recordAudioTime((performance.now() - startedAt) / 1000);
       updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioBlob, audioDuration: buffer.duration, audioError: null });
       return true;
     } catch (e) {
@@ -96,6 +104,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const readyCount = project.scenes.filter((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready').length;
   const allReady = readyCount === project.scenes.length;
   const totalSec = project.scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
+  const remainingSeconds = useMemo(() => estimateRemainingSeconds(project.scenes, isModelWarm()), [project.scenes]);
 
   const statusDot = (st, title) => (
     <span
@@ -171,6 +180,9 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             {readyCount}/{project.scenes.length} scenes ready
             {totalSec > 0 && ` · ~${Math.round(totalSec)}s of video`}
             {progressMsg && ` · ${progressMsg}`}
+          </div>
+          <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 4 }}>
+            ⏱ Estimated time remaining: {allReady ? 'Done' : formatDuration(remainingSeconds)}
           </div>
           {running && (
             <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>

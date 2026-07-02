@@ -1,7 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
-import { KOKORO_VOICES, generateSpeech } from '../lib/tts';
+import { KOKORO_VOICES, generateSpeech, isModelWarm } from '../lib/tts';
+import { estimateTotalSeconds } from '../lib/estimator';
+import FullScreenLoader from '../components/FullScreenLoader';
 
 const LENGTHS = [
   { id: 'short', label: 'Short · ~60s' },
@@ -10,8 +12,6 @@ const LENGTHS = [
 ];
 
 const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
-
-const LENGTH_ETA = { short: '~20 seconds', medium: '~30 seconds', long: '~45 seconds' };
 
 export default function CreateStep({ settings, setSettings, onPlan, isMobile }) {
   const [loading, setLoading] = useState(false);
@@ -200,29 +200,9 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
       <button onClick={generate} disabled={loading} style={{ ...btnPrimary, padding: '14px 20px', fontSize: 13, opacity: loading ? 0.7 : 1 }}>
         {loading ? 'Writing script, titles & storyboard…' : 'Generate video plan →'}
       </button>
+
       {loading && (
-        <div style={{ ...card, textAlign: 'center', padding: 20 }}>
-          <div style={{ position: 'relative', height: 4, borderRadius: 2, background: T.surfaceAlt, overflow: 'hidden' }}>
-            <div
-              style={{
-                position: 'absolute',
-                top: 0,
-                bottom: 0,
-                width: '30%',
-                borderRadius: 2,
-                background: T.primary,
-                animation: 'wisiIndeterminate 1.3s ease-in-out infinite',
-              }}
-            />
-          </div>
-          <div style={{ fontSize: 13, color: T.text, fontFamily: FONT.ui, fontWeight: 700, marginTop: 14 }}>
-            Claude is writing your script, titles and storyboard…
-          </div>
-          <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>{LENGTH_ETA[settings.length] || '~30 seconds'}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 12, lineHeight: 1.5 }}>
-            Once ready, you can leave this tab — image and voice generation will continue automatically until your video is done.
-          </div>
-        </div>
+        <FullScreenLoader estimatedSeconds={estimateTotalSeconds({ length: settings.length, modelWarm: isModelWarm() })} />
       )}
     </div>
   );
