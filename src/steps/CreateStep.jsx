@@ -19,7 +19,6 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
   const [voiceTest, setVoiceTest] = useState('');
   const [token, setToken] = useState(getPolliToken());
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [refWarning, setRefWarning] = useState(false);
   const audioRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -46,23 +45,10 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
     }
   }
 
-  function handlePickReference() {
-    if (!getPolliToken()) {
-      setRefWarning(true);
-      return;
-    }
-    setRefWarning(false);
-    fileInputRef.current?.click();
-  }
-
   function handleReferenceFile(e) {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow picking the same file again later
     if (!file) return;
-    if (!getPolliToken()) {
-      setRefWarning(true);
-      return;
-    }
     const ref = {
       id: crypto.randomUUID(),
       label: '',
@@ -222,18 +208,9 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           <div style={label}>Reference photos (optional)</div>
           <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 10px', fontFamily: FONT.ui }}>
             Upload a photo and label it (e.g. "Young Agassi, long hair") — Claude will match it to the right scenes
-            automatically and use it to anchor those images to the real subject.
+            automatically and use it to anchor those images to the real subject. Uploads run through WisiTube's
+            server, so there's nothing to configure here.
           </div>
-
-          {refWarning && (
-            <div style={{ fontSize: 12, color: T.primary, background: T.primaryLight, border: `1px solid ${T.primaryBorder}`, borderRadius: 4, padding: 10, marginBottom: 10, fontFamily: FONT.ui }}>
-              A free Pollinations account is required to use reference photos. Register at{' '}
-              <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary, fontWeight: 700 }}>
-                enter.pollinations.ai
-              </a>{' '}
-              and paste your token in Advanced settings below before adding one.
-            </div>
-          )}
 
           {references.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
@@ -261,7 +238,7 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
           )}
 
           <input ref={fileInputRef} type="file" accept="image/*" onChange={handleReferenceFile} style={{ display: 'none' }} />
-          <button onClick={handlePickReference} style={btnGhost}>
+          <button onClick={() => fileInputRef.current?.click()} style={btnGhost}>
             + Add reference photo
           </button>
         </div>
@@ -277,9 +254,10 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
             <div style={{ marginTop: 12 }}>
               <div style={label}>Pollinations token (optional)</div>
               <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 8px', fontFamily: FONT.ui }}>
-                Images use the free Pollinations.ai tier (voiceover now runs locally in your browser via Kokoro TTS
-                and needs no token). A token is required to use reference photos, and also helps if you hit image
-                rate limits — get a free one at{' '}
+                Normal images (Flux, generated directly from your browser) use the free, anonymous Pollinations.ai
+                tier and need no token — this only raises the rate limit if you hit it (voiceover runs locally via
+                Kokoro TTS and never needs one either). Reference photos work automatically through WisiTube's own
+                server and don't use this token at all. Get a free one at{' '}
                 <a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer" style={{ color: T.primary }}>
                   enter.pollinations.ai
                 </a>{' '}

@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "formidable": "^3.5.4",
     "idb-keyval": "^6.2.6",
     "kokoro-js": "^1.2.1",
     "react": "^18.3.1",
