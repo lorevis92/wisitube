@@ -28,7 +28,10 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     updateScene(scene.id, { imageStatus: 'loading', seed });
     try {
       await loadImage(url);
-      updateScene(scene.id, { imageStatus: 'ready', imageUrl: url });
+      // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
+      const imageBlob = await (await fetch(url)).blob();
+      const imageUrl = URL.createObjectURL(imageBlob);
+      updateScene(scene.id, { imageStatus: 'ready', imageUrl, imageBlob });
       return true;
     } catch {
       updateScene(scene.id, { imageStatus: 'error' });
@@ -39,10 +42,10 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   async function genAudio(scene) {
     updateScene(scene.id, { audioStatus: 'loading', audioError: null });
     try {
-      const blob = await generateSpeech(scene.narration, settings.voice);
-      const audioUrl = URL.createObjectURL(blob);
+      const audioBlob = await generateSpeech(scene.narration, settings.voice);
+      const audioUrl = URL.createObjectURL(audioBlob);
       const buffer = await decodeAudio(audioUrl);
-      updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioDuration: buffer.duration, audioError: null });
+      updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioBlob, audioDuration: buffer.duration, audioError: null });
       return true;
     } catch (e) {
       updateScene(scene.id, { audioStatus: 'error', audioError: e?.message || String(e) });

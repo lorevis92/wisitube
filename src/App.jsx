@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import Navbar from './components/Navbar';
 import Footer from './components/Footer';
+import ProjectsStep from './steps/ProjectsStep';
 import CreateStep from './steps/CreateStep';
 import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
 import { T, FONT } from './theme';
+import { createId, saveProject } from './lib/db';
 
 let sceneIdCounter = 1;
 
@@ -21,6 +23,8 @@ export default function App() {
     language: 'English',
   });
   const [project, setProject] = useState(null);
+  const [projectId, setProjectId] = useState(null);
+  const [createdAt, setCreatedAt] = useState(null);
 
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 760);
@@ -28,7 +32,25 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  // Autosave the open project to IndexedDB, debounced so fast edits don't hammer the store.
+  useEffect(() => {
+    if (!project || !projectId) return;
+    const timer = setTimeout(() => {
+      saveProject({
+        id: projectId,
+        createdAt: createdAt || Date.now(),
+        updatedAt: Date.now(),
+        topic: settings.topic,
+        settings,
+        ...project,
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [project, settings, projectId, createdAt]);
+
   function handlePlan(plan) {
+    setProjectId(createId());
+    setCreatedAt(Date.now());
     setProject({
       titles: plan.titles || [],
       selectedTitle: 0,
@@ -53,10 +75,44 @@ export default function App() {
     setTab('storyboard');
   }
 
+  // Resume a project loaded from IndexedDB — object URLs never survive a reload, so they're
+  // rebuilt here from the stored Blobs before the project goes into state.
+  function handleResume(record) {
+    const scenes = (record.scenes || []).map((s) => ({
+      ...s,
+      imageUrl: s.imageBlob ? URL.createObjectURL(s.imageBlob) : s.imageUrl,
+      audioUrl: s.audioBlob ? URL.createObjectURL(s.audioBlob) : s.audioUrl,
+    }));
+    setSettings(record.settings || settings);
+    setProject({
+      titles: record.titles || [],
+      selectedTitle: record.selectedTitle || 0,
+      description: record.description || '',
+      tags: record.tags || [],
+      thumbnails: record.thumbnails || [],
+      subtitles: !!record.subtitles,
+      scenes,
+    });
+    setProjectId(record.id);
+    setCreatedAt(record.createdAt || Date.now());
+    const hasAllMedia = scenes.length > 0 && scenes.every((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready');
+    setTab(hasAllMedia ? 'editor' : 'storyboard');
+  }
+
+  // Explicit reset so opening the Create tab from Projects never silently overwrites the open project.
+  function startNewProject() {
+    setProject(null);
+    setProjectId(null);
+    setCreatedAt(null);
+    setSettings((s) => ({ ...s, topic: '' }));
+    setTab('create');
+  }
+
   const hasPlan = !!project;
   const hasMedia = hasPlan && project.scenes.every((s) => s.imageStatus === 'ready' && s.audioStatus === 'ready');
 
   const tabs = [
+    { id: 'projects', label: 'Projects' },
     { id: 'create', label: 'Create' },
     { id: 'storyboard', label: 'Storyboard', disabled: !hasPlan },
     { id: 'editor', label: 'Editor', disabled: !hasMedia },
@@ -68,6 +124,8 @@ export default function App() {
       <Navbar tabs={tabs} activeTab={tab} onTab={setTab} isMobile={isMobile} />
 
       <main style={{ flex: 1, width: '100%', maxWidth: 1200, margin: '0 auto', padding: isMobile ? '20px 14px' : '32px 20px' }}>
+        {tab === 'projects' && <ProjectsStep onResume={handleResume} onNewProject={startNewProject} isMobile={isMobile} />}
+
         {tab === 'create' && (
           <>
             <div style={{ marginBottom: 28 }}>
