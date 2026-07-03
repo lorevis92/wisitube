@@ -2,9 +2,12 @@
 // CRITICAL: this is a Serverless Function: handler(req, res) + res.status().json().
 // Never convert to Edge (runtime: 'edge' / new Response()) — the two APIs are incompatible.
 
-export const config = { maxDuration: 90 };
+// Hobby plan with Fluid Compute caps out at 300s — 280 keeps a safety margin under that ceiling
+// while giving "long" plans (24 scenes + character bible web research) enough room to finish.
+export const config = { maxDuration: 280 };
 
 const SCENE_COUNTS = { short: 10, medium: 16, long: 24 };
+const MAX_TOKENS = { short: 4000, medium: 6000, long: 9000 };
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -110,7 +113,7 @@ Rules for scenes:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 6000,
+        max_tokens: MAX_TOKENS[length] || MAX_TOKENS.short,
         system: systemPrompt,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [

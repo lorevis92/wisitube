@@ -2,7 +2,7 @@ import React from 'react';
 import { T, FONT, mono } from '../theme';
 import { formatDuration } from '../lib/estimator';
 
-export default function FullScreenLoader({ estimatedSeconds }) {
+export default function FullScreenLoader({ estimatedSeconds, note }) {
   return (
     <div
       style={{
@@ -34,6 +34,10 @@ export default function FullScreenLoader({ estimatedSeconds }) {
         <div style={{ fontFamily: FONT.ui, fontSize: 14, color: T.textSecondary, marginTop: 10 }}>
           Claude is writing your script, titles and thumbnail ideas
         </div>
+
+        {note && (
+          <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textMuted, marginTop: 8 }}>{note}</div>
+        )}
 
         {Number.isFinite(estimatedSeconds) && (
           <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${T.border}` }}>

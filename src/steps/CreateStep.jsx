@@ -372,7 +372,10 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
       </button>
 
       {loading && (
-        <FullScreenLoader estimatedSeconds={estimateTotalSeconds({ length: settings.length, modelWarm: isModelWarm() })} />
+        <FullScreenLoader
+          estimatedSeconds={estimateTotalSeconds({ length: settings.length, modelWarm: isModelWarm() })}
+          note={settings.length === 'long' ? 'Longer videos take a bit more — thanks for your patience.' : ''}
+        />
       )}
     </div>
   );

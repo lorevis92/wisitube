@@ -6,7 +6,7 @@ const SCENE_COUNTS = { short: 10, medium: 16, long: 24 };
 // Claude now runs web searches to ground the character bible in real appearances before writing
 // the script, so the initial /api/generate round-trip takes noticeably longer than a plain
 // text-only completion — these bases reflect that added research time.
-const SCRIPT_BASE_S = { short: 45, medium: 60, long: 75 };
+const SCRIPT_BASE_S = { short: 45, medium: 75, long: 120 };
 const IMAGE_BEATS_PER_SCENE = 2;
 const MAX_SAMPLES = 20;
 const DEFAULT_IMAGE_S = 4;
