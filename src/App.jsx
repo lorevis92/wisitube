@@ -161,13 +161,17 @@ export default function App() {
   }
 
   // Explicit reset so opening the Create tab from the channel dashboard never silently overwrites the open video.
-  function startNewProject() {
+  function startNewProjectWithTopic(topic) {
     generationRef.current += 1;
     setProject(null);
     setProjectId(null);
     setCreatedAt(null);
-    setSettings((s) => ({ ...s, topic: '' }));
+    setSettings((s) => ({ ...s, topic }));
     setTab('create');
+  }
+
+  function startNewProject() {
+    startNewProjectWithTopic('');
   }
 
   function openChannel(channel) {
@@ -240,6 +244,7 @@ export default function App() {
               onNewVideo={startNewProject}
               onBack={backToChannels}
               onChannelLoaded={(ch) => setCurrentChannelName(ch?.name || '')}
+              onStartVideoFromSuggestion={startNewProjectWithTopic}
               isMobile={isMobile}
             />
           ) : (

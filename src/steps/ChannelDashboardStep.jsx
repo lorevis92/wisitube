@@ -18,11 +18,21 @@ function timeAgo(ts) {
   return `${year} year${year === 1 ? '' : 's'} ago`;
 }
 
-export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelLoaded, isMobile }) {
+function priorityColor(p) {
+  if (p === 'high') return T.primary;
+  if (p === 'medium') return T.yellow;
+  return T.textMuted;
+}
+
+export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelLoaded, onStartVideoFromSuggestion, isMobile }) {
   const [channel, setChannel] = useState(null);
   const [notes, setNotes] = useState('');
   const [videos, setVideos] = useState(null); // null = still loading
   const [thumbUrls, setThumbUrls] = useState({});
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState('');
+  const [refiningIndex, setRefiningIndex] = useState(null);
+  const [refineText, setRefineText] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +63,38 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     if (!channel || notes === (channel.editorialNotes || '')) return;
     const updated = await saveChannel({ ...channel, editorialNotes: notes });
     setChannel(updated);
+  }
+
+  // Refining never edits a single suggestion — it relaunches the whole holistic pass with the
+  // extra instruction folded in, replacing the entire list at once.
+  async function fetchSuggestions(refinementText) {
+    if (!channel) return;
+    setSuggestionsLoading(true);
+    setSuggestionsError('');
+    try {
+      const res = await fetch('/api/program-manager', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channelName: channel.name,
+          niche: channel.niche || '',
+          editorialNotes: channel.editorialNotes || '',
+          existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
+          refinement: refinementText || '',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to generate suggestions');
+      const lastSuggestions = { analysis: data.analysis || '', suggestions: data.suggestions || [], generatedAt: Date.now() };
+      const updated = await saveChannel({ ...channel, lastSuggestions });
+      setChannel(updated);
+      setRefiningIndex(null);
+      setRefineText('');
+    } catch (e) {
+      setSuggestionsError(String(e.message || e));
+    } finally {
+      setSuggestionsLoading(false);
+    }
   }
 
   async function handleDeleteChannel() {
@@ -99,6 +141,143 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
           />
         </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+          <div>
+            <div style={label}>Content Program Manager</div>
+            {channel?.lastSuggestions?.generatedAt && (
+              <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>generated {timeAgo(channel.lastSuggestions.generatedAt)}</div>
+            )}
+          </div>
+          <button onClick={() => fetchSuggestions('')} disabled={suggestionsLoading} style={{ ...btnPrimary, opacity: suggestionsLoading ? 0.6 : 1 }}>
+            {suggestionsLoading ? 'Working…' : channel?.lastSuggestions ? 'Refresh suggestions' : 'Suggest next videos'}
+          </button>
+        </div>
+
+        {suggestionsLoading && (
+          <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 14 }}>
+            Analyzing your channel and researching the niche… ~30-60s
+          </div>
+        )}
+
+        {suggestionsError && !suggestionsLoading && (
+          <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 14 }}>{suggestionsError}</div>
+        )}
+
+        {channel?.lastSuggestions && !suggestionsLoading && (
+          <div style={{ marginTop: 16 }}>
+            {channel.lastSuggestions.analysis && (
+              <div
+                style={{
+                  fontFamily: FONT.ui,
+                  fontSize: 13,
+                  color: T.text,
+                  lineHeight: 1.6,
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 4,
+                  padding: 14,
+                  marginBottom: 14,
+                }}
+              >
+                {channel.lastSuggestions.analysis}
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
+              {(channel.lastSuggestions.suggestions || []).map((s, i) => (
+                <div
+                  key={i}
+                  style={{
+                    border: s.series ? `1px solid ${T.primaryBorder}` : `1px solid ${T.border}`,
+                    background: s.series ? T.primaryLight : '#FFFFFF',
+                    borderRadius: 4,
+                    padding: 12,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span
+                      style={{
+                        ...mono,
+                        fontSize: 9,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        color: priorityColor(s.priority),
+                        border: `1px solid ${priorityColor(s.priority)}`,
+                        borderRadius: 3,
+                        padding: '2px 6px',
+                      }}
+                    >
+                      {s.priority || 'medium'}
+                    </span>
+                    {s.series && (
+                      <span
+                        style={{
+                          ...mono,
+                          fontSize: 9,
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          color: T.primary,
+                          background: '#FFFFFF',
+                          border: `1px solid ${T.primaryBorder}`,
+                          borderRadius: 3,
+                          padding: '2px 6px',
+                        }}
+                      >
+                        Series: {s.series}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{s.title}</div>
+                  <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, lineHeight: 1.5 }}>{s.angle}</div>
+
+                  <div style={{ display: 'flex', gap: 6, marginTop: 'auto', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => onStartVideoFromSuggestion?.(s.title)}
+                      style={{ ...btnPrimary, flex: 1, padding: '8px 12px', fontSize: 10 }}
+                    >
+                      Start this video
+                    </button>
+                    <button
+                      onClick={() => setRefiningIndex(refiningIndex === i ? null : i)}
+                      style={{ ...btnGhost, padding: '8px 12px', fontSize: 10 }}
+                    >
+                      Refine
+                    </button>
+                  </div>
+
+                  {refiningIndex === i && (
+                    <div style={{ marginTop: 4, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+                      <textarea
+                        value={refineText}
+                        onChange={(e) => setRefineText(e.target.value)}
+                        placeholder='e.g. "more focused on the 90s"'
+                        rows={2}
+                        style={{ ...inputStyle, fontSize: 12, resize: 'vertical' }}
+                        autoFocus
+                      />
+                      <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 4 }}>
+                        Relaunches the whole suggestion list oriented to this note.
+                      </div>
+                      <button
+                        onClick={() => fetchSuggestions(refineText)}
+                        disabled={suggestionsLoading || !refineText.trim()}
+                        style={{ ...btnPrimary, marginTop: 6, padding: '8px 12px', fontSize: 10, opacity: refineText.trim() ? 1 : 0.6 }}
+                      >
+                        Regenerate with this note
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
