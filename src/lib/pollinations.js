@@ -2,27 +2,34 @@
 // Anonymous tier works without a key; an optional free token from enter.pollinations.ai
 // can be saved in localStorage ('wisitube_polli_token') to lift rate limits.
 
+// Each suffix leads with a dominant, unambiguous description of the style, then explicitly negates
+// whichever neighboring style the image model is most likely to drift toward — image models tend
+// to "average" toward more common, more detailed looks unless told not to.
 export const STYLES = {
   facestick: {
     label: 'Facestick',
     suffix:
-      'simple stick figure characters with big expressive cartoon faces, childlike naive drawing, thick black marker outlines, flat plain background, minimal doodle illustration',
+      "minimalist stick figure drawing, thin black line body like a child's drawing, simple round head with basic cartoon face, NOT a detailed cartoon character, no complex shading, flat plain background",
   },
   flat: {
     label: 'Flat Cartoon',
-    suffix: 'flat vector cartoon illustration, bold simple shapes, modern 2D animation style, vibrant solid colors, clean composition',
+    suffix:
+      'bold flat vector illustration, simple geometric shapes, solid flat colors, clean modern 2D animation style, NOT a stick figure, NOT photorealistic, no gradients or shading',
   },
   doodle: {
     label: 'Notebook Doodle',
-    suffix: 'hand drawn notebook doodle, sketchy black ink lines on white paper, playful rough sketch style',
+    suffix:
+      'hand-drawn notebook doodle, sketchy black ink lines on plain white paper, rough playful pencil-and-paper sketch, NOT a clean vector illustration, NOT colored, no flat fills',
   },
   watercolor: {
     label: 'Watercolor',
-    suffix: 'soft watercolor storybook illustration, gentle pastel colors, dreamy painted texture',
+    suffix:
+      'soft watercolor painting, gentle blended pastel colors, dreamy painterly texture, visible brush strokes, NOT flat vector colors, NOT thick black outlines',
   },
   comic: {
     label: 'Bold Comic',
-    suffix: 'bold comic book illustration, thick outlines, dramatic lighting, halftone shading, saturated colors',
+    suffix:
+      'bold comic book illustration, thick black outlines, dramatic halftone shading, saturated dramatic colors, NOT flat pastel colors, NOT a soft watercolor look',
   },
 };
 

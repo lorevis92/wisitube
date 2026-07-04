@@ -59,17 +59,30 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     }));
 
   // Reference photos (a real face) always win over the text-only character bible for the same
-  // beat — the bible's traits are prepended only when there's no active photo anchoring this beat.
+  // beat — the bible's traits are appended only when there's no active photo anchoring this beat.
+  // Fixed order: style first (so it isn't diluted/buried by everything after it), then the scene,
+  // then character traits, then the short fixed suffix. If the result is too long, only the
+  // character-traits segment is trimmed — style and scene are never touched.
   function fullPrompt(beat) {
     const hasReference = !!(beat.referenceId && (project.references || []).some((r) => r.id === beat.referenceId));
-    let basePrompt = beat.prompt;
+    let traits = '';
     if (beat.characterId && !hasReference) {
       const character = (project.characterBible || []).find((c) => c.id === beat.characterId);
       const variant = character && (character.variants || []).find((v) => v.label === beat.variantLabel);
-      const traits = [character?.baseDescription, variant?.description].filter(Boolean).join(' ');
-      if (traits) basePrompt = `Depict this character with these exact traits: ${traits}. Scene: ${beat.prompt}`;
+      traits = [character?.baseDescription, variant?.description].filter(Boolean).join(', ');
     }
-    return `${basePrompt}, ${STYLES[settings.style].suffix}, no text, no letters, no words in the image, anatomically correct, single coherent figure, correct number of limbs and fingers`;
+
+    const style = STYLES[settings.style].suffix;
+    const suffix = ', no text, no letters, single coherent figure, correct anatomy';
+    const build = (t) => `${style}. ${beat.prompt}${t ? `, ${t}` : ''}${suffix}`;
+
+    let prompt = build(traits);
+    if (prompt.length > 500 && traits) {
+      const overBy = prompt.length - 500;
+      traits = traits.slice(0, Math.max(0, traits.length - overBy));
+      prompt = build(traits);
+    }
+    return prompt;
   }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {
