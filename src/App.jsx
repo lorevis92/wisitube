@@ -89,7 +89,7 @@ export default function App() {
       description: plan.description || '',
       tags: plan.tags || [],
       thumbnails: plan.thumbnail_concepts || [],
-      subtitles: settings.format === '9:16',
+      subtitles: true,
       references,
       // Text-only, no Blobs involved — survives IndexedDB round-trips with a plain passthrough.
       characterBible: (plan.character_bible || []).map((c) => ({

@@ -84,8 +84,17 @@ function wordPopScale(elapsedMs) {
   return 1.15 + 0.15 * (1 - easeOutBack(t));
 }
 
-function drawSubtitle(ctx, W, H, text, localTime, duration) {
-  const words = String(text || '').split(/\s+/).filter(Boolean);
+// Splits a narration into the word groups shown during each of the scene's two image beats — the
+// first Math.ceil(n/2) words during beat 1, the rest during beat 2. For 1-2 total words this
+// already degenerates naturally into "everything in beat 1, nothing in beat 2" rather than an
+// unnatural split, so no extra special-casing is needed.
+function splitNarrationHalves(narration) {
+  const words = String(narration || '').split(/\s+/).filter(Boolean);
+  const cut = Math.ceil(words.length / 2);
+  return [words.slice(0, cut), words.slice(cut)];
+}
+
+function drawSubtitle(ctx, W, H, words, localTime, duration) {
   if (!words.length) return;
 
   const fontSize = Math.round(H * 0.038);
@@ -215,11 +224,18 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
     ctx.globalAlpha = 1;
   }
 
-  // local: seconds elapsed since this scene started (clamped to [0, item.duration] by the caller).
-  function drawScene(item, local, alpha = 1) {
+  // Single source of truth for "which half of the scene are we in" — shared by the image beats
+  // and the subtitles below so the two switch at exactly the same instant.
+  function sceneBeatState(item, local) {
     const half = Math.max(0.0001, item.duration / 2);
     const inSecondBeat = local >= half;
     const beatLocal = inSecondBeat ? local - half : local;
+    return { half, inSecondBeat, beatLocal };
+  }
+
+  // local: seconds elapsed since this scene started (clamped to [0, item.duration] by the caller).
+  function drawScene(item, local, alpha = 1) {
+    const { half, inSecondBeat, beatLocal } = sceneBeatState(item, local);
     const beatP = Math.min(1, Math.max(0, beatLocal / half));
 
     drawBeat(item.images[inSecondBeat ? 1 : 0], beatP, alpha);
@@ -248,7 +264,11 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
       const prev = items[idx - 1];
       drawScene(prev, prev.duration, 1 - local / FADE);
     }
-    if (subtitles) drawSubtitle(ctx, W, H, it.narration, local, it.duration);
+    if (subtitles) {
+      const { half, inSecondBeat, beatLocal } = sceneBeatState(it, local);
+      const [firstHalfWords, secondHalfWords] = splitNarrationHalves(it.narration);
+      drawSubtitle(ctx, W, H, inSecondBeat ? secondHalfWords : firstHalfWords, beatLocal, half);
+    }
 
     if (onProgress) onProgress(tt, total, idx);
 
