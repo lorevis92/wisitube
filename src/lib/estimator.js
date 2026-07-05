@@ -1,18 +1,22 @@
 // Rough, self-improving time estimates for the Create→Storyboard flow. Image/voice generation
 // times are learned per-browser (localStorage moving average) rather than hardcoded, since they
-// vary a lot with the user's machine and network.
+// vary a lot with the user's machine and network. Script writing now runs as three separate server
+// calls (titles → outline → chunked scenes, see api/generate-titles.js / generate-outline.js /
+// generate-scenes.js) instead of one big call, so the estimate sums each phase individually.
 
-const SCENE_COUNTS = { short: 10, medium: 16, long: 24 };
-// Claude now runs web searches to ground the character bible in real appearances before writing
-// the script, so the initial /api/generate round-trip takes noticeably longer than a plain
-// text-only completion — these bases reflect that added research time.
-const SCRIPT_BASE_S = { short: 45, medium: 75, long: 120 };
 const IMAGE_BEATS_PER_SCENE = 2;
 const MAX_SAMPLES = 20;
 const DEFAULT_IMAGE_S = 4;
 const DEFAULT_AUDIO_S = 7;
 const IMAGE_KEY = 'wisitube_avg_image_s';
 const AUDIO_KEY = 'wisitube_avg_audio_s';
+
+const TITLES_PHASE_S = 12;
+const OUTLINE_PHASE_S = 45;
+const SCENES_PER_CHUNK_S = 35; // one api/generate-scenes.js call, ~14-16 scenes
+// Matches the server-side per-call cap in api/generate-scenes.js (sceneCount is clamped to 16
+// there) — used only to estimate how many chunk calls a video's scene count will need.
+const MAX_SCENES_PER_CHUNK = 16;
 
 function loadSamples(key) {
   try {
@@ -60,16 +64,18 @@ export function getAvgAudioTime() {
   return avgTime(AUDIO_KEY, DEFAULT_AUDIO_S);
 }
 
-export function estimateSceneCount(length) {
-  return SCENE_COUNTS[length] || SCENE_COUNTS.short;
+// Matches the server-side totalScenes formula in api/generate-outline.js.
+export function estimateSceneCount(lengthMinutes) {
+  return Math.max(6, Math.round((Number(lengthMinutes) || 0) * 12));
 }
 
-export function estimateTotalSeconds({ length, modelWarm }) {
-  const sceneCount = estimateSceneCount(length);
+export function estimateTotalSeconds({ lengthMinutes, modelWarm }) {
+  const sceneCount = estimateSceneCount(lengthMinutes);
   const avgImage = getAvgImageTime();
   const avgAudio = getAvgAudioTime();
-  const scriptBase = SCRIPT_BASE_S[length] || SCRIPT_BASE_S.short;
-  return scriptBase + sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5) + sceneCount * avgAudio + (modelWarm ? 0 : 90);
+  const chunkCount = Math.max(1, Math.ceil(sceneCount / MAX_SCENES_PER_CHUNK));
+  const scriptPhasesS = TITLES_PHASE_S + OUTLINE_PHASE_S + chunkCount * SCENES_PER_CHUNK_S;
+  return scriptPhasesS + sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5) + sceneCount * avgAudio + (modelWarm ? 0 : 90);
 }
 
 export function estimateRemainingSeconds(scenes, modelWarm) {
