@@ -11,8 +11,8 @@ const DEFAULT_AUDIO_S = 7;
 const IMAGE_KEY = 'wisitube_avg_image_s';
 const AUDIO_KEY = 'wisitube_avg_audio_s';
 
-const TITLES_PHASE_S = 12;
-const OUTLINE_PHASE_S = 45;
+export const TITLES_PHASE_S = 12;
+export const OUTLINE_PHASE_S = 45;
 const SCENES_PER_CHUNK_S = 35; // one api/generate-scenes.js call, ~14-16 scenes
 // Matches the server-side per-call cap in api/generate-scenes.js (sceneCount is clamped to 16
 // there) — used only to estimate how many chunk calls a video's scene count will need.
@@ -69,12 +69,20 @@ export function estimateSceneCount(lengthMinutes) {
   return Math.max(6, Math.round((Number(lengthMinutes) || 0) * 12));
 }
 
+// How long the chunked api/generate-scenes.js calls alone are expected to take for a video of
+// this length — split out so screens shown before scene-writing starts (e.g. TitleSelectStep's
+// outline loader) can subtract it from the full estimate instead of promising work not yet begun.
+export function estimateScenesChunkSeconds(lengthMinutes) {
+  const sceneCount = estimateSceneCount(lengthMinutes);
+  const chunkCount = Math.max(1, Math.ceil(sceneCount / MAX_SCENES_PER_CHUNK));
+  return chunkCount * SCENES_PER_CHUNK_S;
+}
+
 export function estimateTotalSeconds({ lengthMinutes, modelWarm }) {
   const sceneCount = estimateSceneCount(lengthMinutes);
   const avgImage = getAvgImageTime();
   const avgAudio = getAvgAudioTime();
-  const chunkCount = Math.max(1, Math.ceil(sceneCount / MAX_SCENES_PER_CHUNK));
-  const scriptPhasesS = TITLES_PHASE_S + OUTLINE_PHASE_S + chunkCount * SCENES_PER_CHUNK_S;
+  const scriptPhasesS = TITLES_PHASE_S + OUTLINE_PHASE_S + estimateScenesChunkSeconds(lengthMinutes);
   return scriptPhasesS + sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5) + sceneCount * avgAudio + (modelWarm ? 0 : 90);
 }
 

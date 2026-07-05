@@ -1,19 +1,13 @@
 import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
-import { KOKORO_VOICES, generateSpeech, isModelWarm } from '../lib/tts';
-import { estimateTotalSeconds } from '../lib/estimator';
+import { KOKORO_VOICES, generateSpeech } from '../lib/tts';
+import { TITLES_PHASE_S } from '../lib/estimator';
 import FullScreenLoader from '../components/FullScreenLoader';
-
-const LENGTHS = [
-  { id: 'short', label: 'Short · ~60s' },
-  { id: 'medium', label: 'Medium · 2-3 min' },
-  { id: 'long', label: 'Long · 4-5 min' },
-];
 
 const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
 
-export default function CreateStep({ settings, setSettings, onPlan, isMobile }) {
+export default function CreateStep({ settings, setSettings, onTitles, isMobile }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [voiceTest, setVoiceTest] = useState('');
@@ -104,25 +98,17 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
     setError('');
     setLoading(true);
     try {
-      const res = await fetch('/api/generate', {
+      const res = await fetch('/api/generate-titles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           topic: settings.topic.trim(),
           language: settings.language,
-          length: settings.length,
-          format: settings.format,
-          style: STYLES[settings.style].label,
-          references: references.filter((r) => r.label.trim()).map((r) => ({ id: r.id, label: r.label })),
-          character_hints: characterHints
-            .filter((c) => c && (c.name?.trim() || c.details?.trim()))
-            .map((c) => ({ name: (c.name || '').trim(), details: (c.details || '').trim() })),
-          general_notes: (settings.generalNotes || '').trim(),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
-      onPlan(data);
+      onTitles(data.titles || []);
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -181,14 +167,21 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
             <audio ref={audioRef} style={{ display: 'none' }} />
           </div>
           <div>
-            <div style={label}>Length</div>
-            <select value={settings.length} onChange={(e) => set('length', e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
-              {LENGTHS.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.label}
-                </option>
-              ))}
-            </select>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <div style={label}>Video length</div>
+              <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>
+                {settings.lengthMinutes || 5} minute{(settings.lengthMinutes || 5) === 1 ? '' : 's'}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="1"
+              max="25"
+              step="1"
+              value={settings.lengthMinutes || 5}
+              onChange={(e) => set('lengthMinutes', Number(e.target.value))}
+              style={{ width: '100%', marginTop: 10 }}
+            />
           </div>
           <div>
             <div style={label}>Format</div>
@@ -368,13 +361,14 @@ export default function CreateStep({ settings, setSettings, onPlan, isMobile }) 
       )}
 
       <button onClick={generate} disabled={loading} style={{ ...btnPrimary, padding: '14px 20px', fontSize: 13, opacity: loading ? 0.7 : 1 }}>
-        {loading ? 'Writing script, titles & storyboard…' : 'Generate video plan →'}
+        {loading ? 'Working…' : 'Get title ideas →'}
       </button>
 
       {loading && (
         <FullScreenLoader
-          estimatedSeconds={estimateTotalSeconds({ length: settings.length, modelWarm: isModelWarm() })}
-          note={settings.length === 'long' ? 'Longer videos take a bit more — thanks for your patience.' : ''}
+          title="Writing title options…"
+          subtitle="Claude is coming up with 5 clickable angles for your topic"
+          estimatedSeconds={TITLES_PHASE_S}
         />
       )}
     </div>

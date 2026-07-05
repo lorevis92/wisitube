@@ -2,7 +2,14 @@ import React from 'react';
 import { T, FONT, mono } from '../theme';
 import { formatDuration } from '../lib/estimator';
 
-export default function FullScreenLoader({ estimatedSeconds, note }) {
+export default function FullScreenLoader({
+  title = 'Setting up your storyboard…',
+  subtitle = 'Claude is writing your script, titles and thumbnail ideas',
+  estimatedSeconds,
+  note,
+  progress,
+}) {
+  const hasProgress = progress && Number.isFinite(progress.total) && progress.total > 0;
   return (
     <div
       style={{
@@ -30,13 +37,29 @@ export default function FullScreenLoader({ estimatedSeconds, note }) {
             animation: 'wisiSpin 0.9s linear infinite',
           }}
         />
-        <div style={{ fontFamily: FONT.display, fontSize: 24, color: T.text }}>Setting up your storyboard…</div>
-        <div style={{ fontFamily: FONT.ui, fontSize: 14, color: T.textSecondary, marginTop: 10 }}>
-          Claude is writing your script, titles and thumbnail ideas
-        </div>
+        <div style={{ fontFamily: FONT.display, fontSize: 24, color: T.text }}>{title}</div>
+        <div style={{ fontFamily: FONT.ui, fontSize: 14, color: T.textSecondary, marginTop: 10 }}>{subtitle}</div>
 
         {note && (
           <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textMuted, marginTop: 8 }}>{note}</div>
+        )}
+
+        {hasProgress && (
+          <div style={{ marginTop: 20 }}>
+            <div style={{ height: 8, background: T.surfaceAlt, borderRadius: 4, overflow: 'hidden', border: `1px solid ${T.border}` }}>
+              <div
+                style={{
+                  height: '100%',
+                  width: `${Math.min(100, (progress.current / progress.total) * 100)}%`,
+                  background: T.primary,
+                  transition: 'width 0.3s ease',
+                }}
+              />
+            </div>
+            <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 8 }}>
+              {progress.current} / {progress.total} scenes
+            </div>
+          </div>
         )}
 
         {Number.isFinite(estimatedSeconds) && (

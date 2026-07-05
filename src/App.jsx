@@ -4,11 +4,15 @@ import Footer from './components/Footer';
 import ChannelsListStep from './steps/ChannelsListStep';
 import ChannelDashboardStep from './steps/ChannelDashboardStep';
 import CreateStep from './steps/CreateStep';
+import TitleSelectStep from './steps/TitleSelectStep';
 import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
-import { T, FONT, mono } from './theme';
+import FullScreenLoader from './components/FullScreenLoader';
+import { T, FONT, mono, card, btnGhost } from './theme';
 import { createId, saveVideo } from './lib/db';
+import { STYLES } from './lib/pollinations';
+import { generateAllScenes } from './lib/sceneOrchestrator';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -17,6 +21,37 @@ let beatIdCounter = 1;
 // entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
 const isSceneMediaReady = (s) =>
   Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
+
+// Turns the raw { narration, image_beats } scenes returned by api/generate-scenes.js into the
+// internal scene/beat shape the rest of the app works with — shared by the incremental partial
+// save (during chunked generation) and the final assembly, so both stay in sync.
+function buildScenesFromRaw(rawScenes) {
+  return (rawScenes || []).map((s) => {
+    const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
+    while (beats.length < 2) beats.push({});
+    return {
+      id: sceneIdCounter++,
+      narration: s.narration || '',
+      images: beats.map((b) => ({
+        id: beatIdCounter++,
+        prompt: b.image_prompt || '',
+        animation: b.animation || 'zoom_in',
+        referenceId: b.reference_id || null,
+        characterId: b.character_id || null,
+        variantLabel: b.variant_label || null,
+        seed: Math.floor(Math.random() * 999999),
+        status: 'idle',
+        url: '',
+        blob: null,
+      })),
+      pad: 0.3,
+      audioStatus: 'idle',
+      audioUrl: '',
+      audioBlob: null,
+      audioDuration: 0,
+    };
+  });
+}
 
 export default function App() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
@@ -27,7 +62,7 @@ export default function App() {
     topic: '',
     style: 'facestick',
     voice: 'af_heart',
-    length: 'short',
+    lengthMinutes: 5,
     format: '16:9',
     language: 'English',
     references: [],
@@ -37,10 +72,20 @@ export default function App() {
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
   const [createdAt, setCreatedAt] = useState(null);
-  // Bumped every time the open project is switched (new/resume/reset) so a debounced save
-  // scheduled for the *previous* project can detect it's stale and refuse to write, even if the
-  // effect-cleanup cancellation below ever fails to fire in time (e.g. a future refactor drops a
-  // dependency from the array below — there's no exhaustive-deps lint in this project to catch it).
+
+  // Titles → outline → chunked-scenes pipeline state. Transient — only meaningful while tab is
+  // 'titles' or 'generating-scenes'. Once scene generation finishes, everything converges into
+  // `project`, exactly like the old single-call flow.
+  const [titleOptions, setTitleOptions] = useState(null);
+  const [pendingPlan, setPendingPlan] = useState(null);
+  const [sceneProgress, setSceneProgress] = useState({ current: 0, total: 0 });
+  const [generationError, setGenerationError] = useState('');
+
+  // Bumped every time the open video is switched (new/resume/reset) so a debounced save
+  // scheduled for the *previous* video can detect it's stale and refuse to write, even if the
+  // effect-cleanup cancellation below ever fails to fire in time. Also used to abandon a
+  // titles/outline/scenes pipeline run that's no longer relevant (a newer one started, or the
+  // user reset) so its eventual completion doesn't silently stomp whatever came after it.
   const generationRef = useRef(0);
 
   useEffect(() => {
@@ -71,10 +116,86 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [project, settings, projectId, createdAt, currentChannelId]);
 
-  async function handlePlan(plan) {
+  // Phase 1: CreateStep only asks for title options — nothing is saved yet.
+  function handleTitles(titles) {
     generationRef.current += 1;
-    setProjectId(createId());
-    setCreatedAt(Date.now());
+    setTitleOptions(titles);
+    setPendingPlan(null);
+    setGenerationError('');
+    setTab('titles');
+  }
+
+  // Persists whatever scenes have been generated so far under the in-progress video's id, so a
+  // crash or refresh mid-generation never loses completed chunks — the video shows up in the
+  // channel dashboard (incomplete but resumable) even if generation never finishes.
+  function persistPartial(plan, rawScenesSoFar, id, createdAtVal) {
+    saveVideo({
+      id,
+      channelId: currentChannelId,
+      createdAt: createdAtVal,
+      updatedAt: Date.now(),
+      topic: settings.topic,
+      settings,
+      titles: [plan.title],
+      selectedTitle: 0,
+      description: plan.description,
+      tags: plan.tags,
+      thumbnails: plan.thumbnails,
+      subtitles: true,
+      references: plan.references,
+      characterBible: plan.characterBible,
+      scenes: buildScenesFromRaw(rawScenesSoFar),
+      displayTitle: plan.title || settings.topic?.slice(0, 60) || 'Untitled video',
+    });
+  }
+
+  async function runSceneGeneration(plan, id, createdAtVal, generation) {
+    const context = {
+      topic: settings.topic,
+      title: plan.title,
+      language: settings.language,
+      style: STYLES[settings.style].label,
+      format: settings.format,
+      characterBible: plan.characterBible,
+      references: plan.references.map((r) => ({ id: r.id, label: r.label })),
+    };
+
+    try {
+      const scenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
+        if (generationRef.current !== generation) return; // abandoned — a different video took over
+        setSceneProgress({ current: soFar.length, total });
+        persistPartial(plan, soFar, id, createdAtVal);
+      });
+      if (generationRef.current !== generation) return;
+      setProject({
+        titles: [plan.title],
+        selectedTitle: 0,
+        description: plan.description,
+        tags: plan.tags,
+        thumbnails: plan.thumbnails,
+        subtitles: true,
+        references: plan.references,
+        characterBible: plan.characterBible,
+        scenes: buildScenesFromRaw(scenes),
+      });
+      setTab('storyboard');
+    } catch (e) {
+      if (generationRef.current !== generation) return;
+      setGenerationError(String(e.message || e));
+    }
+  }
+
+  // Phase 2: TitleSelectStep has already fetched the outline — persist the pieces we have so far
+  // and kick off chunked scene generation in the background.
+  async function handleOutlineReady(outlineData, title, angle) {
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    const newProjectId = createId();
+    const newCreatedAt = Date.now();
+    setProjectId(newProjectId);
+    setCreatedAt(newCreatedAt);
+    setGenerationError('');
+
     // Reference files must survive reloads (IndexedDB) and later regenerations, so convert each
     // one to a plain Blob up front — same pattern as scene images (url + blob), since File objects
     // don't always survive structured-clone/IndexedDB round-trips as cleanly as Blobs do.
@@ -83,54 +204,55 @@ export default function App() {
         .filter((r) => r.file)
         .map(async (r) => ({ id: r.id, label: r.label, file: new Blob([await r.file.arrayBuffer()], { type: r.file.type }) }))
     );
-    setProject({
-      titles: plan.titles || [],
-      selectedTitle: 0,
-      description: plan.description || '',
-      tags: plan.tags || [],
-      thumbnails: plan.thumbnail_concepts || [],
-      subtitles: true,
+
+    const characterBible = (outlineData.character_bible || []).map((c) => ({
+      id: c.id || crypto.randomUUID(),
+      name: c.name || '',
+      baseDescription: c.base_description || '',
+      variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
+    }));
+
+    const plan = {
+      title,
+      angle,
+      description: outlineData.description || '',
+      tags: outlineData.tags || [],
+      thumbnails: outlineData.thumbnail_concepts || [],
+      characterBible,
       references,
-      // Text-only, no Blobs involved — survives IndexedDB round-trips with a plain passthrough.
-      characterBible: (plan.character_bible || []).map((c) => ({
-        id: c.id || crypto.randomUUID(),
-        name: c.name || '',
-        baseDescription: c.base_description || '',
-        variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
-      })),
-      scenes: (plan.scenes || []).map((s) => {
-        const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
-        while (beats.length < 2) beats.push({});
-        return {
-          id: sceneIdCounter++,
-          narration: s.narration || '',
-          images: beats.map((b) => ({
-            id: beatIdCounter++,
-            prompt: b.image_prompt || '',
-            animation: b.animation || 'zoom_in',
-            referenceId: b.reference_id || null,
-            characterId: b.character_id || null,
-            variantLabel: b.variant_label || null,
-            seed: Math.floor(Math.random() * 999999),
-            status: 'idle',
-            url: '',
-            blob: null,
-          })),
-          pad: 0.3,
-          audioStatus: 'idle',
-          audioUrl: '',
-          audioBlob: null,
-          audioDuration: 0,
-        };
-      }),
-    });
-    setTab('storyboard');
+      outline: outlineData.outline || [],
+      totalScenes: outlineData.total_scenes || 0,
+    };
+    setPendingPlan(plan);
+    setSceneProgress({ current: 0, total: plan.totalScenes });
+    setTab('generating-scenes');
+
+    await runSceneGeneration(plan, newProjectId, newCreatedAt, generation);
+  }
+
+  function retryScenes() {
+    if (!pendingPlan || !projectId) return;
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    setGenerationError('');
+    runSceneGeneration(pendingPlan, projectId, createdAt, generation);
+  }
+
+  function backToTitlesFromFailure() {
+    generationRef.current += 1;
+    setPendingPlan(null);
+    setGenerationError('');
+    setSceneProgress({ current: 0, total: 0 });
+    setTab('titles');
   }
 
   // Resume a project loaded from IndexedDB — object URLs never survive a reload, so they're
   // rebuilt here from the stored Blobs before the project goes into state.
   function handleResume(record) {
     generationRef.current += 1;
+    setTitleOptions(null);
+    setPendingPlan(null);
+    setGenerationError('');
     const scenes = (record.scenes || []).map((s) => ({
       ...s,
       images: (s.images || []).map((im) => ({
@@ -166,6 +288,10 @@ export default function App() {
     setProject(null);
     setProjectId(null);
     setCreatedAt(null);
+    setTitleOptions(null);
+    setPendingPlan(null);
+    setGenerationError('');
+    setSceneProgress({ current: 0, total: 0 });
     setSettings((s) => ({ ...s, topic }));
     setTab('create');
   }
@@ -188,14 +314,22 @@ export default function App() {
 
   const hasPlan = !!project;
   const hasMedia = hasPlan && project.scenes.every(isSceneMediaReady);
-  const currentVideoTitle = hasPlan ? project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video' : '';
+  const currentVideoTitle = hasPlan
+    ? project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video'
+    : pendingPlan?.title || '';
+
+  // The chunked scene-generation pipeline runs unattended across several sequential API calls —
+  // long enough that navigating away mid-run and coming back later would otherwise be surprising
+  // (the background work would still land on 'storyboard' whenever it finished). Locking nav
+  // during this phase keeps the dedicated Retry / Back-to-titles buttons as the only way out.
+  const inFlight = tab === 'generating-scenes';
 
   const tabs = [
-    { id: 'channels', label: 'Channels' },
-    { id: 'create', label: 'Create', disabled: !currentChannelId },
-    { id: 'storyboard', label: 'Storyboard', disabled: !hasPlan },
-    { id: 'editor', label: 'Editor', disabled: !hasMedia },
-    { id: 'export', label: 'Export', disabled: !hasMedia },
+    { id: 'channels', label: 'Channels', disabled: inFlight },
+    { id: 'create', label: 'Create', disabled: !currentChannelId || inFlight },
+    { id: 'storyboard', label: 'Storyboard', disabled: !hasPlan || inFlight },
+    { id: 'editor', label: 'Editor', disabled: !hasMedia || inFlight },
+    { id: 'export', label: 'Export', disabled: !hasMedia || inFlight },
   ];
 
   const breadcrumbBtn = {
@@ -216,18 +350,18 @@ export default function App() {
       <main style={{ flex: 1, width: '100%', maxWidth: 1200, margin: '0 auto', padding: isMobile ? '20px 14px' : '32px 20px' }}>
         {currentChannelId && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 20 }}>
-            <button onClick={backToChannels} style={breadcrumbBtn}>
+            <button onClick={backToChannels} disabled={inFlight} style={{ ...breadcrumbBtn, opacity: inFlight ? 0.5 : 1 }}>
               Channels
             </button>
             <span style={{ ...mono, fontSize: 12, color: T.textMuted }}>/</span>
             {tab === 'channels' ? (
               <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>{currentChannelName || 'Channel'}</span>
             ) : (
-              <button onClick={() => setTab('channels')} style={breadcrumbBtn}>
+              <button onClick={() => setTab('channels')} disabled={inFlight} style={{ ...breadcrumbBtn, opacity: inFlight ? 0.5 : 1 }}>
                 {currentChannelName || 'Channel'}
               </button>
             )}
-            {tab !== 'channels' && hasPlan && (
+            {tab !== 'channels' && currentVideoTitle && (
               <>
                 <span style={{ ...mono, fontSize: 12, color: T.textMuted }}>/</span>
                 <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>{currentVideoTitle}</span>
@@ -264,9 +398,51 @@ export default function App() {
                 and gives you a timeline to fine-tune — then exports a ready-to-upload YouTube video. Free AI, no watermarks.
               </p>
             </div>
-            <CreateStep settings={settings} setSettings={setSettings} onPlan={handlePlan} isMobile={isMobile} />
+            <CreateStep settings={settings} setSettings={setSettings} onTitles={handleTitles} isMobile={isMobile} />
           </>
         )}
+
+        {tab === 'titles' && (
+          <TitleSelectStep
+            titleOptions={titleOptions}
+            settings={settings}
+            onOutlineReady={handleOutlineReady}
+            onBack={() => setTab('create')}
+          />
+        )}
+
+        {tab === 'generating-scenes' &&
+          (generationError ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div
+                style={{
+                  ...card,
+                  borderColor: T.primaryBorder,
+                  background: T.primaryLight,
+                  padding: 14,
+                  fontSize: 13,
+                  color: T.primary,
+                  fontFamily: FONT.ui,
+                }}
+              >
+                {generationError}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={retryScenes} style={btnGhost}>
+                  Retry
+                </button>
+                <button onClick={backToTitlesFromFailure} style={btnGhost}>
+                  ← Back to titles
+                </button>
+              </div>
+            </div>
+          ) : (
+            <FullScreenLoader
+              title="Writing your scenes…"
+              subtitle="Claude is turning the outline into narration and image prompts, chapter by chapter"
+              progress={sceneProgress}
+            />
+          ))}
 
         {tab === 'storyboard' && project && (
           <StoryboardStep

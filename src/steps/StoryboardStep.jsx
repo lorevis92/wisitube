@@ -193,32 +193,11 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Titles */}
+      {/* Title — chosen earlier in TitleSelectStep, shown here as a static, non-editable header */}
       <div style={card}>
-        <div style={label}>2 · Pick your title</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
-          {project.titles.map((t, i) => {
-            const active = i === project.selectedTitle;
-            return (
-              <button
-                key={i}
-                onClick={() => setProject((p) => ({ ...p, selectedTitle: i }))}
-                style={{
-                  textAlign: 'left',
-                  padding: '11px 14px',
-                  borderRadius: 4,
-                  border: `1px solid ${active ? T.primary : T.border}`,
-                  background: active ? T.primaryLight : '#FFFFFF',
-                  color: T.text,
-                  fontSize: 14,
-                  fontWeight: active ? 700 : 500,
-                  fontFamily: FONT.ui,
-                }}
-              >
-                {t}
-              </button>
-            );
-          })}
+        <div style={label}>Title</div>
+        <div style={{ fontFamily: FONT.ui, fontSize: 18, fontWeight: 700, color: T.text, marginTop: 10, lineHeight: 1.3 }}>
+          {project.titles?.[project.selectedTitle] || 'Untitled video'}
         </div>
 
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 18, paddingTop: 10 }}>
