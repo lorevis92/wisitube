@@ -1,7 +1,7 @@
 // WisiTube timeline engine.
-// One code path drives both the live preview and the WebM export:
-// audio is scheduled on an AudioContext, the canvas is drawn every frame from
-// the audio clock, so image/animation changes are sample-accurate with the voiceover.
+// drawFrame() is the single source of truth for "what does the video look like at time t" —
+// used both by the live preview/real-time recorder below and by the offline WebCodecs exporter
+// (src/lib/exporter.js), so the exported video always matches what was previewed.
 
 export const ANIMATION_LIST = ['zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'drift_up', 'static'];
 
@@ -13,6 +13,9 @@ const ANIMATIONS = {
   drift_up: (p) => ({ scale: 1.16, dx: 0, dy: 0.04 - 0.08 * p }),
   static: () => ({ scale: 1.04, dx: 0, dy: 0 }),
 };
+
+const FADE = 0.35; // crossfade between scenes
+const BEAT_FADE = 0.3; // shorter crossfade between a scene's two image beats
 
 function ease(p) {
   return p * p * (3 - 2 * p); // smoothstep
@@ -148,6 +151,82 @@ function drawSubtitle(ctx, W, H, words, localTime, duration) {
   });
 }
 
+function drawBeat(ctx, W, H, beat, p, alpha) {
+  const tr = (ANIMATIONS[beat.animation] || ANIMATIONS.zoom_in)(ease(p));
+  ctx.globalAlpha = alpha;
+  drawCover(ctx, beat.img, W, H, tr.scale, tr.dx, tr.dy);
+  ctx.globalAlpha = 1;
+}
+
+// Single source of truth for "which half of the scene are we in" — shared by the image beats and
+// the subtitles so the two switch at exactly the same instant.
+function sceneBeatState(item, local) {
+  const half = Math.max(0.0001, item.duration / 2);
+  const inSecondBeat = local >= half;
+  const beatLocal = inSecondBeat ? local - half : local;
+  return { half, inSecondBeat, beatLocal };
+}
+
+// local: seconds elapsed since this scene started (clamped to [0, item.duration] by the caller).
+function drawScene(ctx, W, H, item, local, alpha = 1) {
+  const { half, inSecondBeat, beatLocal } = sceneBeatState(item, local);
+  const beatP = Math.min(1, Math.max(0, beatLocal / half));
+
+  drawBeat(ctx, W, H, item.images[inSecondBeat ? 1 : 0], beatP, alpha);
+  if (inSecondBeat && beatLocal < BEAT_FADE) {
+    // Cross-fade the outgoing beat 1's final frame out on top of the incoming beat 2.
+    drawBeat(ctx, W, H, item.images[0], 1, alpha * (1 - beatLocal / BEAT_FADE));
+  }
+}
+
+// Cumulative start time (seconds) of each item, in timeline order.
+function computeStarts(items) {
+  let acc = 0;
+  return items.map((it) => {
+    const s = acc;
+    acc += it.duration;
+    return s;
+  });
+}
+
+export function totalDuration(items) {
+  return items.reduce((a, it) => a + it.duration, 0);
+}
+
+/**
+ * Draws the full frame (background, active scene + crossfade, subtitles) for absolute time `t`
+ * (seconds) onto `ctx`. Pure with respect to the timeline: the same (items, t) always produces
+ * the same pixels, whether called 60x/sec from the live preview or once per frame from the
+ * offline exporter.
+ */
+export function drawFrame(ctx, items, t, { W, H, subtitles = false } = {}) {
+  const starts = computeStarts(items);
+  const total = totalDuration(items);
+  const tt = Math.max(0, Math.min(t, total));
+
+  let idx = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (tt >= starts[i]) idx = i;
+  }
+  const it = items[idx];
+  const local = tt - starts[idx];
+
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, W, H);
+  drawScene(ctx, W, H, it, local, 1);
+  if (idx > 0 && local < FADE) {
+    const prev = items[idx - 1];
+    drawScene(ctx, W, H, prev, prev.duration, 1 - local / FADE);
+  }
+  if (subtitles) {
+    const { half, inSecondBeat, beatLocal } = sceneBeatState(it, local);
+    const [firstHalfWords, secondHalfWords] = splitNarrationHalves(it.narration);
+    drawSubtitle(ctx, W, H, inSecondBeat ? secondHalfWords : firstHalfWords, beatLocal, half);
+  }
+
+  return idx;
+}
+
 export function pickMime() {
   const candidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
   for (const m of candidates) {
@@ -214,37 +293,6 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
     recorder.start(300);
   }
 
-  const FADE = 0.35; // crossfade between scenes
-  const BEAT_FADE = 0.3; // shorter crossfade between a scene's two image beats
-
-  function drawBeat(beat, p, alpha) {
-    const tr = (ANIMATIONS[beat.animation] || ANIMATIONS.zoom_in)(ease(p));
-    ctx.globalAlpha = alpha;
-    drawCover(ctx, beat.img, W, H, tr.scale, tr.dx, tr.dy);
-    ctx.globalAlpha = 1;
-  }
-
-  // Single source of truth for "which half of the scene are we in" — shared by the image beats
-  // and the subtitles below so the two switch at exactly the same instant.
-  function sceneBeatState(item, local) {
-    const half = Math.max(0.0001, item.duration / 2);
-    const inSecondBeat = local >= half;
-    const beatLocal = inSecondBeat ? local - half : local;
-    return { half, inSecondBeat, beatLocal };
-  }
-
-  // local: seconds elapsed since this scene started (clamped to [0, item.duration] by the caller).
-  function drawScene(item, local, alpha = 1) {
-    const { half, inSecondBeat, beatLocal } = sceneBeatState(item, local);
-    const beatP = Math.min(1, Math.max(0, beatLocal / half));
-
-    drawBeat(item.images[inSecondBeat ? 1 : 0], beatP, alpha);
-    if (inSecondBeat && beatLocal < BEAT_FADE) {
-      // Cross-fade the outgoing beat 1's final frame out on top of the incoming beat 2.
-      drawBeat(item.images[0], 1, alpha * (1 - beatLocal / BEAT_FADE));
-    }
-  }
-
   function frame() {
     if (stopped) return;
     const now = ac.currentTime - startAt;
@@ -254,21 +302,8 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
     for (let i = 0; i < items.length; i++) {
       if (tt >= starts[i]) idx = i;
     }
-    const it = items[idx];
-    const local = tt - starts[idx];
 
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, W, H);
-    drawScene(it, local, 1);
-    if (idx > 0 && local < FADE) {
-      const prev = items[idx - 1];
-      drawScene(prev, prev.duration, 1 - local / FADE);
-    }
-    if (subtitles) {
-      const { half, inSecondBeat, beatLocal } = sceneBeatState(it, local);
-      const [firstHalfWords, secondHalfWords] = splitNarrationHalves(it.narration);
-      drawSubtitle(ctx, W, H, inSecondBeat ? secondHalfWords : firstHalfWords, beatLocal, half);
-    }
+    drawFrame(ctx, items, tt, { W, H, subtitles });
 
     if (onProgress) onProgress(tt, total, idx);
 

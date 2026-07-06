@@ -2,13 +2,17 @@ import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { loadImage, decodeAudio, buildImageUrl } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
+import { renderToMp4, WebCodecsUnsupportedError } from '../lib/exporter';
 
 export default function ExportStep({ project, settings, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
+  const abortRef = useRef(null);
   const [rendering, setRendering] = useState(false);
   const [pct, setPct] = useState(0);
   const [videoUrl, setVideoUrl] = useState('');
+  const [fileExt, setFileExt] = useState('mp4');
+  const [usingFallback, setUsingFallback] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState('');
 
@@ -28,8 +32,11 @@ export default function ExportStep({ project, settings, isMobile }) {
   async function renderVideo() {
     setError('');
     setVideoUrl('');
+    setUsingFallback(false);
     setRendering(true);
     setPct(0);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const items = await Promise.all(
         scenes.map(async (s) => ({
@@ -41,25 +48,46 @@ export default function ExportStep({ project, settings, isMobile }) {
           narration: s.narration,
         }))
       );
-      const controller = await playTimeline({
-        canvas: canvasRef.current,
-        items,
-        subtitles: project.subtitles,
-        record: true,
-        onProgress: (t, tot) => setPct(Math.min(100, Math.round((t / tot) * 100))),
-        onDone: () => {},
-      });
-      controllerRef.current = controller;
-      const blob = await controller.blobPromise;
+
+      let blob, ext;
+      try {
+        blob = await renderToMp4({
+          items,
+          width: dims.W,
+          height: dims.H,
+          subtitles: project.subtitles,
+          onProgress: (frameIndex, totalFrames) => setPct(Math.min(100, Math.round((frameIndex / totalFrames) * 100))),
+          signal: controller.signal,
+        });
+        ext = 'mp4';
+      } catch (e) {
+        if (!(e instanceof WebCodecsUnsupportedError)) throw e;
+        // Fast path unavailable in this browser — fall back to the original real-time recorder.
+        setUsingFallback(true);
+        setPct(0);
+        const playback = await playTimeline({
+          canvas: canvasRef.current,
+          items,
+          subtitles: project.subtitles,
+          record: true,
+          onProgress: (t, tot) => setPct(Math.min(100, Math.round((t / tot) * 100))),
+          onDone: () => {},
+        });
+        controllerRef.current = playback;
+        blob = await playback.blobPromise;
+        ext = 'webm';
+      }
       setVideoUrl(URL.createObjectURL(blob));
+      setFileExt(ext);
     } catch (e) {
-      setError('Render failed: ' + String(e.message || e));
+      if (e?.name !== 'AbortError') setError('Render failed: ' + String(e.message || e));
     } finally {
       setRendering(false);
     }
   }
 
   function cancelRender() {
+    abortRef.current?.abort();
     controllerRef.current?.stop();
     setRendering(false);
   }
@@ -144,22 +172,18 @@ export default function ExportStep({ project, settings, isMobile }) {
       <div style={card}>
         <div style={label}>5 · Export video</div>
         <div style={{ fontSize: 13, color: T.textSecondary, marginTop: 8, fontFamily: FONT.ui }}>
-          The video renders in real time in your browser (~{Math.ceil(total)}s). Keep this tab visible until it finishes.
-          Output is <span style={mono}>.webm</span> — YouTube accepts it directly.
+          Rendering runs offline in your browser — usually 3-6x faster than the video's own length
+          (~{Math.max(1, Math.round(total / 6))}-{Math.max(1, Math.round(total / 3))}s for this video). Keep this tab open until it finishes.
+          Output is <span style={mono}>.mp4</span> — YouTube accepts it directly.
         </div>
-        <div style={{ marginTop: 12, background: '#000', borderRadius: 4, overflow: 'hidden', display: 'flex', justifyContent: 'center' }}>
-          <canvas
-            ref={canvasRef}
-            width={dims.W}
-            height={dims.H}
-            style={{
-              width: settings.format === '9:16' ? 'auto' : '100%',
-              height: settings.format === '9:16' ? (isMobile ? 380 : 460) : 'auto',
-              maxWidth: '100%',
-              display: 'block',
-            }}
-          />
-        </div>
+        {usingFallback && (
+          <div style={{ marginTop: 10, fontSize: 12, color: T.yellow, fontFamily: FONT.ui }}>
+            Your browser doesn't support fast export — falling back to real-time WebM.
+          </div>
+        )}
+        {/* Only actually rendered to when the WebM fallback path runs (needs a live canvas to
+            captureStream from) — the fast path draws to its own offscreen canvas instead. */}
+        <canvas ref={canvasRef} width={dims.W} height={dims.H} style={{ display: 'none' }} />
         <div style={{ display: 'flex', gap: 10, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           {rendering ? (
             <>
@@ -177,10 +201,10 @@ export default function ExportStep({ project, settings, isMobile }) {
           {videoUrl && !rendering && (
             <a
               href={videoUrl}
-              download={`${safeName}.webm`}
+              download={`${safeName}.${fileExt}`}
               style={{ ...btnPrimary, background: T.green, borderColor: T.green, textDecoration: 'none', padding: '12px 20px' }}
             >
-              ↓ Download .webm
+              ↓ Download .{fileExt}
             </a>
           )}
         </div>
