@@ -33,7 +33,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let topic, title, chapterTitle, chapterSummary, sceneCount, language, style, vertical;
+    let topic, title, chapterTitle, chapterSummary, sceneCount, language, style, imageProvider, vertical;
     let characterBible, refs, previousTail, isVeryFirstChunk, isVeryLastChunk;
     try {
       const body = req.body || {};
@@ -50,6 +50,7 @@ export default async function handler(req, res) {
 
       language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
+      imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
       vertical = body.format === '9:16';
 
       characterBible = Array.isArray(body.characterBible)
@@ -98,6 +99,16 @@ ${characterBible.map((c) => `- id: "${c.id}", name: "${c.name}"${c.variants.leng
 For EVERY image beat where one of these characters is visibly present — as the focal subject, in the background, or partially visible — character_id and variant_label are REQUIRED: do NOT leave them null just because no variant is a perfect match, pick the closest one by that beat's narrative context. Only set character_id and variant_label to null when no character_bible character is genuinely depicted in that specific beat. If a beat has both a valid reference_id and a valid character_id for the same character, reference_id (a real photo) takes priority for the final image — character_id and variant_label are still saved as information regardless.`
       : '';
 
+    // Pollinations (Flux/Kontext) has no real-world knowledge and cannot render legible text —
+    // literal, name-free descriptions and a hard "no text" rule are what keep it on target.
+    // Nano Banana 2 / GPT Image 2 are LLM-native: they recognize named real people and characters
+    // and can render accurate on-screen text, so the instruction leans into both strengths instead
+    // of fighting them.
+    const premiumProvider = imageProvider === 'nanobanana' || imageProvider === 'gptimage';
+    const imagePromptFieldDescription = premiumProvider
+      ? `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Write it as a natural sentence that explicitly names the recognizable character/person by their proper name or title (e.g. "Legolas skateboarding in streetwear", not "a blond elf with pointed ears skateboarding") — trust the model's own knowledge for their appearance. Additionally: if this beat visually represents a specific number, statistic, price, percentage, or short quote mentioned in the narration, include the EXACT text to render on-screen in quotes within the prompt (e.g. a chart labeled "+340%"), and state it must be rendered verbatim, character-for-character accurate — never approximated or altered. Only do this when on-screen text genuinely aids comprehension (data/finance/stats content), not for purely narrative/scenic beats.`
+      : `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.`;
+
     const continuityNote = [
       `You are writing scenes 1-${sceneCount} of the chapter '${chapterTitle}': ${chapterSummary}.`,
       previousTail
@@ -121,7 +132,7 @@ JSON schema:
   "scenes": [exactly ${sceneCount} objects: {
     "narration": "what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}",
     "image_beats": [exactly 2 objects: {
-      "image_prompt": "concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.",
+      "image_prompt": "${imagePromptFieldDescription}",
       "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
       "reference_id": string | null,
       "character_id": string | null,

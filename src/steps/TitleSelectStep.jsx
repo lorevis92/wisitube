@@ -28,6 +28,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           language: settings.language,
           lengthMinutes: settings.lengthMinutes,
           style: STYLES[settings.style].label,
+          imageProvider: settings.imageProvider,
           characterHints,
           generalNotes: (settings.generalNotes || '').trim(),
           references,

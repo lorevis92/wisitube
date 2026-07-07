@@ -27,11 +27,17 @@ export function buildTelegraphicPrompt({ scenePrompt, styleSuffix, characterTrai
 // Full sentences, and — when a character bible character is present — its name used explicitly
 // as a semantic anchor ("The character Napoleon...") rather than only a trait list, since these
 // models associate named entities with strong visual priors far better than trait lists alone.
+// A recognizable character's base_description is often deliberately minimal or empty (see the
+// provider-aware note in api/generate-outline.js: the model already knows their appearance), so
+// characterTraits may end up empty even though characterName is set — never drop the name in that
+// case, it's the whole point of naming them instead of describing them.
 export function buildNaturalLanguagePrompt({ scenePrompt, styleSuffix, characterName = '', characterTraits = '' }) {
   const parts = [`${scenePrompt}, illustrated in this visual style: ${styleSuffix}.`];
 
   if (characterName && characterTraits) {
     parts.push(`The character ${characterName} appears in this scene — depict them with these defining traits: ${characterTraits}.`);
+  } else if (characterName) {
+    parts.push(`The character ${characterName} appears in this scene, depicted as the model recognizes them.`);
   } else if (characterTraits) {
     parts.push(`The main character in this scene has these defining traits: ${characterTraits}.`);
   }

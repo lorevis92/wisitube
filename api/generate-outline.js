@@ -31,7 +31,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let topic, title, angle, language, lengthMinutes, style, hints, notes, refs, totalScenes;
+    let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -42,6 +42,7 @@ export default async function handler(req, res) {
 
       language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
+      imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
 
       lengthMinutes = Number(body.lengthMinutes);
       if (!Number.isFinite(lengthMinutes) || lengthMinutes <= 0) lengthMinutes = 1;
@@ -65,6 +66,16 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
+    // Nano Banana 2 / GPT Image 2 are LLM-native models with real-world knowledge of well-known
+    // people and characters, unlike Pollinations' Flux/Kontext — writing exhaustive physical
+    // descriptions for a recognizable figure is redundant at best and can actively fight what the
+    // model would otherwise render correctly from the name alone.
+    const providerAwareCharacterNote = imageProvider !== 'pollinations'
+      ? `
+
+The image model has strong built-in world knowledge and will recognize well-known real people and iconic fictional characters by name alone — do NOT write exhaustive physical descriptions for them, it's redundant and may conflict with what the model already renders correctly. For these characters, keep base_description minimal or empty, and use variants ONLY to pin down story-specific appearance choices the model wouldn't automatically infer — which specific life stage/era to depict, a specific costume or prop relevant to that scene. For invented/fictional characters with no public recognition (i.e. not portrayed by any known actor or widely depicted), still write a full base_description as before — there's nothing for the model to already know.`
+      : '';
+
     const referenceContext = refs.length
       ? `
 
@@ -81,7 +92,7 @@ For every real, named, identifiable person in the character_bible (historical fi
 
 CRITICAL: descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.
 
-Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${referenceContext}`;
+Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}`;
 
     const systemPrompt = `You are a YouTube strategist and scriptwriter for successful faceless animated channels.
 

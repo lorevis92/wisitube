@@ -157,6 +157,7 @@ export default function App() {
       language: settings.language,
       style: STYLES[settings.style].label,
       format: settings.format,
+      imageProvider: settings.imageProvider,
       characterBible: plan.characterBible,
       references: plan.references.map((r) => ({ id: r.id, label: r.label })),
     };
