@@ -86,13 +86,13 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       traits = [character?.baseDescription, variant?.description].filter(Boolean).join(', ');
     }
 
-    const styleSuffix = STYLES[settings.style].suffix;
+    const style = STYLES[settings.style];
     const provider = settings.imageProvider || 'pollinations';
 
     if (provider === 'pollinations') {
-      return buildTelegraphicPrompt({ scenePrompt: beat.prompt, styleSuffix, characterTraits: traits });
+      return buildTelegraphicPrompt({ scenePrompt: beat.prompt, styleSuffix: style.suffix, characterTraits: traits });
     }
-    return buildNaturalLanguagePrompt({ scenePrompt: beat.prompt, styleSuffix, characterName: character?.name, characterTraits: traits });
+    return buildNaturalLanguagePrompt({ scenePrompt: beat.prompt, styleDescription: style.natural, characterName: character?.name, characterTraits: traits });
   }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {

@@ -31,8 +31,9 @@ export function buildTelegraphicPrompt({ scenePrompt, styleSuffix, characterTrai
 // provider-aware note in api/generate-outline.js: the model already knows their appearance), so
 // characterTraits may end up empty even though characterName is set — never drop the name in that
 // case, it's the whole point of naming them instead of describing them.
-export function buildNaturalLanguagePrompt({ scenePrompt, styleSuffix, characterName = '', characterTraits = '' }) {
-  const parts = [`${scenePrompt}, illustrated in this visual style: ${styleSuffix}.`];
+export function buildNaturalLanguagePrompt({ scenePrompt, styleDescription, characterName = '', characterTraits = '' }) {
+  const parts = [`Scene: ${scenePrompt}.`];
+  if (styleDescription) parts.push(styleDescription);
 
   if (characterName && characterTraits) {
     parts.push(`The character ${characterName} appears in this scene — depict them with these defining traits: ${characterTraits}.`);
@@ -42,8 +43,12 @@ export function buildNaturalLanguagePrompt({ scenePrompt, styleSuffix, character
     parts.push(`The main character in this scene has these defining traits: ${characterTraits}.`);
   }
 
+  // "Scene:" above may itself contain deliberate on-screen text the model was instructed to
+  // render verbatim (api/generate-scenes.js's provider-aware image_prompt instruction for
+  // data/stats beats) — the default anti-gibberish rule below must yield to that when present,
+  // not silently override it.
   parts.push(
-    'The figure must be anatomically correct, with a single coherent body and the correct number of limbs and fingers. Do not include any text, letters, or words in the image.'
+    'The figure must be anatomically correct, with a single coherent body and the correct number of limbs and fingers. Do not include any text, letters, or words in the image unless the scene description above explicitly specifies exact text to render on-screen — in that case, render exactly that text and nothing else, verbatim.'
   );
 
   return parts.join(' ');

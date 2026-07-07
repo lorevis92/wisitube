@@ -11,7 +11,7 @@
 // Every phase has its own try/catch so a failure anywhere returns a clear JSON error with a phase
 // tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
 
-export const config = { maxDuration: 60 };
+export const config = { maxDuration: 120 };
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
