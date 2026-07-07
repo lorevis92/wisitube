@@ -61,28 +61,6 @@ export function buildImageUrl(prompt, { width = 1280, height = 720, seed = 42 } 
   );
 }
 
-// Reference-photo editing (kontext) goes through our own proxy (api/pollinations-image.js) in a
-// single multipart request — the reference file + prompt go straight to Pollinations' image-edit
-// endpoint server-side, where the secret key lives. No separate upload step.
-export async function generateWithReference(prompt, referenceFile, { width = 1280, height = 720 } = {}) {
-  const form = new FormData();
-  form.append('image', referenceFile, referenceFile.name || 'reference.jpg');
-  form.append('prompt', prompt);
-  form.append('width', String(width));
-  form.append('height', String(height));
-  const res = await fetch('/api/pollinations-image', {
-    method: 'POST',
-    body: form,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.error ? `${body.error}${body.detail ? `: ${body.detail}` : ''}` : `Reference image edit failed (HTTP ${res.status})`);
-  }
-  const data = await res.json();
-  if (!data.url) throw new Error('Reference image edit succeeded but returned no image URL');
-  return data.url;
-}
-
 // ---- media caches (module-level, survive re-renders) ----
 const imageCache = new Map(); // url -> Promise<HTMLImageElement>
 const bufferCache = new Map(); // audioBlobUrl -> Promise<AudioBuffer>

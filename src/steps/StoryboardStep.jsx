@@ -1,13 +1,25 @@
 import React, { useMemo, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, buildImageUrl, generateWithReference, loadImage, decodeAudio } from '../lib/pollinations';
+import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
 import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
 import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
 import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
 import { ANIMATION_LIST } from '../lib/engine';
+import { generateImage } from '../lib/sceneOrchestrator';
+import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
+import { priceForImage, PROVIDER_LABELS } from '../lib/imageProviders';
 import ImageLightbox from '../components/ImageLightbox';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function blobToDataUri(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
 
 // Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
 // entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
@@ -19,6 +31,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const [progressMsg, setProgressMsg] = useState('');
   const [showSeo, setShowSeo] = useState(false);
   const [lightbox, setLightbox] = useState(null);
+  const [costConfirm, setCostConfirm] = useState(null); // { provider, count, total } | null
 
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
 
@@ -60,29 +73,26 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
   // Reference photos (a real face) always win over the text-only character bible for the same
   // beat — the bible's traits are appended only when there's no active photo anchoring this beat.
-  // Fixed order: style first (so it isn't diluted/buried by everything after it), then the scene,
-  // then character traits, then the short fixed suffix. If the result is too long, only the
-  // character-traits segment is trimmed — style and scene are never touched.
+  // Pollinations gets the compact, telegraphic style (its model needs unambiguous fragments);
+  // Nano Banana 2 / GPT Image 2 get full natural-language sentences, with the character's name
+  // used as an explicit semantic anchor when one applies.
   function fullPrompt(beat) {
     const hasReference = !!(beat.referenceId && (project.references || []).some((r) => r.id === beat.referenceId));
+    let character = null;
     let traits = '';
     if (beat.characterId && !hasReference) {
-      const character = (project.characterBible || []).find((c) => c.id === beat.characterId);
+      character = (project.characterBible || []).find((c) => c.id === beat.characterId);
       const variant = character && (character.variants || []).find((v) => v.label === beat.variantLabel);
       traits = [character?.baseDescription, variant?.description].filter(Boolean).join(', ');
     }
 
-    const style = STYLES[settings.style].suffix;
-    const suffix = ', no text, no letters, single coherent figure, correct anatomy';
-    const build = (t) => `${style}. ${beat.prompt}${t ? `, ${t}` : ''}${suffix}`;
+    const styleSuffix = STYLES[settings.style].suffix;
+    const provider = settings.imageProvider || 'pollinations';
 
-    let prompt = build(traits);
-    if (prompt.length > 500 && traits) {
-      const overBy = prompt.length - 500;
-      traits = traits.slice(0, Math.max(0, traits.length - overBy));
-      prompt = build(traits);
+    if (provider === 'pollinations') {
+      return buildTelegraphicPrompt({ scenePrompt: beat.prompt, styleSuffix, characterTraits: traits });
     }
-    return prompt;
+    return buildNaturalLanguagePrompt({ scenePrompt: beat.prompt, styleSuffix, characterName: character?.name, characterTraits: traits });
   }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {
@@ -91,18 +101,20 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     const beat = scene.images[beatIndex];
     const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
     const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
+    const provider = settings.imageProvider || 'pollinations';
     updateImage(sceneId, beatIndex, { status: 'loading', seed });
     const startedAt = performance.now();
     try {
-      const url = reference
-        ? await generateWithReference(fullPrompt(beat), reference.file, dims)
-        : buildImageUrl(fullPrompt(beat), { ...dims, seed });
-      await loadImage(url);
+      // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
+      // natively as referenceImages, same principle already used for Pollinations kontext.
+      const referenceImages = reference ? [await blobToDataUri(reference.file)] : [];
+      const { imageUrl } = await generateImage(fullPrompt(beat), provider, referenceImages, { ...dims, seed, quality: 'medium' });
+      await loadImage(imageUrl);
       // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
-      const imageBlob = await (await fetch(url)).blob();
-      const imageUrl = URL.createObjectURL(imageBlob);
+      const imageBlob = await (await fetch(imageUrl)).blob();
+      const objectUrl = URL.createObjectURL(imageBlob);
       recordImageTime((performance.now() - startedAt) / 1000);
-      updateImage(sceneId, beatIndex, { status: 'ready', url: imageUrl, blob: imageBlob });
+      updateImage(sceneId, beatIndex, { status: 'ready', url: objectUrl, blob: imageBlob });
       return true;
     } catch {
       updateImage(sceneId, beatIndex, { status: 'error' });
@@ -170,6 +182,43 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
     setProgressMsg('');
     setRunning(false);
+  }
+
+  // Paid providers require an explicit confirmation before any billable call goes out — computed
+  // from the beats that actually still need generating (not a blind scenes×2 for the whole video),
+  // so "Generate missing" on a partially-done video quotes only what will really be charged.
+  function pendingBeats() {
+    const list = [];
+    project.scenes.forEach((s) => s.images.forEach((im) => { if (im.status !== 'ready') list.push(im); }));
+    return list;
+  }
+
+  function estimateCost(provider) {
+    const beats = pendingBeats();
+    const total = beats.reduce(
+      (sum, beat) => sum + priceForImage(provider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: !!beat.referenceId }),
+      0
+    );
+    return { count: beats.length, total };
+  }
+
+  function requestGenerateAll() {
+    const provider = settings.imageProvider || 'pollinations';
+    if (provider === 'pollinations') {
+      generateAll();
+      return;
+    }
+    const { count, total } = estimateCost(provider);
+    if (count === 0) {
+      generateAll();
+      return;
+    }
+    setCostConfirm({ provider, count, total });
+  }
+
+  function confirmGenerateAll() {
+    setCostConfirm(null);
+    generateAll();
   }
 
   const readyCount = project.scenes.filter(isSceneReady).length;
@@ -283,7 +332,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
           )}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={generateAll} disabled={running || allReady} style={{ ...btnPrimary, opacity: running || allReady ? 0.6 : 1 }}>
+          <button onClick={requestGenerateAll} disabled={running || allReady} style={{ ...btnPrimary, opacity: running || allReady ? 0.6 : 1 }}>
             {running ? 'Generating…' : allReady ? 'All ready ✓' : readyCount > 0 ? 'Generate missing' : 'Generate all media'}
           </button>
           {allReady && (
@@ -442,6 +491,39 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       </div>
 
       {lightbox && <ImageLightbox src={lightbox.url} alt={lightbox.alt} onClose={() => setLightbox(null)} />}
+
+      {costConfirm && (
+        <div
+          onClick={() => setCostConfirm(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2000,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ ...card, maxWidth: 420, padding: 24 }}>
+            <div style={{ fontFamily: FONT.display, fontSize: 20, color: T.text }}>Confirm paid generation</div>
+            <div style={{ fontFamily: FONT.ui, fontSize: 14, color: T.textSecondary, marginTop: 12, lineHeight: 1.6 }}>
+              This will generate ~{costConfirm.count} image{costConfirm.count === 1 ? '' : 's'} with{' '}
+              {(PROVIDER_LABELS[costConfirm.provider] || costConfirm.provider).replace(/\s*\(.*\)$/, '')}, estimated cost ≈ $
+              {costConfirm.total.toFixed(2)}. Continue?
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+              <button onClick={confirmGenerateAll} style={{ ...btnPrimary, flex: 1 }}>
+                Confirm & generate
+              </button>
+              <button onClick={() => setCostConfirm(null)} style={{ ...btnGhost, flex: 1 }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

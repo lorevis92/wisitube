@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
+import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { KOKORO_VOICES, generateSpeech } from '../lib/tts';
 import { TITLES_PHASE_S } from '../lib/estimator';
 import FullScreenLoader from '../components/FullScreenLoader';
@@ -142,6 +143,20 @@ export default function CreateStep({ settings, setSettings, onTitles, isMobile }
               {Object.entries(STYLES).map(([id, s]) => (
                 <option key={id} value={id}>
                   {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <div style={label}>Image engine</div>
+            <select
+              value={settings.imageProvider || 'pollinations'}
+              onChange={(e) => set('imageProvider', e.target.value)}
+              style={{ ...inputStyle, marginTop: 8 }}
+            >
+              {Object.entries(PROVIDER_LABELS).map(([id, providerLabel]) => (
+                <option key={id} value={id}>
+                  {providerLabel}
                 </option>
               ))}
             </select>

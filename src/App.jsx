@@ -62,6 +62,7 @@ export default function App() {
     topic: '',
     style: 'facestick',
     voice: 'af_heart',
+    imageProvider: 'pollinations',
     lengthMinutes: 5,
     format: '16:9',
     language: 'English',
