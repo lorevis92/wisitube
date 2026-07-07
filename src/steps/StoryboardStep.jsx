@@ -5,9 +5,10 @@ import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
 import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
 import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
 import { ANIMATION_LIST } from '../lib/engine';
-import { generateImage } from '../lib/sceneOrchestrator';
+import { generateImage, generateAudio, runWithConcurrency, MAX_PAID_CONCURRENCY } from '../lib/sceneOrchestrator';
 import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
-import { priceForImage, PROVIDER_LABELS } from '../lib/imageProviders';
+import { priceForImage } from '../lib/imageProviders';
+import { priceForVoice } from '../lib/voiceProviders';
 import ImageLightbox from '../components/ImageLightbox';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -31,7 +32,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const [progressMsg, setProgressMsg] = useState('');
   const [showSeo, setShowSeo] = useState(false);
   const [lightbox, setLightbox] = useState(null);
-  const [costConfirm, setCostConfirm] = useState(null); // { provider, count, total } | null
+  const [costConfirm, setCostConfirm] = useState(null); // { imageCount, imageTotal, charCount, voiceTotal, total } | null
 
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
 
@@ -125,14 +126,22 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   async function genAudio(scene) {
     updateScene(scene.id, { audioStatus: 'loading', audioError: null });
     const startedAt = performance.now();
+    const voiceEngine = settings.voiceEngine || 'kokoro';
     const wasWarmBefore = isModelWarm();
     try {
-      const audioBlob = await generateSpeech(scene.narration, settings.voice);
+      let audioBlob;
+      if (voiceEngine === 'minimax') {
+        const { audioUrl: remoteUrl } = await generateAudio(scene.narration, settings.voice, { language: settings.language });
+        audioBlob = await (await fetch(remoteUrl)).blob();
+      } else {
+        audioBlob = await generateSpeech(scene.narration, settings.voice);
+      }
       const audioUrl = URL.createObjectURL(audioBlob);
       const buffer = await decodeAudio(audioUrl);
       // Skip the sample if this call paid the one-time model download/load cost — that's
       // accounted for separately (the +90s term), and would otherwise wreck the moving average.
-      if (wasWarmBefore) recordAudioTime((performance.now() - startedAt) / 1000);
+      // MiniMax has no such warm-up cost, so its timings always count.
+      if (voiceEngine === 'minimax' || wasWarmBefore) recordAudioTime((performance.now() - startedAt) / 1000);
       updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioBlob, audioDuration: buffer.duration, audioError: null });
       return true;
     } catch (e) {
@@ -144,7 +153,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   async function generateAll() {
     setRunning(true);
     await acquireWakeLock();
-    const scenes = project.scenes;
+    const voiceEngine = settings.voiceEngine || 'kokoro';
+    const imageProvider = settings.imageProvider || 'pollinations';
 
     const unsubscribe = onLoadProgress((info) => {
       if (info.status === 'progress') {
@@ -153,27 +163,46 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     });
 
     try {
-      // Per scene: voice first, then its two image beats — Kokoro is local (no rate limit), so
-      // only the Pollinations image calls need spacing out.
-      let imageCallsMade = 0;
-      for (let i = 0; i < scenes.length; i++) {
-        let scene = project.scenes.find((s) => s.id === scenes[i].id) || scenes[i];
-
-        if (scene.audioStatus !== 'ready') {
-          setProgressMsg(`Scene ${i + 1} of ${scenes.length}: voice…`);
+      // Phase 1: voiceover for every scene that still needs it. MiniMax is a paid cloud call, so
+      // it goes through the shared concurrency pool exactly like paid images below; Kokoro stays
+      // exactly as before — strictly serial, since it's a single local Web Worker.
+      const pendingAudioScenes = project.scenes.filter((s) => s.audioStatus !== 'ready');
+      if (voiceEngine === 'minimax') {
+        let done = 0;
+        await runWithConcurrency(pendingAudioScenes, MAX_PAID_CONCURRENCY, async (scene) => {
           await genAudio(scene);
-          scene = project.scenes.find((s) => s.id === scenes[i].id) || scene;
+          done++;
+          setProgressMsg(`Voice ${done}/${pendingAudioScenes.length}…`);
+        });
+      } else {
+        for (let i = 0; i < pendingAudioScenes.length; i++) {
+          setProgressMsg(`Voice ${i + 1}/${pendingAudioScenes.length}…`);
+          await genAudio(pendingAudioScenes[i]);
         }
+      }
 
-        for (let b = 0; b < scene.images.length; b++) {
-          if (scene.images[b].status !== 'ready') {
-            if (imageCallsMade > 0) await sleep(1500);
-            setProgressMsg(`Scene ${i + 1} of ${scenes.length}: image ${b + 1}/${scene.images.length}…`);
-            await genImage(scene.id, b);
-            imageCallsMade++;
-            scene = project.scenes.find((s) => s.id === scenes[i].id) || scene;
-          }
+      // Phase 2: images for every beat that still needs one. Paid providers (nanobanana/gptimage)
+      // go through the same pool; Pollinations keeps its exact prior behavior — strictly serial
+      // with a 1.5s stagger between calls, deliberately conservative for the free tier.
+      const pendingImageBeats = [];
+      project.scenes.forEach((s) => s.images.forEach((im, b) => {
+        if (im.status !== 'ready') pendingImageBeats.push({ sceneId: s.id, beatIndex: b });
+      }));
+
+      if (imageProvider === 'pollinations') {
+        for (let i = 0; i < pendingImageBeats.length; i++) {
+          if (i > 0) await sleep(1500);
+          setProgressMsg(`Image ${i + 1}/${pendingImageBeats.length}…`);
+          const { sceneId, beatIndex } = pendingImageBeats[i];
+          await genImage(sceneId, beatIndex);
         }
+      } else {
+        let done = 0;
+        await runWithConcurrency(pendingImageBeats, MAX_PAID_CONCURRENCY, async ({ sceneId, beatIndex }) => {
+          await genImage(sceneId, beatIndex);
+          done++;
+          setProgressMsg(`Image ${done}/${pendingImageBeats.length}…`);
+        });
       }
     } finally {
       unsubscribe();
@@ -193,27 +222,37 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     return list;
   }
 
-  function estimateCost(provider) {
+  function pendingAudioCharCount() {
+    return project.scenes
+      .filter((s) => s.audioStatus !== 'ready')
+      .reduce((sum, s) => sum + (s.narration?.length || 0), 0);
+  }
+
+  // Combines both billable axes — images and voice — into one estimate, since either (or both)
+  // can be a paid engine independently of the other.
+  function estimateCost() {
+    const provider = settings.imageProvider || 'pollinations';
+    const voiceEngine = settings.voiceEngine || 'kokoro';
+
     const beats = pendingBeats();
-    const total = beats.reduce(
+    const imageTotal = beats.reduce(
       (sum, beat) => sum + priceForImage(provider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: !!beat.referenceId }),
       0
     );
-    return { count: beats.length, total };
+
+    const charCount = pendingAudioCharCount();
+    const voiceTotal = priceForVoice(voiceEngine, charCount);
+
+    return { imageCount: beats.length, imageTotal, charCount, voiceTotal, total: imageTotal + voiceTotal };
   }
 
   function requestGenerateAll() {
-    const provider = settings.imageProvider || 'pollinations';
-    if (provider === 'pollinations') {
+    const estimate = estimateCost();
+    if (estimate.total <= 0) {
       generateAll();
       return;
     }
-    const { count, total } = estimateCost(provider);
-    if (count === 0) {
-      generateAll();
-      return;
-    }
-    setCostConfirm({ provider, count, total });
+    setCostConfirm(estimate);
   }
 
   function confirmGenerateAll() {
@@ -508,10 +547,19 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         >
           <div onClick={(e) => e.stopPropagation()} style={{ ...card, maxWidth: 420, padding: 24 }}>
             <div style={{ fontFamily: FONT.display, fontSize: 20, color: T.text }}>Confirm paid generation</div>
-            <div style={{ fontFamily: FONT.ui, fontSize: 14, color: T.textSecondary, marginTop: 12, lineHeight: 1.6 }}>
-              This will generate ~{costConfirm.count} image{costConfirm.count === 1 ? '' : 's'} with{' '}
-              {(PROVIDER_LABELS[costConfirm.provider] || costConfirm.provider).replace(/\s*\(.*\)$/, '')}, estimated cost ≈ $
-              {costConfirm.total.toFixed(2)}. Continue?
+            <div style={{ fontFamily: FONT.ui, fontSize: 14, color: T.textSecondary, marginTop: 12, lineHeight: 1.8 }}>
+              {costConfirm.imageTotal > 0 && (
+                <div>
+                  Images: ~{costConfirm.imageCount} × ${(costConfirm.imageTotal / costConfirm.imageCount).toFixed(2)} ≈ $
+                  {costConfirm.imageTotal.toFixed(2)}
+                </div>
+              )}
+              {costConfirm.voiceTotal > 0 && (
+                <div>
+                  Voice: ~{costConfirm.charCount.toLocaleString()} characters × $0.10/1K ≈ ${costConfirm.voiceTotal.toFixed(2)}
+                </div>
+              )}
+              <div style={{ fontWeight: 700, color: T.text, marginTop: 6 }}>Total ≈ ${costConfirm.total.toFixed(2)}</div>
             </div>
             <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
               <button onClick={confirmGenerateAll} style={{ ...btnPrimary, flex: 1 }}>

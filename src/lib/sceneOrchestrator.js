@@ -4,6 +4,9 @@
 
 const MAX_SCENES_PER_CALL = 16;
 const RETRY_BACKOFF_MS = 3000;
+// Shared cap for every paid-provider concurrency pool below (images via nanobanana/gptimage,
+// audio via MiniMax) — free/local engines (Pollinations, Kokoro) stay serial and untouched.
+export const MAX_PAID_CONCURRENCY = 6;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -115,4 +118,45 @@ async function callGenerateImage(payload) {
 export async function generateImage(prompt, provider, referenceImages, opts = {}) {
   const payload = { provider, prompt, referenceImages: referenceImages || [], ...opts };
   return withRetry(() => callGenerateImage(payload));
+}
+
+async function callGenerateAudio(payload) {
+  const res = await fetch('/api/generate-audio', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Audio generation failed');
+  if (!data.audioUrl) throw new Error('Audio generation returned no audio URL');
+  return data;
+}
+
+/**
+ * text: narration to synthesize
+ * voice: MiniMax voice_id
+ * opts: { language }
+ * Returns { audioUrl, costUsd }. Same one-retry-with-backoff resilience as scene/image calls.
+ */
+export async function generateAudio(text, voice, opts = {}) {
+  const payload = { text, voice, ...opts };
+  return withRetry(() => callGenerateAudio(payload));
+}
+
+/**
+ * Minimal concurrency-limited task runner for paid providers — no external dependency, just a
+ * slot-releasing queue: each of `concurrency` parallel loops pulls the next available item as
+ * soon as its previous one settles. Free/local engines (Pollinations, Kokoro) never use this —
+ * they stay strictly serial by simply not calling it.
+ */
+export async function runWithConcurrency(items, concurrency, worker) {
+  let cursor = 0;
+  async function runNext() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      await worker(items[index], index);
+    }
+  }
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: workerCount }, runNext));
 }

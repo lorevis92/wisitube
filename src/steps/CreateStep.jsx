@@ -2,7 +2,9 @@ import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, getPolliToken, setPolliToken } from '../lib/pollinations';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
+import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES, generateSpeech } from '../lib/tts';
+import { generateAudio } from '../lib/sceneOrchestrator';
 import { TITLES_PHASE_S } from '../lib/estimator';
 import FullScreenLoader from '../components/FullScreenLoader';
 
@@ -79,7 +81,13 @@ export default function CreateStep({ settings, setSettings, onTitles, isMobile }
     if (voiceTest === settings.voice) return;
     setVoiceTest(settings.voice);
     try {
-      const blob = await generateSpeech('Hi! This is the voice that will narrate your video.', settings.voice);
+      let blob;
+      if ((settings.voiceEngine || 'kokoro') === 'minimax') {
+        const { audioUrl } = await generateAudio('Hi! This is the voice that will narrate your video.', settings.voice, { language: settings.language });
+        blob = await (await fetch(audioUrl)).blob();
+      } else {
+        blob = await generateSpeech('Hi! This is the voice that will narrate your video.', settings.voice);
+      }
       if (audioRef.current) {
         audioRef.current.src = URL.createObjectURL(blob);
         audioRef.current.play();
@@ -162,18 +170,42 @@ export default function CreateStep({ settings, setSettings, onTitles, isMobile }
             </select>
           </div>
           <div>
+            <div style={label}>Voice engine</div>
+            <select
+              value={settings.voiceEngine || 'kokoro'}
+              onChange={(e) => {
+                const engine = e.target.value;
+                set('voiceEngine', engine);
+                set('voice', engine === 'minimax' ? MINIMAX_VOICES[0].id : 'af_heart');
+              }}
+              style={{ ...inputStyle, marginTop: 8 }}
+            >
+              {Object.entries(VOICE_ENGINE_LABELS).map(([id, engineLabel]) => (
+                <option key={id} value={id}>
+                  {engineLabel}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
             <div style={label}>Voice</div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <select value={settings.voice} onChange={(e) => set('voice', e.target.value)} style={inputStyle}>
-                {Object.entries(KOKORO_VOICES).map(([group, voices]) => (
-                  <optgroup key={group} label={group}>
-                    {voices.map((v) => (
+                {(settings.voiceEngine || 'kokoro') === 'minimax'
+                  ? MINIMAX_VOICES.map((v) => (
                       <option key={v.id} value={v.id}>
                         {v.label}
                       </option>
+                    ))
+                  : Object.entries(KOKORO_VOICES).map(([group, voices]) => (
+                      <optgroup key={group} label={group}>
+                        {voices.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.label}
+                          </option>
+                        ))}
+                      </optgroup>
                     ))}
-                  </optgroup>
-                ))}
               </select>
               <button onClick={testVoice} style={{ ...btnGhost, padding: '10px 14px', whiteSpace: 'nowrap' }}>
                 {voiceTest ? '…' : '▶ Test'}
