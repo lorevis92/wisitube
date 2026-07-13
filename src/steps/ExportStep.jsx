@@ -3,7 +3,7 @@ import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '..
 import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
 import { renderToMp4, WebCodecsUnsupportedError } from '../lib/exporter';
-import { loadChannel } from '../lib/db';
+import { loadChannel, recordCost } from '../lib/db';
 import { uploadVideoToYoutube } from '../lib/youtubeUpload';
 import { buildSrtFromScenes } from '../lib/srtBuilder';
 import { generateImage } from '../lib/sceneOrchestrator';
@@ -40,7 +40,7 @@ function minScheduleLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export default function ExportStep({ project, settings, channelId, isMobile }) {
+export default function ExportStep({ project, settings, channelId, videoId, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const abortRef = useRef(null);
@@ -189,12 +189,14 @@ export default function ExportStep({ project, settings, channelId, isMobile }) {
       // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already
       // uses for every scene beat — routes nanobanana/gptimage through fal.ai instead of always
       // hitting Pollinations regardless of the provider chosen for the rest of the video.
-      const { imageUrl } = await generateImage(thumbnailPrompt(concept), provider, [], {
+      const { imageUrl, costUsd } = await generateImage(thumbnailPrompt(concept), provider, [], {
         width: 1280,
         height: 720,
         seed: thumbSeed,
         quality: 'medium',
       });
+      // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
+      if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
       const img = await loadImage(imageUrl);
       await document.fonts.ready;
       const c = thumbCanvasRef.current;

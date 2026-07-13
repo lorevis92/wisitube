@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel, clearYoutubeConnection } from '../lib/db';
+import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel, clearYoutubeConnection, getCostsByChannel } from '../lib/db';
 
 function timeAgo(ts) {
   if (!ts) return '';
@@ -33,16 +33,18 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [suggestionsError, setSuggestionsError] = useState('');
   const [refiningIndex, setRefiningIndex] = useState(null);
   const [refineText, setRefineText] = useState('');
+  const [totalSpent, setTotalSpent] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [ch, list] = await Promise.all([loadChannel(channelId), listVideosByChannel(channelId)]);
+      const [ch, list, costs] = await Promise.all([loadChannel(channelId), listVideosByChannel(channelId), getCostsByChannel(channelId)]);
       if (cancelled) return;
       setChannel(ch || null);
       setNotes(ch?.editorialNotes || '');
       onChannelLoaded?.(ch);
       setVideos(list);
+      setTotalSpent(costs.total);
       const urls = {};
       for (const v of list) {
         const blob = v.scenes?.[0]?.images?.[0]?.blob;
@@ -141,6 +143,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
           <div>
             <div style={{ fontFamily: FONT.display, fontSize: 24, color: T.text }}>{channel?.name || 'Channel'}</div>
             {channel?.niche && <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 4 }}>{channel.niche}</div>}
+            <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>💰 ${totalSpent.toFixed(2)} spent on this channel</div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={onBack} style={btnGhost}>

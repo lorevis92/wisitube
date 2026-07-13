@@ -9,6 +9,7 @@ import { generateImage, generateAudio, runWithConcurrency, MAX_PAID_CONCURRENCY 
 import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
 import { priceForImage } from '../lib/imageProviders';
 import { priceForVoice } from '../lib/voiceProviders';
+import { recordCost } from '../lib/db';
 import ImageLightbox from '../components/ImageLightbox';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,7 +28,7 @@ function blobToDataUri(blob) {
 const isSceneReady = (s) =>
   Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
 
-export default function StoryboardStep({ project, setProject, settings, onReady, isMobile }) {
+export default function StoryboardStep({ project, setProject, settings, onReady, channelId, videoId, isMobile }) {
   const [running, setRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [showSeo, setShowSeo] = useState(false);
@@ -109,7 +110,9 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
       // natively as referenceImages, same principle already used for Pollinations kontext.
       const referenceImages = reference ? [await blobToDataUri(reference.file)] : [];
-      const { imageUrl } = await generateImage(fullPrompt(beat), provider, referenceImages, { ...dims, seed, quality: 'medium' });
+      const { imageUrl, costUsd } = await generateImage(fullPrompt(beat), provider, referenceImages, { ...dims, seed, quality: 'medium' });
+      // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
+      if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
       await loadImage(imageUrl);
       // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
       const imageBlob = await (await fetch(imageUrl)).blob();
@@ -131,7 +134,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     try {
       let audioBlob;
       if (voiceEngine === 'minimax') {
-        const { audioUrl: remoteUrl } = await generateAudio(scene.narration, settings.voice, { language: settings.language });
+        const { audioUrl: remoteUrl, costUsd } = await generateAudio(scene.narration, settings.voice, { language: settings.language });
+        if (costUsd > 0) await recordCost({ channelId, videoId, provider: 'minimax', type: 'audio', amountUsd: costUsd });
         audioBlob = await (await fetch(remoteUrl)).blob();
       } else {
         audioBlob = await generateSpeech(scene.narration, settings.voice);

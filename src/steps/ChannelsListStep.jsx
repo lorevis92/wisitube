@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { listChannels, listVideosByChannel, saveChannel, createId } from '../lib/db';
+import { listChannels, listVideosByChannel, saveChannel, createId, getTotalCostAllChannels } from '../lib/db';
 
 export default function ChannelsListStep({ onOpenChannel, isMobile }) {
   const [channels, setChannels] = useState(null); // null = still loading
@@ -8,13 +8,15 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
   const [thumbUrls, setThumbUrls] = useState({});
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', niche: '', editorialNotes: '' });
+  const [totalSpent, setTotalSpent] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const list = await listChannels();
+      const [list, total] = await Promise.all([listChannels(), getTotalCostAllChannels()]);
       if (cancelled) return;
       setChannels(list);
+      setTotalSpent(total);
       const counts = {};
       const urls = {};
       for (const c of list) {
@@ -56,6 +58,9 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ ...mono, fontSize: 12, color: T.textSecondary }}>
+        💰 Total spent across all channels: ${totalSpent.toFixed(2)}
+      </div>
       <div style={label}>Your channels</div>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>

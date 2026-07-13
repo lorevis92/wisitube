@@ -488,6 +488,8 @@ export default function App() {
             setProject={setProject}
             settings={settings}
             onReady={() => setTab('editor')}
+            channelId={currentChannelId}
+            videoId={projectId}
             isMobile={isMobile}
           />
         )}
@@ -497,7 +499,7 @@ export default function App() {
         )}
 
         {tab === 'export' && project && (
-          <ExportStep project={project} settings={settings} channelId={currentChannelId} isMobile={isMobile} />
+          <ExportStep project={project} settings={settings} channelId={currentChannelId} videoId={projectId} isMobile={isMobile} />
         )}
       </main>
 

@@ -11,6 +11,10 @@ const videoStore = createStore('wisitube-db', 'projects');
 // happens second would find its object store was never created and throw NotFoundError, for
 // every user (new or existing). A dedicated database for channels sidesteps that entirely.
 const channelStore = createStore('wisitube-channels-db', 'channels');
+// Same reasoning as channelStore above: its own dedicated database, not another store bolted onto
+// an existing one, so the first read/write against it can't race a sibling store's first-ever
+// onupgradeneeded and throw NotFoundError.
+const costLedgerStore = createStore('wisitube-cost-ledger-db', 'costLedger');
 
 const MIGRATION_FLAG = 'wisitube_migrated_channels';
 
@@ -90,6 +94,41 @@ export async function clearYoutubeConnection(channelId) {
   const channel = await loadChannel(channelId);
   if (!channel) return null;
   return saveChannel({ ...channel, youtube: { connected: false, channelName: '', youtubeChannelId: '', refreshToken: '' } });
+}
+
+// ---- Cost ledger — persistent record of real money actually spent (never an estimate), append-
+// only: an entry, once written, is never edited or removed, so the numbers here can always be
+// trusted as "what really happened" rather than a projection. One entry per successful paid call
+// (image via nanobanana/gptimage, audio via MiniMax) — see the recordCost call sites in
+// StoryboardStep.jsx and ExportStep.jsx for exactly what counts. ----
+
+export async function recordCost({ channelId, videoId, provider, type, amountUsd, timestamp }) {
+  const entry = {
+    id: createId(),
+    channelId,
+    videoId: videoId || null,
+    provider,
+    type, // 'image' | 'audio'
+    amountUsd,
+    timestamp: timestamp || Date.now(),
+  };
+  await set(entry.id, entry, costLedgerStore);
+  return entry;
+}
+
+export async function getCostsByChannel(channelId) {
+  const all = await entries(costLedgerStore);
+  const items = all
+    .map(([, v]) => v)
+    .filter((e) => e.channelId === channelId)
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const total = items.reduce((sum, e) => sum + (e.amountUsd || 0), 0);
+  return { total, items };
+}
+
+export async function getTotalCostAllChannels() {
+  const all = await entries(costLedgerStore);
+  return all.reduce((sum, [, v]) => sum + (v.amountUsd || 0), 0);
 }
 
 // ---- One-time migration: videos saved before Channels existed have no channelId. Runs lazily
