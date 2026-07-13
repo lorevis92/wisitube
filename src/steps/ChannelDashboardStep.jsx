@@ -24,7 +24,7 @@ function priorityColor(p) {
   return T.textMuted;
 }
 
-export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelLoaded, onStartVideoFromSuggestion, isMobile }) {
+export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
   const [channel, setChannel] = useState(null);
   const [notes, setNotes] = useState('');
   const [videos, setVideos] = useState(null); // null = still loading
@@ -42,7 +42,10 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       if (cancelled) return;
       setChannel(ch || null);
       setNotes(ch?.editorialNotes || '');
-      onChannelLoaded?.(ch);
+      // App.jsx holds the single source of truth for "the currently open channel" — every load and
+      // every local mutation below reports here, so components that never do their own fetch (like
+      // ExportStep) can't end up looking at a stale copy of e.g. the YouTube connection state.
+      onChannelChange?.(ch || null);
       setVideos(list);
       setTotalSpent(costs.total);
       const urls = {};
@@ -65,6 +68,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     if (!channel || notes === (channel.editorialNotes || '')) return;
     const updated = await saveChannel({ ...channel, editorialNotes: notes });
     setChannel(updated);
+    onChannelChange?.(updated);
   }
 
   // Refining never edits a single suggestion — it relaunches the whole holistic pass with the
@@ -90,6 +94,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       const lastSuggestions = { analysis: data.analysis || '', suggestions: data.suggestions || [], generatedAt: Date.now() };
       const updated = await saveChannel({ ...channel, lastSuggestions });
       setChannel(updated);
+      onChannelChange?.(updated);
       setRefiningIndex(null);
       setRefineText('');
     } catch (e) {
@@ -118,6 +123,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     if (!window.confirm('Disconnect this channel from YouTube?')) return;
     const updated = await clearYoutubeConnection(channelId);
     setChannel(updated);
+    onChannelChange?.(updated);
   }
 
   async function handleDeleteChannel() {

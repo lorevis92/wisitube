@@ -58,6 +58,12 @@ export default function App() {
   const [tab, setTab] = useState('channels');
   const [currentChannelId, setCurrentChannelId] = useState(null);
   const [currentChannelName, setCurrentChannelName] = useState('');
+  // Single source of truth for the currently open channel's full record (including youtube.*) —
+  // ChannelDashboardStep is the one component that actually loads/mutates it (via onChannelChange
+  // below) since it's guaranteed to mount before any other step that needs channel data is
+  // reachable; everyone else (ExportStep) just reads this prop instead of doing its own
+  // independent IndexedDB fetch, which is what let those fetches drift out of sync with each other.
+  const [currentChannel, setCurrentChannel] = useState(null);
   const [settings, setSettings] = useState({
     topic: '',
     style: 'facestick',
@@ -347,6 +353,7 @@ export default function App() {
   function backToChannels() {
     setCurrentChannelId(null);
     setCurrentChannelName('');
+    setCurrentChannel(null);
     setTab('channels');
   }
 
@@ -415,7 +422,10 @@ export default function App() {
               onResume={handleResume}
               onNewVideo={startNewProject}
               onBack={backToChannels}
-              onChannelLoaded={(ch) => setCurrentChannelName(ch?.name || '')}
+              onChannelChange={(ch) => {
+                setCurrentChannelName(ch?.name || '');
+                setCurrentChannel(ch);
+              }}
               onStartVideoFromSuggestion={startNewProjectWithTopic}
               isMobile={isMobile}
             />
@@ -499,7 +509,14 @@ export default function App() {
         )}
 
         {tab === 'export' && project && (
-          <ExportStep project={project} settings={settings} channelId={currentChannelId} videoId={projectId} isMobile={isMobile} />
+          <ExportStep
+            project={project}
+            settings={settings}
+            channel={currentChannel}
+            channelId={currentChannelId}
+            videoId={projectId}
+            isMobile={isMobile}
+          />
         )}
       </main>
 

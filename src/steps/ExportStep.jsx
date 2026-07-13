@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
 import { renderToMp4, WebCodecsUnsupportedError } from '../lib/exporter';
-import { loadChannel, recordCost } from '../lib/db';
+import { recordCost } from '../lib/db';
 import { uploadVideoToYoutube } from '../lib/youtubeUpload';
 import { buildSrtFromScenes } from '../lib/srtBuilder';
 import { generateImage } from '../lib/sceneOrchestrator';
@@ -40,7 +40,7 @@ function minScheduleLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export default function ExportStep({ project, settings, channelId, videoId, isMobile }) {
+export default function ExportStep({ project, settings, channel, channelId, videoId, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const abortRef = useRef(null);
@@ -65,19 +65,9 @@ export default function ExportStep({ project, settings, channelId, videoId, isMo
   const total = scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
   const title = project.titles[project.selectedTitle] || project.titles[0] || 'wisitube-video';
 
-  // YouTube publishing state
-  const [channel, setChannel] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    if (!channelId) return undefined;
-    loadChannel(channelId).then((ch) => {
-      if (!cancelled) setChannel(ch);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [channelId]);
-
+  // YouTube publishing state — `channel` is a prop, not local state: App.jsx is the single source
+  // of truth (loaded/updated by ChannelDashboardStep, which always mounts before this step is
+  // reachable), so there's no independent fetch here that could drift out of sync with it.
   const [ytTitle, setYtTitle] = useState(title);
   const [ytDescription, setYtDescription] = useState(project.description || '');
   const [ytTags, setYtTags] = useState((project.tags || []).join(', '));
