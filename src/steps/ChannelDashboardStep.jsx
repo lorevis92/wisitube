@@ -294,7 +294,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
 
                   <div style={{ display: 'flex', gap: 6, marginTop: 'auto', flexWrap: 'wrap' }}>
                     <button
-                      onClick={() => onStartVideoFromSuggestion?.(s.title)}
+                      onClick={() => onStartVideoFromSuggestion?.(s.title, s.series || null)}
                       style={{ ...btnPrimary, flex: 1, padding: '8px 12px', fontSize: 10 }}
                     >
                       Start this video

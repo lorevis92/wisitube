@@ -61,8 +61,10 @@ function wrapWordIndices(ctx, words, maxWidth) {
 }
 
 // Splits the scene's duration across its words proportionally to word length — a reasonable
-// stand-in for real word-level audio timing without needing forced alignment.
-function computeWordTimings(words, duration) {
+// stand-in for real word-level audio timing without needing forced alignment. Exported so
+// srtBuilder.js can derive .srt cue timestamps from the exact same per-word timing the kinetic
+// subtitle overlay uses, keeping the two in lockstep.
+export function computeWordTimings(words, duration) {
   const weights = words.map((w) => Math.max(1, w.length));
   const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
   let acc = 0;
@@ -91,7 +93,7 @@ function wordPopScale(elapsedMs) {
 // first Math.ceil(n/2) words during beat 1, the rest during beat 2. For 1-2 total words this
 // already degenerates naturally into "everything in beat 1, nothing in beat 2" rather than an
 // unnatural split, so no extra special-casing is needed.
-function splitNarrationHalves(narration) {
+export function splitNarrationHalves(narration) {
   const words = String(narration || '').split(/\s+/).filter(Boolean);
   const cut = Math.ceil(words.length / 2);
   return [words.slice(0, cut), words.slice(cut)];

@@ -70,6 +70,10 @@ export default function App() {
     references: [],
     characterHints: [],
     generalNotes: '',
+    // Set only when a video is started from a Content Program Manager suggestion that belongs to
+    // a series — carried through the whole titles/outline/scenes pipeline into project.series so
+    // ExportStep can default "Add to series playlist" without the user re-typing it.
+    series: null,
   });
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
@@ -172,6 +176,7 @@ export default function App() {
       references: plan.references,
       characterBible: plan.characterBible,
       scenes: buildScenesFromRaw(rawScenesSoFar),
+      series: settings.series || null,
       displayTitle: plan.title || settings.topic?.slice(0, 60) || 'Untitled video',
     });
   }
@@ -205,6 +210,7 @@ export default function App() {
         references: plan.references,
         characterBible: plan.characterBible,
         scenes: buildScenesFromRaw(scenes),
+        series: settings.series || null,
       });
       setTab('storyboard');
     } catch (e) {
@@ -300,6 +306,7 @@ export default function App() {
       references: record.references || [],
       characterBible: record.characterBible || [],
       scenes,
+      series: record.series || null,
     });
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
@@ -311,7 +318,10 @@ export default function App() {
   }
 
   // Explicit reset so opening the Create tab from the channel dashboard never silently overwrites the open video.
-  function startNewProjectWithTopic(topic) {
+  // series is only non-null when started from a Content Program Manager suggestion that belongs
+  // to one — always set explicitly (not merged) so a manual "New video" doesn't inherit a stale
+  // series from whatever suggestion was started last.
+  function startNewProjectWithTopic(topic, series = null) {
     generationRef.current += 1;
     setProject(null);
     setProjectId(null);
@@ -320,7 +330,7 @@ export default function App() {
     setPendingPlan(null);
     setGenerationError('');
     setSceneProgress({ current: 0, total: 0 });
-    setSettings((s) => ({ ...s, topic }));
+    setSettings((s) => ({ ...s, topic, series }));
     setTab('create');
   }
 
@@ -486,7 +496,9 @@ export default function App() {
           <EditorStep project={project} setProject={setProject} settings={settings} onExport={() => setTab('export')} isMobile={isMobile} />
         )}
 
-        {tab === 'export' && project && <ExportStep project={project} settings={settings} isMobile={isMobile} />}
+        {tab === 'export' && project && (
+          <ExportStep project={project} settings={settings} channelId={currentChannelId} isMobile={isMobile} />
+        )}
       </main>
 
       <Footer isMobile={isMobile} />
