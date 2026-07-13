@@ -10,7 +10,7 @@ import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import { T, FONT, mono, card, btnGhost } from './theme';
-import { createId, saveVideo } from './lib/db';
+import { createId, saveVideo, saveYoutubeConnection } from './lib/db';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
 
@@ -94,6 +94,31 @@ export default function App() {
     const onResize = () => setIsMobile(window.innerWidth < 760);
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // Returning leg of the per-channel YouTube OAuth flow (api/youtube-callback.js redirects here
+  // with these query params) — read once on mount, persisted to the channel via IndexedDB (the
+  // only storage WisiTube has), then stripped from the URL so a refresh doesn't replay it.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connectedChannelId = params.get('youtube_connected');
+    const ytError = params.get('youtube_error');
+    if (connectedChannelId) {
+      const ytName = params.get('yt_name') || '';
+      const ytChannelId = params.get('yt_channel_id') || '';
+      const ytRefresh = params.get('yt_refresh') || '';
+      saveYoutubeConnection(connectedChannelId, {
+        channelName: ytName,
+        youtubeChannelId: ytChannelId,
+        refreshToken: ytRefresh,
+      }).then(() => {
+        window.alert(`Connected to YouTube channel "${ytName}".`);
+      });
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (ytError) {
+      window.alert(`YouTube connection failed: ${ytError}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
   }, []);
 
   // Autosave the open video to IndexedDB, debounced so fast edits don't hammer the store.

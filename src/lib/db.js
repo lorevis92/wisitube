@@ -68,6 +68,30 @@ export async function deleteChannel(id) {
   await del(id, channelStore);
 }
 
+// ---- YouTube per-channel connection (see api/youtube-callback.js, which is the only source of
+// this data — there's no server-side storage, so the refresh token round-trips through the OAuth
+// redirect's query string and lands here on the client). ----
+
+export async function saveYoutubeConnection(channelId, data) {
+  const channel = await loadChannel(channelId);
+  if (!channel) return null;
+  return saveChannel({
+    ...channel,
+    youtube: {
+      connected: true,
+      channelName: data.channelName || '',
+      youtubeChannelId: data.youtubeChannelId || '',
+      refreshToken: data.refreshToken || '',
+    },
+  });
+}
+
+export async function clearYoutubeConnection(channelId) {
+  const channel = await loadChannel(channelId);
+  if (!channel) return null;
+  return saveChannel({ ...channel, youtube: { connected: false, channelName: '', youtubeChannelId: '', refreshToken: '' } });
+}
+
 // ---- One-time migration: videos saved before Channels existed have no channelId. Runs lazily
 // the first time channels are listed (app startup), guarded by a localStorage flag so it only
 // ever does real work once — no video is deleted or overwritten, only tagged with a channelId.

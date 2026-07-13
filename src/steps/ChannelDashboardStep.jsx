@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel } from '../lib/db';
+import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel, clearYoutubeConnection } from '../lib/db';
 
 function timeAgo(ts) {
   if (!ts) return '';
@@ -97,6 +97,27 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     }
   }
 
+  async function handleConnectYoutube() {
+    try {
+      const res = await fetch('/api/youtube-auth-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not start the YouTube connection');
+      window.location.href = data.authUrl;
+    } catch (e) {
+      window.alert(String(e.message || e));
+    }
+  }
+
+  async function handleDisconnectYoutube() {
+    if (!window.confirm('Disconnect this channel from YouTube?')) return;
+    const updated = await clearYoutubeConnection(channelId);
+    setChannel(updated);
+  }
+
   async function handleDeleteChannel() {
     if (!window.confirm(`Delete "${channel?.name || 'this channel'}"? This also deletes all ${videos?.length || 0} of its videos and cannot be undone.`)) return;
     await deleteChannel(channelId);
@@ -140,6 +161,41 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             rows={2}
             style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
           />
+        </div>
+
+        <div
+          style={{
+            borderTop: `1px solid ${T.border}`,
+            marginTop: 16,
+            paddingTop: 16,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 10,
+          }}
+        >
+          <div>
+            <div style={label}>YouTube</div>
+            {channel?.youtube?.connected ? (
+              <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.text, marginTop: 6 }}>
+                ✓ Connected to {channel.youtube.channelName || 'YouTube channel'}
+              </div>
+            ) : (
+              <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>
+                Connect this channel's YouTube account to enable direct upload.
+              </div>
+            )}
+          </div>
+          {channel?.youtube?.connected ? (
+            <button onClick={handleDisconnectYoutube} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
+              Disconnect
+            </button>
+          ) : (
+            <button onClick={handleConnectYoutube} style={btnPrimary}>
+              Connect YouTube channel
+            </button>
+          )}
         </div>
       </div>
 
