@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { loadImage, decodeAudio, buildImageUrl } from '../lib/pollinations';
+import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
 import { renderToMp4, WebCodecsUnsupportedError } from '../lib/exporter';
 import { loadChannel } from '../lib/db';
 import { uploadVideoToYoutube } from '../lib/youtubeUpload';
 import { buildSrtFromScenes } from '../lib/srtBuilder';
+import { generateImage } from '../lib/sceneOrchestrator';
+import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
 
 // Official YouTube video category IDs (googleapis.com/youtube/v3/videoCategories) — the ones
 // realistically relevant to faceless explainer-style channels, skipping deprecated categories
@@ -165,16 +167,35 @@ export default function ExportStep({ project, settings, channelId, isMobile }) {
     });
   }
 
+  // Same telegraphic-vs-natural-language branching StoryboardStep.jsx's fullPrompt() already uses
+  // for scene beats — Pollinations wants compact fragments, Nano Banana 2 / GPT Image 2 want full
+  // sentences. No character/reference anchoring here since thumbnails have no such selector.
+  function thumbnailPrompt(concept) {
+    const flavoredPrompt = `${concept.image_prompt}, YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
+    const style = STYLES[settings.style];
+    const provider = settings.imageProvider || 'pollinations';
+    if (provider === 'pollinations') {
+      return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
+    }
+    return buildNaturalLanguagePrompt({ scenePrompt: flavoredPrompt, styleDescription: style.natural });
+  }
+
   async function makeThumbnail() {
     setThumbBusy(true);
     setThumbReady(false);
     try {
       const concept = project.thumbnails[thumbIdx];
-      const url = buildImageUrl(
-        `${concept.image_prompt}, YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`,
-        { width: 1280, height: 720, seed: thumbSeed }
-      );
-      const img = await loadImage(url);
+      const provider = settings.imageProvider || 'pollinations';
+      // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already
+      // uses for every scene beat — routes nanobanana/gptimage through fal.ai instead of always
+      // hitting Pollinations regardless of the provider chosen for the rest of the video.
+      const { imageUrl } = await generateImage(thumbnailPrompt(concept), provider, [], {
+        width: 1280,
+        height: 720,
+        seed: thumbSeed,
+        quality: 'medium',
+      });
+      const img = await loadImage(imageUrl);
       await document.fonts.ready;
       const c = thumbCanvasRef.current;
       const ctx = c.getContext('2d');
