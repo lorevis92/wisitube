@@ -300,7 +300,16 @@ export default function ExportStep({ project, settings, channel, channelId, vide
         body: JSON.stringify({ action: 'set-thumbnail', channelId, refreshToken, videoId, thumbnailBlob: dataUrl }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Thumbnail upload failed');
+      if (!res.ok) {
+        // error is a string for our own validation failures, but a boolean flag when it's a
+        // passthrough of Google's response (see api/youtube.js set-thumbnail) — the real message
+        // is in detail/status in that case.
+        const message =
+          typeof data.error === 'string' && data.error
+            ? data.error
+            : `YouTube rejected the thumbnail (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
+        throw new Error(message);
+      }
       return true;
     } catch (e) {
       setYtErrors((prev) => ({ ...prev, thumbnail: String(e.message || e) }));
@@ -320,7 +329,16 @@ export default function ExportStep({ project, settings, channel, channelId, vide
         body: JSON.stringify({ action: 'set-captions', channelId, refreshToken, videoId, srtContent, language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en' }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Captions upload failed');
+      if (!res.ok) {
+        // error is a string for our own validation failures, but a boolean flag when it's a
+        // passthrough of Google's response (see api/youtube.js set-captions) — the real message
+        // is in detail/status in that case.
+        const message =
+          typeof data.error === 'string' && data.error
+            ? data.error
+            : `YouTube rejected the captions (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
+        throw new Error(message);
+      }
       return true;
     } catch (e) {
       setYtErrors((prev) => ({ ...prev, captions: String(e.message || e) }));
