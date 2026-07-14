@@ -20,8 +20,8 @@ export const config = { maxDuration: 90 };
 
 const APP_URL = process.env.APP_URL || 'https://wisitube.vercel.app';
 const AUTH_SCOPES = [
-  'https://www.googleapis.com/auth/youtube.upload',
-  'https://www.googleapis.com/auth/youtube.readonly',
+  'https://www.googleapis.com/auth/youtube',
+  'https://www.googleapis.com/auth/youtube.force-ssl',
 ].join(' ');
 const PRIVACY_VALUES = ['public', 'unlisted', 'private'];
 // Enough pages to find a playlist on any channel this app would realistically manage, without
@@ -555,15 +555,17 @@ async function setThumbnail(req, res) {
       return res.status(502).json({ error: 'Could not reach YouTube', detail: String(err?.message || err).slice(0, 300) });
     }
 
+    let bodyText;
+    try {
+      bodyText = await response.text();
+    } catch (err) {
+      console.error('[youtube-set-thumbnail] phase=read-response-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the YouTube response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
     if (!response.ok) {
-      let detail = '';
-      try {
-        detail = await response.text();
-      } catch {
-        /* best effort */
-      }
-      console.error('[youtube-set-thumbnail] phase=upload-http-error status=', response.status, 'body=', detail.slice(0, 300));
-      return res.status(502).json({ error: `YouTube rejected the thumbnail (HTTP ${response.status})`, detail: detail.slice(0, 300) });
+      console.error('[youtube-set-thumbnail] phase=upload-http-error status=', response.status, 'body=', bodyText.slice(0, 300));
+      return res.status(response.status).json({ error: true, status: response.status, detail: bodyText.slice(0, 300) });
     }
 
     return res.status(200).json({ success: true });
@@ -667,7 +669,7 @@ async function setCaptions(req, res) {
 
     if (!response.ok) {
       console.error('[youtube-set-captions] phase=upload-http-error status=', response.status, 'body=', rawText.slice(0, 300));
-      return res.status(502).json({ error: `YouTube rejected the captions (HTTP ${response.status})`, detail: rawText.slice(0, 300) });
+      return res.status(response.status).json({ error: true, status: response.status, detail: rawText.slice(0, 300) });
     }
 
     return res.status(200).json({ success: true });
