@@ -167,7 +167,11 @@ export default function ExportStep({ project, settings, channel, channelId, vide
     if (provider === 'pollinations') {
       return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
     }
-    return buildNaturalLanguagePrompt({ scenePrompt: flavoredPrompt, styleDescription: style.natural });
+    // Premium providers bake the overlay text directly into the generated image instead of the
+    // canvas overlay pollinations gets below — an explicit typography instruction steers them
+    // toward something that reads like a real YouTube thumbnail rather than a generic caption.
+    const textInstruction = `Include the exact text '${thumbText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, white or yellow fill with a black outline/drop shadow for readability, positioned in the lower third of the frame, sized large and impactful like professional YouTube thumbnails. The text must be spelled exactly as given, no alterations.`;
+    return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}`, styleDescription: style.natural });
   }
 
   async function makeThumbnail() {
@@ -188,7 +192,6 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
       if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
       const img = await loadImage(imageUrl);
-      await document.fonts.ready;
       const c = thumbCanvasRef.current;
       const ctx = c.getContext('2d');
       // cover-fit
@@ -199,35 +202,42 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, 1280, 720);
       ctx.drawImage(img, (1280 - dw) / 2, (720 - dh) / 2, dw, dh);
-      // bottom gradient for legibility
-      const g = ctx.createLinearGradient(0, 380, 0, 720);
-      g.addColorStop(0, 'rgba(0,0,0,0)');
-      g.addColorStop(1, 'rgba(0,0,0,0.75)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 380, 1280, 340);
-      // overlay text
-      const text = (thumbText || '').toUpperCase();
-      const words = text.split(/\s+/).filter(Boolean);
-      const lines = words.length > 2 ? [words.slice(0, Math.ceil(words.length / 2)).join(' '), words.slice(Math.ceil(words.length / 2)).join(' ')] : [text];
-      let size = 110;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'alphabetic';
-      const fit = (s) => {
-        ctx.font = `800 ${s}px Syne, sans-serif`;
-        return lines.every((ln) => ctx.measureText(ln).width < 1180);
-      };
-      while (size > 48 && !fit(size)) size -= 6;
-      ctx.font = `800 ${size}px Syne, sans-serif`;
-      const lineH = size * 1.08;
-      lines.forEach((ln, i) => {
-        const y = 720 - 56 - (lines.length - 1 - i) * lineH;
-        ctx.lineWidth = size * 0.14;
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = '#000000';
-        ctx.strokeText(ln, 640, y);
-        ctx.fillStyle = i === lines.length - 1 ? '#FFD400' : '#FFFFFF';
-        ctx.fillText(ln, 640, y);
-      });
+
+      if (provider === 'pollinations') {
+        await document.fonts.ready;
+        // bottom gradient for legibility
+        const g = ctx.createLinearGradient(0, 380, 0, 720);
+        g.addColorStop(0, 'rgba(0,0,0,0)');
+        g.addColorStop(1, 'rgba(0,0,0,0.75)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 380, 1280, 340);
+        // overlay text
+        const text = (thumbText || '').toUpperCase();
+        const words = text.split(/\s+/).filter(Boolean);
+        const lines = words.length > 2 ? [words.slice(0, Math.ceil(words.length / 2)).join(' '), words.slice(Math.ceil(words.length / 2)).join(' ')] : [text];
+        let size = 110;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        const fit = (s) => {
+          ctx.font = `800 ${s}px Syne, sans-serif`;
+          return lines.every((ln) => ctx.measureText(ln).width < 1180);
+        };
+        while (size > 48 && !fit(size)) size -= 6;
+        ctx.font = `800 ${size}px Syne, sans-serif`;
+        const lineH = size * 1.08;
+        lines.forEach((ln, i) => {
+          const y = 720 - 56 - (lines.length - 1 - i) * lineH;
+          ctx.lineWidth = size * 0.14;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = '#000000';
+          ctx.strokeText(ln, 640, y);
+          ctx.fillStyle = i === lines.length - 1 ? '#FFD400' : '#FFFFFF';
+          ctx.fillText(ln, 640, y);
+        });
+      }
+      // Premium providers (nanobanana/gptimage) already baked the text into the generated image
+      // itself (see thumbnailPrompt) — the cover-fit above is the only processing it needs.
+
       setThumbReady(true);
     } catch (e) {
       setError('Thumbnail failed: ' + String(e.message || e));
@@ -508,6 +518,11 @@ export default function ExportStep({ project, settings, channel, channelId, vide
             {thumbBusy ? 'Creating…' : 'Create thumbnail'}
           </button>
         </div>
+        {(settings.imageProvider === 'nanobanana' || settings.imageProvider === 'gptimage') && (
+          <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6 }}>
+            AI-generated text may need a retry to get spelling/layout right.
+          </div>
+        )}
         <canvas
           ref={thumbCanvasRef}
           width={1280}
