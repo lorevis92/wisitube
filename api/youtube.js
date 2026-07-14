@@ -437,6 +437,10 @@ async function initUpload(req, res) {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
           'X-Upload-Content-Type': 'video/mp4',
+          // Google grants CORS on the returned upload session URL based on the Origin of the
+          // request that created it — without this, the browser's later cross-origin PUT of the
+          // video bytes (src/lib/youtubeUpload.js) gets blocked by CORS.
+          Origin: 'https://wisitube.vercel.app',
         },
         body: JSON.stringify({ snippet, status }),
       });
@@ -444,6 +448,15 @@ async function initUpload(req, res) {
       console.error('[youtube-init-upload] phase=fetch-init-session', err?.message, err?.stack);
       return res.status(502).json({ error: 'Could not reach YouTube', detail: String(err?.message || err).slice(0, 300) });
     }
+
+    // TEMPORARY debug logging: dump every response header Google sent back on session creation
+    // (Access-Control-* in particular) to see exactly what CORS grant, if any, is attached to the
+    // returned upload session URL. Remove once the CORS issue on the resumable upload is confirmed
+    // fixed.
+    console.log(
+      '[youtube-init-upload] phase=debug-session-headers',
+      JSON.stringify(Object.fromEntries(initResponse.headers.entries()))
+    );
 
     if (!initResponse.ok) {
       let detail = '';
