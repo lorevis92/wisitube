@@ -258,10 +258,11 @@ export default function ExportStep({ project, settings, channel, channelId, vide
 
       const publishAt = ytScheduleMode === 'schedule' && ytPublishAt ? new Date(ytPublishAt).toISOString() : null;
 
-      const initRes = await fetch('/api/youtube-init-upload', {
+      const initRes = await fetch('/api/youtube', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'init-upload',
           channelId,
           refreshToken,
           title: ytTitle,
@@ -293,10 +294,10 @@ export default function ExportStep({ project, settings, channel, channelId, vide
     try {
       const refreshToken = channel?.youtube?.refreshToken;
       const dataUrl = thumbCanvasRef.current.toDataURL('image/png');
-      const res = await fetch('/api/youtube-set-thumbnail', {
+      const res = await fetch('/api/youtube', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId, refreshToken, videoId, thumbnailBlob: dataUrl }),
+        body: JSON.stringify({ action: 'set-thumbnail', channelId, refreshToken, videoId, thumbnailBlob: dataUrl }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Thumbnail upload failed');
@@ -313,10 +314,10 @@ export default function ExportStep({ project, settings, channel, channelId, vide
     try {
       const refreshToken = channel?.youtube?.refreshToken;
       const srtContent = buildSrtFromScenes(project.scenes);
-      const res = await fetch('/api/youtube-set-captions', {
+      const res = await fetch('/api/youtube', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId, refreshToken, videoId, srtContent, language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en' }),
+        body: JSON.stringify({ action: 'set-captions', channelId, refreshToken, videoId, srtContent, language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en' }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Captions upload failed');
@@ -332,10 +333,10 @@ export default function ExportStep({ project, settings, channel, channelId, vide
     setYtErrors((e) => ({ ...e, playlist: null }));
     try {
       const refreshToken = channel?.youtube?.refreshToken;
-      const res = await fetch('/api/youtube-add-to-playlist', {
+      const res = await fetch('/api/youtube', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId, refreshToken, videoId, seriesName: project.series }),
+        body: JSON.stringify({ action: 'add-to-playlist', channelId, refreshToken, videoId, seriesName: project.series }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not add the video to its series playlist');

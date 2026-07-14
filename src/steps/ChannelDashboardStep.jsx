@@ -106,10 +106,10 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
 
   async function handleConnectYoutube() {
     try {
-      const res = await fetch('/api/youtube-auth-url', {
+      const res = await fetch('/api/youtube', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId }),
+        body: JSON.stringify({ action: 'auth-url', channelId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not start the YouTube connection');

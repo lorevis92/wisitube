@@ -106,8 +106,8 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Returning leg of the per-channel YouTube OAuth flow (api/youtube-callback.js redirects here
-  // with these query params) — read once on mount, persisted to the channel via IndexedDB (the
+  // Returning leg of the per-channel YouTube OAuth flow (api/youtube.js, action=callback redirects
+  // here with these query params) — read once on mount, persisted to the channel via IndexedDB (the
   // only storage WisiTube has), then stripped from the URL so a refresh doesn't replay it.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

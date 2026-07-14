@@ -1,5 +1,5 @@
 // Direct browser -> YouTube resumable upload of the already-rendered video Blob. The upload URL
-// itself (minted by api/youtube-init-upload.js) is a single-use, pre-authorized session endpoint,
+// itself (minted by api/youtube.js, action=init-upload) is a single-use, pre-authorized session endpoint,
 // so the bytes never pass through our own server — only metadata calls do. Uses XMLHttpRequest
 // instead of fetch specifically for upload.onprogress, which fetch doesn't expose reliably.
 export function uploadVideoToYoutube(uploadUrl, videoBlob, accessToken, onProgress) {

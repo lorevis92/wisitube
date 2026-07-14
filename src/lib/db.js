@@ -72,7 +72,7 @@ export async function deleteChannel(id) {
   await del(id, channelStore);
 }
 
-// ---- YouTube per-channel connection (see api/youtube-callback.js, which is the only source of
+// ---- YouTube per-channel connection (see api/youtube.js, action=callback, which is the only source of
 // this data — there's no server-side storage, so the refresh token round-trips through the OAuth
 // redirect's query string and lands here on the client). ----
 
