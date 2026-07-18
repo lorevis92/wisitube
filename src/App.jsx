@@ -313,6 +313,10 @@ export default function App() {
       characterBible: record.characterBible || [],
       scenes,
       series: record.series || null,
+      // Not rebuilt into an object URL here (unlike images/audio above) — ExportStep does that
+      // itself on mount, since it also needs the raw Blob for a same-mount YouTube upload without
+      // re-fetching a blob: URL that may no longer be valid (see ExportStep.jsx runUpload).
+      renderedVideoBlob: record.renderedVideoBlob || null,
     });
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
@@ -511,6 +515,7 @@ export default function App() {
         {tab === 'export' && project && (
           <ExportStep
             project={project}
+            setProject={setProject}
             settings={settings}
             channel={currentChannel}
             channelId={currentChannelId}

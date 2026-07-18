@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
@@ -40,13 +40,17 @@ function minScheduleLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export default function ExportStep({ project, settings, channel, channelId, videoId, isMobile }) {
+export default function ExportStep({ project, setProject, settings, channel, channelId, videoId, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const abortRef = useRef(null);
   const [rendering, setRendering] = useState(false);
   const [pct, setPct] = useState(0);
   const [videoUrl, setVideoUrl] = useState('');
+  // The raw Blob behind videoUrl — kept separately so the YouTube upload can hand it straight to
+  // uploadVideoToYoutube instead of re-fetching the blob: URL, which is known to go invalid across
+  // navigations/idle time even while videoUrl itself still looks like a valid string.
+  const [renderedBlob, setRenderedBlob] = useState(null);
   const [fileExt, setFileExt] = useState('mp4');
   const [usingFallback, setUsingFallback] = useState(false);
   const [error, setError] = useState('');
@@ -87,9 +91,23 @@ export default function ExportStep({ project, settings, channel, channelId, vide
 
   const isYoutubeConnected = !!channel?.youtube?.connected;
 
+  // Resuming a video that was already rendered in a previous session: project.renderedVideoBlob
+  // came back from IndexedDB (see App.jsx handleResume), so rebuild the preview/upload state from
+  // it instead of forcing the user to render again just to get a fresh (but functionally
+  // identical) blob: URL.
+  useEffect(() => {
+    if (!videoUrl && project.renderedVideoBlob) {
+      setRenderedBlob(project.renderedVideoBlob);
+      setVideoUrl(URL.createObjectURL(project.renderedVideoBlob));
+      setFileExt(project.renderedVideoBlob.type === 'video/webm' ? 'webm' : 'mp4');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function renderVideo() {
     setError('');
     setVideoUrl('');
+    setRenderedBlob(null);
     setUsingFallback(false);
     setRendering(true);
     setPct(0);
@@ -137,6 +155,11 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       }
       setVideoUrl(URL.createObjectURL(blob));
       setFileExt(ext);
+      setRenderedBlob(blob);
+      // Same pattern as scene images/audio (StoryboardStep.jsx) — the Blob rides on the project
+      // record itself, so App.jsx's existing debounced autosave persists it to IndexedDB. That's
+      // what lets a resumed session (see the mount effect above) skip re-rendering entirely.
+      setProject((p) => ({ ...p, renderedVideoBlob: blob }));
     } catch (e) {
       if (e?.name !== 'AbortError') setError('Render failed: ' + String(e.message || e));
     } finally {
@@ -312,16 +335,18 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       });
       if (!initRes.ok) throw new Error(initData.error || 'Could not start the YouTube upload');
 
-      console.log('[yt-upload] phase=fetch-video-blob:before', { videoUrl });
-      let videoBlob;
-      try {
-        const videoRes = await fetch(videoUrl);
-        videoBlob = await videoRes.blob();
-      } catch (err) {
-        console.error('[yt-upload] phase=fetch-video-blob:error', err?.message, err?.stack);
-        throw err;
-      }
-      console.log('[yt-upload] phase=fetch-video-blob:after', { size: videoBlob.size, type: videoBlob.type });
+      // Never re-fetch videoUrl (a blob: URL) here — it's known to go invalid across
+      // navigations/idle time even while the string itself still looks fine, which is what caused
+      // "Failed to fetch" with no request ever reaching googleapis.com. Use the Blob already in
+      // memory from this session's render, or the one restored from IndexedDB on resume (see the
+      // mount effect above) — never a re-fetch of the transient URL.
+      const videoBlob = renderedBlob || project.renderedVideoBlob;
+      if (!videoBlob) throw new Error('Render the video first.');
+      console.log('[yt-upload] phase=video-blob:resolved', {
+        source: renderedBlob ? 'in-memory (this session)' : 'project.renderedVideoBlob (resumed from IndexedDB)',
+        size: videoBlob.size,
+        type: videoBlob.type,
+      });
 
       console.log('[yt-upload] phase=upload-video-to-youtube:before', {
         uploadUrl: initData.uploadUrl,
