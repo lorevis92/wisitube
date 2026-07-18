@@ -24,6 +24,9 @@ const AUTH_SCOPES = [
   'https://www.googleapis.com/auth/youtube.force-ssl',
 ].join(' ');
 const PRIVACY_VALUES = ['public', 'unlisted', 'private'];
+// Same list as LANGUAGES in src/steps/CreateStep.jsx — maps the full display name to the BCP-47
+// code captions.insert requires for snippet.language.
+const CAPTION_LANGUAGE_CODES = { English: 'en', Italiano: 'it', Español: 'es', Français: 'fr', Deutsch: 'de' };
 // Enough pages to find a playlist on any channel this app would realistically manage, without
 // risking an unbounded loop against a pathological account.
 const MAX_PLAYLIST_PAGES = 5;
@@ -593,7 +596,7 @@ async function setCaptions(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate the request body.
-    let videoId, refreshTokenValue, srtContent, language;
+    let videoId, refreshTokenValue, srtContent, language, languageName;
     try {
       const body = req.body || {};
       videoId = typeof body.videoId === 'string' ? body.videoId.trim() : '';
@@ -605,7 +608,18 @@ async function setCaptions(req, res) {
       srtContent = typeof body.srtContent === 'string' ? body.srtContent : '';
       if (!srtContent.trim()) return res.status(400).json({ error: 'Invalid srtContent' });
 
-      language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'en';
+      // Accept either the full display name ("English") or an already-converted BCP-47 code
+      // ("en") — captions.insert rejects anything else for snippet.language, so always resolve
+      // through CAPTION_LANGUAGE_CODES instead of trusting the raw value we were sent.
+      const rawLanguage = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
+      if (CAPTION_LANGUAGE_CODES[rawLanguage]) {
+        languageName = rawLanguage;
+        language = CAPTION_LANGUAGE_CODES[rawLanguage];
+      } else {
+        const nameEntry = Object.entries(CAPTION_LANGUAGE_CODES).find(([, code]) => code === rawLanguage.toLowerCase());
+        languageName = nameEntry ? nameEntry[0] : rawLanguage;
+        language = nameEntry ? nameEntry[1] : rawLanguage.toLowerCase();
+      }
     } catch (err) {
       console.error('[youtube-set-captions] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -636,7 +650,10 @@ async function setCaptions(req, res) {
     let response;
     try {
       const boundary = `wisitube_captions_${Date.now()}`;
-      const metadata = JSON.stringify({ snippet: { videoId, language, isDraft: false } });
+      // name is required by captions.insert — it's the caption track's display name, not a
+      // language code, so the full language name ("English") fits the purpose without needing
+      // any user-facing input we don't already have.
+      const metadata = JSON.stringify({ snippet: { videoId, language, name: languageName, isDraft: false } });
       const body =
         `--${boundary}\r\n` +
         `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
@@ -809,8 +826,18 @@ async function addToPlaylist(req, res) {
       });
       const addText = await addRes.text();
       if (!addRes.ok) {
+        // Google reports a video already in the target playlist as an error (commonly reason
+        // videoAlreadyInPlaylist), but the outcome the caller actually wants — the video being in
+        // the playlist — is already true, so this isn't a real failure.
+        const lowerBody = addText.toLowerCase();
+        const isDuplicate =
+          lowerBody.includes('alreadyinplaylist') || lowerBody.includes('already in the playlist') || lowerBody.includes('duplicate');
+        if (isDuplicate) {
+          console.warn('[youtube-add-to-playlist] phase=add-item video already in playlist, treating as success. body=', addText.slice(0, 300));
+          return res.status(200).json({ playlistId, created });
+        }
         console.error('[youtube-add-to-playlist] phase=add-item-http-error status=', addRes.status, 'body=', addText.slice(0, 300));
-        return res.status(502).json({ error: `Could not add the video to the playlist (HTTP ${addRes.status})`, detail: addText.slice(0, 300) });
+        return res.status(addRes.status).json({ error: true, status: addRes.status, detail: addText.slice(0, 300) });
       }
     } catch (err) {
       console.error('[youtube-add-to-playlist] phase=add-item', err?.message, err?.stack);

@@ -367,7 +367,16 @@ export default function ExportStep({ project, settings, channel, channelId, vide
         body: JSON.stringify({ action: 'add-to-playlist', channelId, refreshToken, videoId, seriesName: project.series }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Could not add the video to its series playlist');
+      if (!res.ok) {
+        // error is a string for our own validation failures, but a boolean flag when it's a
+        // passthrough of Google's response (see api/youtube.js add-to-playlist) — the real message
+        // is in detail/status in that case.
+        const message =
+          typeof data.error === 'string' && data.error
+            ? data.error
+            : `Could not add the video to its series playlist (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
+        throw new Error(message);
+      }
       return true;
     } catch (e) {
       setYtErrors((prev) => ({ ...prev, playlist: String(e.message || e) }));
