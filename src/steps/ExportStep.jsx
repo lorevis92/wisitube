@@ -259,6 +259,7 @@ export default function ExportStep({ project, settings, channel, channelId, vide
   // (e.g. a successfully uploaded video), and each phase needs to be independently retryable.
 
   async function runUpload() {
+    console.log('[yt-upload] phase=runUpload:enter');
     setYtErrors((e) => ({ ...e, upload: null }));
     setYtUploadPct(0);
     try {
@@ -268,47 +269,104 @@ export default function ExportStep({ project, settings, channel, channelId, vide
 
       const publishAt = ytScheduleMode === 'schedule' && ytPublishAt ? new Date(ytPublishAt).toISOString() : null;
 
-      const initRes = await fetch('/api/youtube', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'init-upload',
-          channelId,
-          refreshToken,
-          title: ytTitle,
-          description: ytDescription,
-          tags: ytTags.split(',').map((t) => t.trim()).filter(Boolean),
-          categoryId: ytCategory,
-          language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
-          privacyStatus: ytPrivacy,
-          publishAt,
-          madeForKids: ytMadeForKids,
-        }),
+      console.log('[yt-upload] phase=init-upload:before', { channelId, videoUrl, publishAt });
+      let initRes;
+      try {
+        initRes = await fetch('/api/youtube', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'init-upload',
+            channelId,
+            refreshToken,
+            title: ytTitle,
+            description: ytDescription,
+            tags: ytTags.split(',').map((t) => t.trim()).filter(Boolean),
+            categoryId: ytCategory,
+            language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
+            privacyStatus: ytPrivacy,
+            publishAt,
+            madeForKids: ytMadeForKids,
+          }),
+        });
+      } catch (err) {
+        console.error('[yt-upload] phase=init-upload:fetch-error', err?.message, err?.stack);
+        throw err;
+      }
+      console.log('[yt-upload] phase=init-upload:after', { status: initRes.status, ok: initRes.ok });
+
+      let initData;
+      try {
+        initData = await initRes.json();
+      } catch (err) {
+        console.error('[yt-upload] phase=init-upload:parse-json-error', err?.message, err?.stack);
+        throw err;
+      }
+      // The exact uploadUrl string is the thing to check first when the PUT below fails before
+      // ever reaching googleapis.com — undefined/malformed here means init-upload didn't return
+      // what this code assumes it did.
+      console.log('[yt-upload] phase=init-upload:data', {
+        uploadUrl: initData.uploadUrl,
+        uploadUrlType: typeof initData.uploadUrl,
+        hasAccessToken: !!initData.accessToken,
       });
-      const initData = await initRes.json();
       if (!initRes.ok) throw new Error(initData.error || 'Could not start the YouTube upload');
 
-      const videoBlob = await (await fetch(videoUrl)).blob();
-      const videoId = await uploadVideoToYoutube(initData.uploadUrl, videoBlob, initData.accessToken, (p) => setYtUploadPct(p));
+      console.log('[yt-upload] phase=fetch-video-blob:before', { videoUrl });
+      let videoBlob;
+      try {
+        const videoRes = await fetch(videoUrl);
+        videoBlob = await videoRes.blob();
+      } catch (err) {
+        console.error('[yt-upload] phase=fetch-video-blob:error', err?.message, err?.stack);
+        throw err;
+      }
+      console.log('[yt-upload] phase=fetch-video-blob:after', { size: videoBlob.size, type: videoBlob.type });
+
+      console.log('[yt-upload] phase=upload-video-to-youtube:before', {
+        uploadUrl: initData.uploadUrl,
+        blobSize: videoBlob.size,
+        hasAccessToken: !!initData.accessToken,
+        hasProgressCallback: true,
+      });
+      let videoId;
+      try {
+        videoId = await uploadVideoToYoutube(initData.uploadUrl, videoBlob, initData.accessToken, (p) => setYtUploadPct(p));
+      } catch (err) {
+        console.error('[yt-upload] phase=upload-video-to-youtube:error', err?.message, err?.stack);
+        throw err;
+      }
+      console.log('[yt-upload] phase=upload-video-to-youtube:after', { videoId });
+
       setYtVideoId(videoId);
       return videoId;
     } catch (e) {
+      console.error('[yt-upload] phase=runUpload:catch', e?.message, e?.stack);
       setYtErrors((prev) => ({ ...prev, upload: String(e.message || e) }));
       return null;
     }
   }
 
   async function runThumbnail(videoId) {
+    console.log('[yt-upload] phase=runThumbnail:enter', { videoId, thumbReady });
     if (!thumbReady) return true; // no custom thumbnail made — YouTube's auto-picked one applies
     setYtErrors((e) => ({ ...e, thumbnail: null }));
     try {
       const refreshToken = channel?.youtube?.refreshToken;
       const dataUrl = thumbCanvasRef.current.toDataURL('image/png');
-      const res = await fetch('/api/youtube', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set-thumbnail', channelId, refreshToken, videoId, thumbnailBlob: dataUrl }),
-      });
+      console.log('[yt-upload] phase=set-thumbnail:before', { videoId, dataUrlLength: dataUrl?.length });
+      let res;
+      try {
+        res = await fetch('/api/youtube', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'set-thumbnail', channelId, refreshToken, videoId, thumbnailBlob: dataUrl }),
+        });
+      } catch (err) {
+        console.error('[yt-upload] phase=set-thumbnail:fetch-error', err?.message, err?.stack);
+        throw err;
+      }
+      console.log('[yt-upload] phase=set-thumbnail:after', { status: res.status, ok: res.ok });
       const data = await res.json();
       if (!res.ok) {
         // error is a string for our own validation failures, but a boolean flag when it's a
@@ -322,22 +380,32 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       }
       return true;
     } catch (e) {
+      console.error('[yt-upload] phase=runThumbnail:catch', e?.message, e?.stack);
       setYtErrors((prev) => ({ ...prev, thumbnail: String(e.message || e) }));
       return false;
     }
   }
 
   async function runCaptions(videoId) {
+    console.log('[yt-upload] phase=runCaptions:enter', { videoId, ytUploadCaptions });
     if (!ytUploadCaptions) return true;
     setYtErrors((e) => ({ ...e, captions: null }));
     try {
       const refreshToken = channel?.youtube?.refreshToken;
       const srtContent = buildSrtFromScenes(project.scenes);
-      const res = await fetch('/api/youtube', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set-captions', channelId, refreshToken, videoId, srtContent, language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en' }),
-      });
+      console.log('[yt-upload] phase=set-captions:before', { videoId, srtLength: srtContent?.length });
+      let res;
+      try {
+        res = await fetch('/api/youtube', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'set-captions', channelId, refreshToken, videoId, srtContent, language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en' }),
+        });
+      } catch (err) {
+        console.error('[yt-upload] phase=set-captions:fetch-error', err?.message, err?.stack);
+        throw err;
+      }
+      console.log('[yt-upload] phase=set-captions:after', { status: res.status, ok: res.ok });
       const data = await res.json();
       if (!res.ok) {
         // error is a string for our own validation failures, but a boolean flag when it's a
@@ -351,21 +419,31 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       }
       return true;
     } catch (e) {
+      console.error('[yt-upload] phase=runCaptions:catch', e?.message, e?.stack);
       setYtErrors((prev) => ({ ...prev, captions: String(e.message || e) }));
       return false;
     }
   }
 
   async function runPlaylist(videoId) {
+    console.log('[yt-upload] phase=runPlaylist:enter', { videoId, ytAddToPlaylist, series: project.series });
     if (!ytAddToPlaylist || !project.series) return true;
     setYtErrors((e) => ({ ...e, playlist: null }));
     try {
       const refreshToken = channel?.youtube?.refreshToken;
-      const res = await fetch('/api/youtube', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add-to-playlist', channelId, refreshToken, videoId, seriesName: project.series }),
-      });
+      console.log('[yt-upload] phase=add-to-playlist:before', { videoId, seriesName: project.series });
+      let res;
+      try {
+        res = await fetch('/api/youtube', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'add-to-playlist', channelId, refreshToken, videoId, seriesName: project.series }),
+        });
+      } catch (err) {
+        console.error('[yt-upload] phase=add-to-playlist:fetch-error', err?.message, err?.stack);
+        throw err;
+      }
+      console.log('[yt-upload] phase=add-to-playlist:after', { status: res.status, ok: res.ok });
       const data = await res.json();
       if (!res.ok) {
         // error is a string for our own validation failures, but a boolean flag when it's a
@@ -379,6 +457,7 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       }
       return true;
     } catch (e) {
+      console.error('[yt-upload] phase=runPlaylist:catch', e?.message, e?.stack);
       setYtErrors((prev) => ({ ...prev, playlist: String(e.message || e) }));
       return false;
     }
@@ -395,14 +474,17 @@ export default function ExportStep({ project, settings, channel, channelId, vide
       return;
     }
     setYtBusy(true);
+    console.log('[yt-upload] phase=publishToYoutube:enter', { existingVideoId: ytVideoId });
     try {
       let videoId = ytVideoId;
       if (!videoId) videoId = await runUpload();
+      console.log('[yt-upload] phase=publishToYoutube:after-upload', { videoId });
       if (videoId) {
         await runThumbnail(videoId);
         await runCaptions(videoId);
         await runPlaylist(videoId);
       }
+      console.log('[yt-upload] phase=publishToYoutube:exit');
     } finally {
       setYtBusy(false);
     }
