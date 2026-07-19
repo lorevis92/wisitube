@@ -125,12 +125,18 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       // itself: the Blob set above is already usable this session regardless of whether this
       // succeeds.
       try {
-        alert('ATTEMPTING upload: userId=' + userId + ' videoId=' + videoId);
+        console.log('[storage-upload] attempting', {
+          userId,
+          videoId,
+          kind: 'scene-image',
+          beatId: beat.id,
+          blobSize: imageBlob?.size,
+          blobType: imageBlob?.type,
+        });
         const storagePath = await uploadMedia(userId, videoId, 'scene-image', beat.id, imageBlob);
-        alert('UPLOAD OK: ' + storagePath);
         updateImage(sceneId, beatIndex, { storagePath, backupFailed: false });
       } catch (err) {
-        alert('UPLOAD FAILED: ' + (err?.message || err));
+        console.error('[storage-upload] FAILED', err.message, err);
         updateImage(sceneId, beatIndex, { backupFailed: true });
       }
 
@@ -167,12 +173,18 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       // itself: the Blob set above is already usable this session regardless of whether this
       // succeeds.
       try {
-        alert('ATTEMPTING upload: userId=' + userId + ' videoId=' + videoId);
+        console.log('[storage-upload] attempting', {
+          userId,
+          videoId,
+          kind: 'scene-audio',
+          beatId: scene.id,
+          blobSize: audioBlob?.size,
+          blobType: audioBlob?.type,
+        });
         const storagePath = await uploadMedia(userId, videoId, 'scene-audio', scene.id, audioBlob);
-        alert('UPLOAD OK: ' + storagePath);
         updateScene(scene.id, { audioStoragePath: storagePath, audioBackupFailed: false });
       } catch (err) {
-        alert('UPLOAD FAILED: ' + (err?.message || err));
+        console.error('[storage-upload] FAILED', err.message, err);
         updateScene(scene.id, { audioBackupFailed: true });
       }
 
