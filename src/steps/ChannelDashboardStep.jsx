@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel, clearYoutubeConnection, getCostsByChannel } from '../lib/db';
+import { getMediaUrl } from '../lib/mediaStorage';
 
 function timeAgo(ts) {
   if (!ts) return '';
@@ -48,11 +49,21 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       onChannelChange?.(ch || null);
       setVideos(list);
       setTotalSpent(costs.total);
+      // Phase 3: the Blob itself never survives a reload (see stripBlobsForSync, src/lib/db.js) —
+      // storagePath is the Supabase Storage backup, sign a short-lived URL to preview it. Videos
+      // that never reached image generation (or whose backup failed) have no storagePath, and
+      // keep the "No preview" placeholder.
       const urls = {};
       for (const v of list) {
-        const blob = v.scenes?.[0]?.images?.[0]?.blob;
-        if (blob) urls[v.id] = URL.createObjectURL(blob);
+        const storagePath = v.scenes?.[0]?.images?.[0]?.storagePath;
+        if (!storagePath) continue;
+        try {
+          urls[v.id] = await getMediaUrl(storagePath);
+        } catch (err) {
+          console.error('[getMediaUrl] failed to sign video preview thumbnail', storagePath, err);
+        }
       }
+      if (cancelled) return;
       setThumbUrls(urls);
     })();
     return () => {
@@ -60,9 +71,6 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId]);
-
-  // Object URLs created for thumbnails only make sense for this render pass — release them on unmount.
-  useEffect(() => () => Object.values(thumbUrls).forEach((u) => URL.revokeObjectURL(u)), [thumbUrls]);
 
   async function saveNotes() {
     if (!channel || notes === (channel.editorialNotes || '')) return;

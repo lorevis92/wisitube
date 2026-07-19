@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listChannels, listVideosByChannel, saveChannel, createId, getTotalCostAllChannels } from '../lib/db';
+import { getMediaUrl } from '../lib/mediaStorage';
 
 export default function ChannelsListStep({ onOpenChannel, isMobile }) {
   const [channels, setChannels] = useState(null); // null = still loading
@@ -23,8 +24,18 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
         const videos = await listVideosByChannel(c.id);
         if (cancelled) return;
         counts[c.id] = videos.length;
-        const blob = videos[0]?.scenes?.[0]?.images?.[0]?.blob;
-        if (blob) urls[c.id] = URL.createObjectURL(blob);
+        // Phase 3: the Blob itself never survives a reload (see stripBlobsForSync, src/lib/db.js)
+        // — storagePath is the Supabase Storage backup, sign a short-lived URL to preview it.
+        // Videos that never reached image generation (or whose backup failed) have no
+        // storagePath, and keep the "No preview" placeholder.
+        const storagePath = videos[0]?.scenes?.[0]?.images?.[0]?.storagePath;
+        if (storagePath) {
+          try {
+            urls[c.id] = await getMediaUrl(storagePath);
+          } catch (err) {
+            console.error('[getMediaUrl] failed to sign channel preview thumbnail', storagePath, err);
+          }
+        }
       }
       if (cancelled) return;
       setVideoCounts(counts);
@@ -34,9 +45,6 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
       cancelled = true;
     };
   }, []);
-
-  // Object URLs created for thumbnails only make sense for this render pass — release them on unmount.
-  useEffect(() => () => Object.values(thumbUrls).forEach((u) => URL.revokeObjectURL(u)), [thumbUrls]);
 
   async function createChannel() {
     if (!form.name.trim()) return;
