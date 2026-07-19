@@ -83,7 +83,10 @@ export async function deleteVideo(id) {
 
 // ---- Channels ----
 // wisitube_channels columns: id, created_at, updated_at, name, niche, editorial_notes,
-// last_suggestions (jsonb), youtube (jsonb).
+// last_suggestions (jsonb), youtube_connected (bool), youtube_channel_name, youtube_channel_id,
+// youtube_refresh_token (flat columns — no nested youtube object, that's not how this table is
+// shaped) — the app-level channel object mirrors these same flat, snake_case field names rather
+// than reintroducing a nested `youtube` object at this boundary.
 
 function fromChannelRow(row) {
   return {
@@ -94,7 +97,10 @@ function fromChannelRow(row) {
     niche: row.niche || '',
     editorialNotes: row.editorial_notes || '',
     lastSuggestions: row.last_suggestions || null,
-    youtube: row.youtube || null,
+    youtube_connected: !!row.youtube_connected,
+    youtube_channel_name: row.youtube_channel_name || '',
+    youtube_channel_id: row.youtube_channel_id || '',
+    youtube_refresh_token: row.youtube_refresh_token || '',
   };
 }
 
@@ -108,7 +114,10 @@ export async function saveChannel(channel) {
     niche: channel.niche || '',
     editorial_notes: channel.editorialNotes || '',
     last_suggestions: channel.lastSuggestions || null,
-    youtube: channel.youtube || null,
+    youtube_connected: !!channel.youtube_connected,
+    youtube_channel_name: channel.youtube_channel_name || '',
+    youtube_channel_id: channel.youtube_channel_id || '',
+    youtube_refresh_token: channel.youtube_refresh_token || '',
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);
@@ -139,19 +148,23 @@ export async function saveYoutubeConnection(channelId, data) {
   if (!channel) return null;
   return saveChannel({
     ...channel,
-    youtube: {
-      connected: true,
-      channelName: data.channelName || '',
-      youtubeChannelId: data.youtubeChannelId || '',
-      refreshToken: data.refreshToken || '',
-    },
+    youtube_connected: true,
+    youtube_channel_name: data.channelName || '',
+    youtube_channel_id: data.youtubeChannelId || '',
+    youtube_refresh_token: data.refreshToken || '',
   });
 }
 
 export async function clearYoutubeConnection(channelId) {
   const channel = await loadChannel(channelId);
   if (!channel) return null;
-  return saveChannel({ ...channel, youtube: { connected: false, channelName: '', youtubeChannelId: '', refreshToken: '' } });
+  return saveChannel({
+    ...channel,
+    youtube_connected: false,
+    youtube_channel_name: '',
+    youtube_channel_id: '',
+    youtube_refresh_token: '',
+  });
 }
 
 // ---- Cost ledger — persistent record of real money actually spent (never an estimate), append-

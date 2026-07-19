@@ -89,7 +89,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   const [ytErrors, setYtErrors] = useState({}); // { upload, thumbnail, captions, playlist }
   const [ytFormError, setYtFormError] = useState('');
 
-  const isYoutubeConnected = !!channel?.youtube?.connected;
+  const isYoutubeConnected = !!channel?.youtube_connected;
 
   // Resuming a video that was already rendered in a previous session: project.renderedVideoBlob
   // came back from IndexedDB (see App.jsx handleResume), so rebuild the preview/upload state from
@@ -286,7 +286,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     setYtErrors((e) => ({ ...e, upload: null }));
     setYtUploadPct(0);
     try {
-      const refreshToken = channel?.youtube?.refreshToken;
+      const refreshToken = channel?.youtube_refresh_token;
       if (!refreshToken) throw new Error('This channel is not connected to YouTube.');
       if (!videoUrl) throw new Error('Render the video first.');
 
@@ -377,7 +377,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     if (!thumbReady) return true; // no custom thumbnail made — YouTube's auto-picked one applies
     setYtErrors((e) => ({ ...e, thumbnail: null }));
     try {
-      const refreshToken = channel?.youtube?.refreshToken;
+      const refreshToken = channel?.youtube_refresh_token;
       const dataUrl = thumbCanvasRef.current.toDataURL('image/png');
       console.log('[yt-upload] phase=set-thumbnail:before', { videoId, dataUrlLength: dataUrl?.length });
       let res;
@@ -416,7 +416,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     if (!ytUploadCaptions) return true;
     setYtErrors((e) => ({ ...e, captions: null }));
     try {
-      const refreshToken = channel?.youtube?.refreshToken;
+      const refreshToken = channel?.youtube_refresh_token;
       const srtContent = buildSrtFromScenes(project.scenes);
       console.log('[yt-upload] phase=set-captions:before', { videoId, srtLength: srtContent?.length });
       let res;
@@ -455,7 +455,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     if (!ytAddToPlaylist || !project.series) return true;
     setYtErrors((e) => ({ ...e, playlist: null }));
     try {
-      const refreshToken = channel?.youtube?.refreshToken;
+      const refreshToken = channel?.youtube_refresh_token;
       console.log('[yt-upload] phase=add-to-playlist:before', { videoId, seriesName: project.series });
       let res;
       try {
@@ -680,7 +680,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         <div style={card}>
           <div style={label}>8 · Publish to YouTube</div>
           <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 6, fontFamily: FONT.ui }}>
-            Publishing to <strong>{channel.youtube.channelName || 'your connected channel'}</strong>. Render the video above first.
+            Publishing to <strong>{channel.youtube_channel_name || 'your connected channel'}</strong>. Render the video above first.
           </div>
 
           <div style={{ marginTop: 16 }}>

@@ -186,9 +186,9 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
         >
           <div>
             <div style={label}>YouTube</div>
-            {channel?.youtube?.connected ? (
+            {channel?.youtube_connected ? (
               <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.text, marginTop: 6 }}>
-                ✓ Connected to {channel.youtube.channelName || 'YouTube channel'}
+                ✓ Connected to {channel.youtube_channel_name || 'YouTube channel'}
               </div>
             ) : (
               <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>
@@ -196,7 +196,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
               </div>
             )}
           </div>
-          {channel?.youtube?.connected ? (
+          {channel?.youtube_connected ? (
             <button onClick={handleDisconnectYoutube} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
               Disconnect
             </button>
