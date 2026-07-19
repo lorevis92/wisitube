@@ -125,10 +125,18 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       // itself: the Blob set above is already usable this session regardless of whether this
       // succeeds.
       try {
+        console.log('[storage-upload] attempting', {
+          userId,
+          videoId,
+          kind: 'scene-image',
+          beatId: beat.id,
+          blobSize: imageBlob?.size,
+          blobType: imageBlob?.type,
+        });
         const storagePath = await uploadMedia(userId, videoId, 'scene-image', beat.id, imageBlob);
         updateImage(sceneId, beatIndex, { storagePath, backupFailed: false });
       } catch (err) {
-        console.error('[mediaStorage] failed to back up scene image', beat.id, err);
+        console.error('[storage-upload] FAILED', err.message, err);
         updateImage(sceneId, beatIndex, { backupFailed: true });
       }
 
@@ -165,10 +173,18 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       // itself: the Blob set above is already usable this session regardless of whether this
       // succeeds.
       try {
+        console.log('[storage-upload] attempting', {
+          userId,
+          videoId,
+          kind: 'scene-audio',
+          beatId: scene.id,
+          blobSize: audioBlob?.size,
+          blobType: audioBlob?.type,
+        });
         const storagePath = await uploadMedia(userId, videoId, 'scene-audio', scene.id, audioBlob);
         updateScene(scene.id, { audioStoragePath: storagePath, audioBackupFailed: false });
       } catch (err) {
-        console.error('[mediaStorage] failed to back up scene audio', scene.id, err);
+        console.error('[storage-upload] FAILED', err.message, err);
         updateScene(scene.id, { audioBackupFailed: true });
       }
 
@@ -445,6 +461,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             {/* Two image beats, side by side */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
               {scene.images.map((beat, b) => {
+                console.log('[render-debug]', beat.id, beat.url);
                 return (
                   <div key={beat.id}>
                     <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
