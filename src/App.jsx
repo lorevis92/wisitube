@@ -106,6 +106,19 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  // Ask the browser to exempt this origin from automatic eviction under storage pressure — WisiTube
+  // keeps rendered video/image/audio Blobs in IndexedDB (see src/lib/db.js) with no server-side
+  // backup, so a silent eviction would be a real data loss, not just a cache miss. The user can
+  // still clear data manually; this only opts out of the *automatic* kind. Not supported in every
+  // browser and never guaranteed even where it is, so this is fire-and-forget with no blocking UI.
+  useEffect(() => {
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().then((granted) => {
+        console.log('Storage persisted:', granted);
+      });
+    }
+  }, []);
+
   // Returning leg of the per-channel YouTube OAuth flow (api/youtube.js, action=callback redirects
   // here with these query params) — read once on mount, persisted to the channel via IndexedDB (the
   // only storage WisiTube has), then stripped from the URL so a refresh doesn't replay it.
