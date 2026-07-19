@@ -1,75 +1,133 @@
-// Local persistence — IndexedDB via idb-keyval, so raw media Blobs (images, voiceover) survive a
-// refresh or browser restart with no size limits. Two stores: channels (containers) and videos
-// (the per-video projects that used to be the only level — each now tagged with a channelId).
-import { get, set, del, entries, createStore } from 'idb-keyval';
-
-const videoStore = createStore('wisitube-db', 'projects');
-// Deliberately a separate IndexedDB database, not another store in 'wisitube-db': idb-keyval's
-// createStore() opens its database with no explicit version, so onupgradeneeded (which is what
-// actually creates an object store) only ever fires the first time a given dbName is opened.
-// Two createStore() calls sharing 'wisitube-db' would race — whichever store's first read/write
-// happens second would find its object store was never created and throw NotFoundError, for
-// every user (new or existing). A dedicated database for channels sidesteps that entirely.
-const channelStore = createStore('wisitube-channels-db', 'channels');
-// Same reasoning as channelStore above: its own dedicated database, not another store bolted onto
-// an existing one, so the first read/write against it can't race a sibling store's first-ever
-// onupgradeneeded and throw NotFoundError.
-const costLedgerStore = createStore('wisitube-cost-ledger-db', 'costLedger');
-
-const MIGRATION_FLAG = 'wisitube_migrated_channels';
+// Phase 2 of the multi-user migration: channels, video project data (structure/text — narration,
+// prompts, character bible, outline, beat status) and the cost ledger now live in Supabase
+// (Postgres), row-scoped per user via RLS (every table's user_id column defaults to auth.uid()) —
+// no explicit user_id filter is added here, the database enforces it. Media Blobs (scene
+// images/audio, thumbnails, the rendered video) are NOT persisted by this file: they stay in
+// memory/IndexedDB for the current session only, stripped out before every write to wisitube_videos
+// (see stripBlobsForSync below). Real Blob persistence is Phase 3.
+import { supabase } from './supabase';
 
 export function createId() {
   return crypto.randomUUID();
 }
 
-// ---- Videos (the single-level "project" this store used to hold) ----
+function unwrap({ data, error }) {
+  if (error) throw error;
+  return data;
+}
+
+// jsonb can't hold a Blob — deep-copies value, replacing any Blob instance (scene images/audio,
+// thumbnails, the rendered video) with null. Everything else (narration, prompts, character bible,
+// outline, beat status, and any other plain data) passes through untouched.
+export function stripBlobsForSync(value) {
+  if (value instanceof Blob) return null;
+  if (Array.isArray(value)) return value.map(stripBlobsForSync);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = stripBlobsForSync(v);
+    return out;
+  }
+  return value;
+}
+
+// ---- Videos ----
+// wisitube_videos columns: id, channel_id, created_at, updated_at, topic, settings (jsonb),
+// display_title, project (jsonb — everything else: titles, scenes, description, tags,
+// thumbnails, subtitles, references, characterBible, series… with Blobs stripped).
+
+function fromVideoRow(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : null,
+    topic: row.topic || '',
+    settings: row.settings || {},
+    displayTitle: row.display_title || '',
+    ...(row.project || {}),
+  };
+}
 
 export async function saveVideo(video) {
-  const toSave = { ...video, updatedAt: Date.now() };
-  await set(toSave.id, toSave, videoStore);
-  return toSave;
+  const { id, channelId, createdAt, topic, settings, displayTitle, ...project } = video;
+  const now = new Date().toISOString();
+  const row = {
+    id,
+    channel_id: channelId,
+    created_at: createdAt ? new Date(createdAt).toISOString() : now,
+    updated_at: now,
+    topic: topic || '',
+    settings: settings || {},
+    display_title: displayTitle || '',
+    project: stripBlobsForSync(project),
+  };
+  const data = unwrap(await supabase.from('wisitube_videos').upsert(row, { onConflict: 'id' }).select().single());
+  return fromVideoRow(data);
 }
 
-export function loadVideo(id) {
-  return get(id, videoStore);
-}
-
-export async function listVideos() {
-  const all = await entries(videoStore);
-  return all.map(([, value]) => value).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+export async function loadVideo(id) {
+  const data = unwrap(await supabase.from('wisitube_videos').select('*').eq('id', id).maybeSingle());
+  return data ? fromVideoRow(data) : null;
 }
 
 export async function listVideosByChannel(channelId) {
-  const all = await listVideos();
-  return all.filter((v) => v.channelId === channelId);
+  const data = unwrap(
+    await supabase.from('wisitube_videos').select('*').eq('channel_id', channelId).order('updated_at', { ascending: false })
+  );
+  return (data || []).map(fromVideoRow);
 }
 
-export function deleteVideo(id) {
-  return del(id, videoStore);
+export async function deleteVideo(id) {
+  unwrap(await supabase.from('wisitube_videos').delete().eq('id', id));
 }
 
 // ---- Channels ----
+// wisitube_channels columns: id, created_at, updated_at, name, niche, editorial_notes,
+// last_suggestions (jsonb), youtube (jsonb).
 
-export async function saveChannel(channel) {
-  const toSave = { ...channel, updatedAt: Date.now() };
-  await set(toSave.id, toSave, channelStore);
-  return toSave;
+function fromChannelRow(row) {
+  return {
+    id: row.id,
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : null,
+    name: row.name || '',
+    niche: row.niche || '',
+    editorialNotes: row.editorial_notes || '',
+    lastSuggestions: row.last_suggestions || null,
+    youtube: row.youtube || null,
+  };
 }
 
-export function loadChannel(id) {
-  return get(id, channelStore);
+export async function saveChannel(channel) {
+  const now = new Date().toISOString();
+  const row = {
+    id: channel.id,
+    created_at: channel.createdAt ? new Date(channel.createdAt).toISOString() : now,
+    updated_at: now,
+    name: channel.name || '',
+    niche: channel.niche || '',
+    editorial_notes: channel.editorialNotes || '',
+    last_suggestions: channel.lastSuggestions || null,
+    youtube: channel.youtube || null,
+  };
+  const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
+  return fromChannelRow(data);
+}
+
+export async function loadChannel(id) {
+  const data = unwrap(await supabase.from('wisitube_channels').select('*').eq('id', id).maybeSingle());
+  return data ? fromChannelRow(data) : null;
 }
 
 export async function listChannels() {
-  await migrateOrphanVideosOnce();
-  const all = await entries(channelStore);
-  return all.map(([, value]) => value).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const data = unwrap(await supabase.from('wisitube_channels').select('*').order('updated_at', { ascending: false }));
+  return (data || []).map(fromChannelRow);
 }
 
 export async function deleteChannel(id) {
   const videos = await listVideosByChannel(id);
   await Promise.all(videos.map((v) => deleteVideo(v.id)));
-  await del(id, channelStore);
+  unwrap(await supabase.from('wisitube_channels').delete().eq('id', id));
 }
 
 // ---- YouTube per-channel connection (see api/youtube.js, action=callback, which is the only source of
@@ -101,63 +159,44 @@ export async function clearYoutubeConnection(channelId) {
 // trusted as "what really happened" rather than a projection. One entry per successful paid call
 // (image via nanobanana/gptimage, audio via MiniMax) — see the recordCost call sites in
 // StoryboardStep.jsx and ExportStep.jsx for exactly what counts. ----
+// wisitube_cost_ledger columns: id, channel_id, video_id, provider, type, amount_usd, timestamp.
+
+function fromCostRow(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    videoId: row.video_id,
+    provider: row.provider,
+    type: row.type, // 'image' | 'audio'
+    amountUsd: row.amount_usd,
+    timestamp: row.timestamp ? new Date(row.timestamp).getTime() : null,
+  };
+}
 
 export async function recordCost({ channelId, videoId, provider, type, amountUsd, timestamp }) {
-  const entry = {
+  const row = {
     id: createId(),
-    channelId,
-    videoId: videoId || null,
+    channel_id: channelId,
+    video_id: videoId || null,
     provider,
-    type, // 'image' | 'audio'
-    amountUsd,
-    timestamp: timestamp || Date.now(),
+    type,
+    amount_usd: amountUsd,
+    timestamp: timestamp ? new Date(timestamp).toISOString() : new Date().toISOString(),
   };
-  await set(entry.id, entry, costLedgerStore);
-  return entry;
+  const data = unwrap(await supabase.from('wisitube_cost_ledger').insert(row).select().single());
+  return fromCostRow(data);
 }
 
 export async function getCostsByChannel(channelId) {
-  const all = await entries(costLedgerStore);
-  const items = all
-    .map(([, v]) => v)
-    .filter((e) => e.channelId === channelId)
-    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const data = unwrap(
+    await supabase.from('wisitube_cost_ledger').select('*').eq('channel_id', channelId).order('timestamp', { ascending: false })
+  );
+  const items = (data || []).map(fromCostRow);
   const total = items.reduce((sum, e) => sum + (e.amountUsd || 0), 0);
   return { total, items };
 }
 
 export async function getTotalCostAllChannels() {
-  const all = await entries(costLedgerStore);
-  return all.reduce((sum, [, v]) => sum + (v.amountUsd || 0), 0);
-}
-
-// ---- One-time migration: videos saved before Channels existed have no channelId. Runs lazily
-// the first time channels are listed (app startup), guarded by a localStorage flag so it only
-// ever does real work once — no video is deleted or overwritten, only tagged with a channelId.
-async function migrateOrphanVideosOnce() {
-  let alreadyMigrated = false;
-  try {
-    alreadyMigrated = !!localStorage.getItem(MIGRATION_FLAG);
-  } catch {
-    alreadyMigrated = true; // no localStorage available — don't retry every call
-  }
-  if (alreadyMigrated) return;
-
-  const all = await listVideos();
-  const orphans = all.filter((v) => !v.channelId);
-  if (orphans.length > 0) {
-    const channel = await saveChannel({
-      id: createId(),
-      name: 'My first channel',
-      niche: '',
-      editorialNotes: '',
-      createdAt: Date.now(),
-    });
-    await Promise.all(orphans.map((v) => saveVideo({ ...v, channelId: channel.id })));
-  }
-  try {
-    localStorage.setItem(MIGRATION_FLAG, '1');
-  } catch {
-    /* ignore */
-  }
+  const data = unwrap(await supabase.from('wisitube_cost_ledger').select('amount_usd'));
+  return (data || []).reduce((sum, row) => sum + (row.amount_usd || 0), 0);
 }

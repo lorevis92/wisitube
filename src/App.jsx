@@ -140,8 +140,8 @@ export default function App() {
   }, []);
 
   // Returning leg of the per-channel YouTube OAuth flow (api/youtube.js, action=callback redirects
-  // here with these query params) — read once on mount, persisted to the channel via IndexedDB (the
-  // only storage WisiTube has), then stripped from the URL so a refresh doesn't replay it.
+  // here with these query params) — read once on mount, persisted to the channel via Supabase (see
+  // src/lib/db.js), then stripped from the URL so a refresh doesn't replay it.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const connectedChannelId = params.get('youtube_connected');
@@ -154,9 +154,11 @@ export default function App() {
         channelName: ytName,
         youtubeChannelId: ytChannelId,
         refreshToken: ytRefresh,
-      }).then(() => {
-        window.alert(`Connected to YouTube channel "${ytName}".`);
-      });
+      })
+        .then(() => {
+          window.alert(`Connected to YouTube channel "${ytName}".`);
+        })
+        .catch((err) => window.alert(`Could not save the YouTube connection: ${String(err.message || err)}`));
       window.history.replaceState({}, '', window.location.pathname);
     } else if (ytError) {
       window.alert(`YouTube connection failed: ${ytError}`);
@@ -164,7 +166,7 @@ export default function App() {
     }
   }, []);
 
-  // Autosave the open video to IndexedDB, debounced so fast edits don't hammer the store.
+  // Autosave the open video to Supabase, debounced so fast edits don't hammer the table.
   useEffect(() => {
     if (!project || !projectId) return;
     const generation = generationRef.current;
@@ -181,7 +183,9 @@ export default function App() {
         // Frozen at save time so the channel dashboard never has to re-derive it (and risk
         // picking the raw topic — which can repeat across videos — over the generated title).
         displayTitle: project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video',
-      });
+        // Unlike idb-keyval's local writes, this now goes over the network and can genuinely fail
+        // (auth, connectivity, RLS) — surface it instead of an unhandled promise rejection.
+      }).catch((err) => console.error('[autosave] saveVideo failed', err));
     }, 800);
     return () => clearTimeout(timer);
   }, [project, settings, projectId, createdAt, currentChannelId]);
