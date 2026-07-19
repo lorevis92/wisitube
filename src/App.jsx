@@ -15,6 +15,7 @@ import { createId, saveVideo, saveYoutubeConnection } from './lib/db';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
 import { supabase } from './lib/supabase';
+import { downloadMediaAsBlob } from './lib/mediaStorage';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -90,6 +91,10 @@ export default function App() {
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
   const [createdAt, setCreatedAt] = useState(null);
+  // True while handleResume is re-downloading scene/audio/reference Blobs from Supabase Storage
+  // for a video whose media survives only there (Phase 3) — the rest of the app assumes
+  // project.scenes already has usable Blob/object-URLs, so nothing renders until that's true.
+  const [resuming, setResuming] = useState(false);
 
   // Titles → outline → chunked-scenes pipeline state. Transient — only meaningful while tab is
   // 'titles' or 'generating-scenes'. Once scene generation finishes, everything converges into
@@ -323,21 +328,70 @@ export default function App() {
     setTab('titles');
   }
 
-  // Resume a project loaded from IndexedDB — object URLs never survive a reload, so they're
-  // rebuilt here from the stored Blobs before the project goes into state.
-  function handleResume(record) {
+  // Resume a project loaded from Supabase — object URLs (and the Blobs behind them) never survive
+  // a reload, so they're rebuilt here: from an in-memory Blob if one's still on the record (rare —
+  // stripBlobsForSync, src/lib/db.js, nulls those out before every save), otherwise downloaded fresh
+  // from its Supabase Storage backup (Phase 3) via storagePath/audioStoragePath. Async because of
+  // that download step — generationRef guards against a stale resume finishing after a newer one
+  // (or a reset) already took over, same pattern as the scene-generation pipeline below.
+  async function handleResume(record) {
     generationRef.current += 1;
+    const generation = generationRef.current;
     setTitleOptions(null);
     setPendingPlan(null);
     setGenerationError('');
-    const scenes = (record.scenes || []).map((s) => ({
-      ...s,
-      images: (s.images || []).map((im) => ({
-        ...im,
-        url: im.blob ? URL.createObjectURL(im.blob) : im.url,
-      })),
-      audioUrl: s.audioBlob ? URL.createObjectURL(s.audioBlob) : s.audioUrl,
-    }));
+    setResuming(true);
+
+    const scenes = await Promise.all(
+      (record.scenes || []).map(async (s) => {
+        const images = await Promise.all(
+          (s.images || []).map(async (im) => {
+            if (im.blob) return { ...im, url: im.url || URL.createObjectURL(im.blob) };
+            if (!im.storagePath) return im;
+            try {
+              const blob = await downloadMediaAsBlob(im.storagePath);
+              return { ...im, blob, url: URL.createObjectURL(blob) };
+            } catch (err) {
+              console.error('[handleResume] could not restore scene image from storage', im.storagePath, err);
+              return im;
+            }
+          })
+        );
+
+        let audioBlob = s.audioBlob;
+        let audioUrl = s.audioUrl;
+        if (audioBlob) {
+          audioUrl = audioUrl || URL.createObjectURL(audioBlob);
+        } else if (s.audioStoragePath) {
+          try {
+            audioBlob = await downloadMediaAsBlob(s.audioStoragePath);
+            audioUrl = URL.createObjectURL(audioBlob);
+          } catch (err) {
+            console.error('[handleResume] could not restore scene audio from storage', s.audioStoragePath, err);
+          }
+        }
+
+        return { ...s, images, audioBlob, audioUrl };
+      })
+    );
+
+    // Reference photos are stripped the same way — only needed again if the user regenerates a
+    // beat that anchors to one, so restore them here too rather than lazily in StoryboardStep.
+    const references = await Promise.all(
+      (record.references || []).map(async (r) => {
+        if (r.file || !r.storagePath) return r;
+        try {
+          const file = await downloadMediaAsBlob(r.storagePath);
+          return { ...r, file };
+        } catch (err) {
+          console.error('[handleResume] could not restore reference photo from storage', r.storagePath, err);
+          return r;
+        }
+      })
+    );
+
+    if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile
+
     setSettings(record.settings || settings);
     setProject({
       titles: record.titles || [],
@@ -346,7 +400,7 @@ export default function App() {
       tags: record.tags || [],
       thumbnails: record.thumbnails || [],
       subtitles: !!record.subtitles,
-      references: record.references || [],
+      references,
       characterBible: record.characterBible || [],
       scenes,
       series: record.series || null,
@@ -354,6 +408,7 @@ export default function App() {
       // itself on mount, since it also needs the raw Blob for a same-mount YouTube upload without
       // re-fetching a blob: URL that may no longer be valid (see ExportStep.jsx runUpload).
       renderedVideoBlob: record.renderedVideoBlob || null,
+      thumbnailStoragePath: record.thumbnailStoragePath || null,
     });
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
@@ -362,6 +417,7 @@ export default function App() {
     if (record.channelId) setCurrentChannelId(record.channelId);
     const hasAllMedia = scenes.length > 0 && scenes.every(isSceneMediaReady);
     setTab(hasAllMedia ? 'editor' : 'storyboard');
+    setResuming(false);
   }
 
   // Explicit reset so opening the Create tab from the channel dashboard never silently overwrites the open video.
@@ -431,6 +487,7 @@ export default function App() {
 
   if (session === undefined) return null; // still checking for an existing session
   if (!session) return <AuthScreen />;
+  if (resuming) return <FullScreenLoader title="Reopening your video…" subtitle="Restoring images and audio from your backup" />;
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: T.bg }}>
@@ -551,6 +608,7 @@ export default function App() {
             onReady={() => setTab('editor')}
             channelId={currentChannelId}
             videoId={projectId}
+            userId={session.user?.id}
             isMobile={isMobile}
           />
         )}
@@ -567,6 +625,7 @@ export default function App() {
             channel={currentChannel}
             channelId={currentChannelId}
             videoId={projectId}
+            userId={session.user?.id}
             isMobile={isMobile}
           />
         )}

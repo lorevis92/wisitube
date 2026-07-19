@@ -10,6 +10,7 @@ import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promp
 import { priceForImage } from '../lib/imageProviders';
 import { priceForVoice } from '../lib/voiceProviders';
 import { recordCost } from '../lib/db';
+import { uploadMedia } from '../lib/mediaStorage';
 import ImageLightbox from '../components/ImageLightbox';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,7 +29,7 @@ function blobToDataUri(blob) {
 const isSceneReady = (s) =>
   Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
 
-export default function StoryboardStep({ project, setProject, settings, onReady, channelId, videoId, isMobile }) {
+export default function StoryboardStep({ project, setProject, settings, onReady, channelId, videoId, userId, isMobile }) {
   const [running, setRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [showSeo, setShowSeo] = useState(false);
@@ -104,7 +105,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
     const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
     const provider = settings.imageProvider || 'pollinations';
-    updateImage(sceneId, beatIndex, { status: 'loading', seed });
+    updateImage(sceneId, beatIndex, { status: 'loading', seed, backupFailed: false });
     const startedAt = performance.now();
     try {
       // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
@@ -119,6 +120,18 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       const objectUrl = URL.createObjectURL(imageBlob);
       recordImageTime((performance.now() - startedAt) / 1000);
       updateImage(sceneId, beatIndex, { status: 'ready', url: objectUrl, blob: imageBlob });
+
+      // Back up to Supabase Storage so this survives a refresh — never blocks the generation
+      // itself: the Blob set above is already usable this session regardless of whether this
+      // succeeds.
+      try {
+        const storagePath = await uploadMedia(userId, videoId, 'scene-image', beat.id, imageBlob);
+        updateImage(sceneId, beatIndex, { storagePath, backupFailed: false });
+      } catch (err) {
+        console.error('[mediaStorage] failed to back up scene image', beat.id, err);
+        updateImage(sceneId, beatIndex, { backupFailed: true });
+      }
+
       return true;
     } catch {
       updateImage(sceneId, beatIndex, { status: 'error' });
@@ -127,7 +140,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   }
 
   async function genAudio(scene) {
-    updateScene(scene.id, { audioStatus: 'loading', audioError: null });
+    updateScene(scene.id, { audioStatus: 'loading', audioError: null, audioBackupFailed: false });
     const startedAt = performance.now();
     const voiceEngine = settings.voiceEngine || 'kokoro';
     const wasWarmBefore = isModelWarm();
@@ -147,6 +160,18 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       // MiniMax has no such warm-up cost, so its timings always count.
       if (voiceEngine === 'minimax' || wasWarmBefore) recordAudioTime((performance.now() - startedAt) / 1000);
       updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioBlob, audioDuration: buffer.duration, audioError: null });
+
+      // Back up to Supabase Storage so this survives a refresh — never blocks the generation
+      // itself: the Blob set above is already usable this session regardless of whether this
+      // succeeds.
+      try {
+        const storagePath = await uploadMedia(userId, videoId, 'scene-audio', scene.id, audioBlob);
+        updateScene(scene.id, { audioStoragePath: storagePath, audioBackupFailed: false });
+      } catch (err) {
+        console.error('[mediaStorage] failed to back up scene audio', scene.id, err);
+        updateScene(scene.id, { audioBackupFailed: true });
+      }
+
       return true;
     } catch (e) {
       updateScene(scene.id, { audioStatus: 'error', audioError: e?.message || String(e) });
@@ -398,9 +423,21 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                 {scene.images.map((im, b) => (
                   <span key={im.id} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                     {statusDot(im.status)} img{b + 1}
+                    {im.backupFailed && (
+                      <span title="Upload to Supabase Storage failed — will be lost on refresh unless retried" style={{ color: T.primary }}>
+                        ⚠ not backed up
+                      </span>
+                    )}
                   </span>
                 ))}
-                <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{statusDot(scene.audioStatus, scene.audioStatus === 'error' ? scene.audioError : undefined)} voice</span>
+                <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  {statusDot(scene.audioStatus, scene.audioStatus === 'error' ? scene.audioError : undefined)} voice
+                  {scene.audioBackupFailed && (
+                    <span title="Upload to Supabase Storage failed — will be lost on refresh unless retried" style={{ color: T.primary }}>
+                      ⚠ not backed up
+                    </span>
+                  )}
+                </span>
                 {scene.audioDuration ? <span style={mono}>{scene.audioDuration.toFixed(1)}s</span> : null}
               </span>
             </div>

@@ -8,6 +8,7 @@ import { uploadVideoToYoutube } from '../lib/youtubeUpload';
 import { buildSrtFromScenes } from '../lib/srtBuilder';
 import { generateImage } from '../lib/sceneOrchestrator';
 import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
+import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
 
 // Official YouTube video category IDs (googleapis.com/youtube/v3/videoCategories) — the ones
 // realistically relevant to faceless explainer-style channels, skipping deprecated categories
@@ -40,7 +41,7 @@ function minScheduleLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export default function ExportStep({ project, setProject, settings, channel, channelId, videoId, isMobile }) {
+export default function ExportStep({ project, setProject, settings, channel, channelId, videoId, userId, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const abortRef = useRef(null);
@@ -63,6 +64,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   const [thumbSeed, setThumbSeed] = useState(7);
   const [thumbBusy, setThumbBusy] = useState(false);
   const [thumbReady, setThumbReady] = useState(false);
+  const [thumbBackupFailed, setThumbBackupFailed] = useState(false);
 
   const dims = settings.format === '9:16' ? { W: 720, H: 1280 } : { W: 1280, H: 720 };
   const scenes = project.scenes;
@@ -101,6 +103,46 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       setVideoUrl(URL.createObjectURL(project.renderedVideoBlob));
       setFileExt(project.renderedVideoBlob.type === 'video/webm' ? 'webm' : 'mp4');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Same idea for the thumbnail — project.thumbnailStoragePath survives a refresh even though the
+  // canvas itself (and any in-memory Blob) doesn't, so redraw it from the Supabase Storage backup
+  // instead of forcing a full (paid, for premium providers) regeneration.
+  useEffect(() => {
+    if (thumbReady || !project.thumbnailStoragePath) return;
+    (async () => {
+      try {
+        const blob = await downloadMediaAsBlob(project.thumbnailStoragePath);
+        const img = await loadImage(URL.createObjectURL(blob));
+        const ctx = thumbCanvasRef.current.getContext('2d');
+        ctx.drawImage(img, 0, 0, 1280, 720);
+        setThumbReady(true);
+      } catch (err) {
+        console.error('[mediaStorage] could not restore thumbnail from storage', project.thumbnailStoragePath, err);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reference photos are stripped before every save like every other media Blob (see
+  // stripBlobsForSync in src/lib/db.js) — back up any that still only have the in-memory Blob from
+  // this session and haven't been uploaded yet. A no-op for videos with no references, and for ones
+  // already backed up (storagePath already set).
+  useEffect(() => {
+    if (!userId) return;
+    (project.references || []).forEach(async (ref) => {
+      if (!ref.file || ref.storagePath) return;
+      try {
+        const storagePath = await uploadMedia(userId, videoId, 'reference', ref.id, ref.file);
+        setProject((p) => ({
+          ...p,
+          references: (p.references || []).map((r) => (r.id === ref.id ? { ...r, storagePath } : r)),
+        }));
+      } catch (err) {
+        console.error('[mediaStorage] failed to back up reference photo', ref.id, err);
+      }
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -200,6 +242,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   async function makeThumbnail() {
     setThumbBusy(true);
     setThumbReady(false);
+    setThumbBackupFailed(false);
     try {
       const concept = project.thumbnails[thumbIdx];
       const provider = settings.imageProvider || 'pollinations';
@@ -262,6 +305,19 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       // itself (see thumbnailPrompt) — the cover-fit above is the only processing it needs.
 
       setThumbReady(true);
+
+      // Back up the composited canvas to Supabase Storage so this survives a refresh — never
+      // blocks the generation itself, the canvas above is already usable this session regardless.
+      try {
+        const thumbBlob = await new Promise((resolve) => c.toBlob(resolve, 'image/png'));
+        if (!thumbBlob) throw new Error('canvas.toBlob returned null');
+        const storagePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbBlob);
+        setProject((p) => ({ ...p, thumbnailStoragePath: storagePath }));
+        setThumbBackupFailed(false);
+      } catch (err) {
+        console.error('[mediaStorage] failed to back up thumbnail', err);
+        setThumbBackupFailed(true);
+      }
     } catch (e) {
       setError('Thumbnail failed: ' + String(e.message || e));
     } finally {
@@ -649,6 +705,11 @@ export default function ExportStep({ project, setProject, settings, channel, cha
           <button onClick={downloadThumb} style={{ ...btnPrimary, background: T.green, borderColor: T.green, marginTop: 10 }}>
             ↓ Download PNG
           </button>
+        )}
+        {thumbBackupFailed && (
+          <div style={{ fontSize: 11, color: T.primary, fontFamily: FONT.ui, marginTop: 8 }}>
+            ⚠ Not backed up — this thumbnail will be lost on refresh unless you retry.
+          </div>
         )}
       </div>
 
