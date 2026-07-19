@@ -389,7 +389,16 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         uploadUrlType: typeof initData.uploadUrl,
         hasAccessToken: !!initData.accessToken,
       });
-      if (!initRes.ok) throw new Error(initData.error || 'Could not start the YouTube upload');
+      if (!initRes.ok) {
+        // error is a string for our own validation failures, but a boolean flag when it's a
+        // passthrough of Google's response (see api/youtube.js init-upload) — the real message is
+        // in detail (plus optionally reason) in that case.
+        const message =
+          typeof initData.error === 'string' && initData.error
+            ? initData.error
+            : `YouTube rejected the upload: ${initData.detail || 'Unknown error'}${initData.reason ? ` (${initData.reason})` : ''}`;
+        throw new Error(message);
+      }
 
       // Never re-fetch videoUrl (a blob: URL) here — it's known to go invalid across
       // navigations/idle time even while the string itself still looks fine, which is what caused

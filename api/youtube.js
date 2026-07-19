@@ -462,14 +462,29 @@ async function initUpload(req, res) {
     );
 
     if (!initResponse.ok) {
-      let detail = '';
+      let bodyText = '';
       try {
-        detail = await initResponse.text();
+        bodyText = await initResponse.text();
       } catch {
         /* best effort */
       }
-      console.error('[youtube-init-upload] phase=init-http-error status=', initResponse.status, 'body=', detail.slice(0, 300));
-      return res.status(502).json({ error: `YouTube rejected the upload session (HTTP ${initResponse.status})`, detail: detail.slice(0, 300) });
+      // Google's error body is normally { error: { message, errors: [{ reason, ... }] } } — pull
+      // both out generically and pass them straight through, rather than hardcoding a message for
+      // any one specific reason (uploadLimitExceeded, quotaExceeded, etc.). Falls back to the raw
+      // body text if it isn't JSON.
+      let googleMessage = bodyText.slice(0, 300);
+      let googleReason = null;
+      try {
+        const parsed = JSON.parse(bodyText);
+        if (parsed?.error?.message) googleMessage = parsed.error.message;
+        if (Array.isArray(parsed?.error?.errors) && parsed.error.errors[0]?.reason) {
+          googleReason = parsed.error.errors[0].reason;
+        }
+      } catch {
+        /* body wasn't JSON — bodyText above is already the fallback */
+      }
+      console.error('[youtube-init-upload] phase=init-http-error status=', initResponse.status, 'body=', bodyText.slice(0, 300));
+      return res.status(initResponse.status).json({ error: true, status: initResponse.status, detail: googleMessage, reason: googleReason || null });
     }
 
     const uploadUrl = initResponse.headers.get('location');
