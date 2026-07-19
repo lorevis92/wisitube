@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.110.7",
     "formidable": "^3.5.4",
     "idb-keyval": "^6.2.6",
     "kokoro-js": "^1.2.1",

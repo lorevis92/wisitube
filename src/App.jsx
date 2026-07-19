@@ -9,10 +9,12 @@ import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
 import FullScreenLoader from './components/FullScreenLoader';
+import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost } from './theme';
 import { createId, saveVideo, saveYoutubeConnection } from './lib/db';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
+import { supabase } from './lib/supabase';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -54,6 +56,10 @@ function buildScenesFromRaw(rawScenes) {
 }
 
 export default function App() {
+  // undefined = getSession() hasn't resolved yet, null = resolved and no session, object = signed
+  // in. The distinct "still checking" state stops a signed-in user from flashing AuthScreen while
+  // Supabase reads the session out of local storage.
+  const [session, setSession] = useState(undefined);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
   const [tab, setTab] = useState('channels');
   const [currentChannelId, setCurrentChannelId] = useState(null);
@@ -104,6 +110,20 @@ export default function App() {
     const onResize = () => setIsMobile(window.innerWidth < 760);
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // Auth gate — Phase 1 of the multi-user migration. Only gates access to the app; the data layer
+  // (IndexedDB, src/lib/db.js) isn't scoped to the user yet, that's Phase 2.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+    });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
   // Ask the browser to exempt this origin from automatic eviction under storage pressure — WisiTube
@@ -405,9 +425,19 @@ export default function App() {
     textDecoration: 'underline',
   };
 
+  if (session === undefined) return null; // still checking for an existing session
+  if (!session) return <AuthScreen />;
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: T.bg }}>
-      <Navbar tabs={tabs} activeTab={tab} onTab={setTab} isMobile={isMobile} />
+      <Navbar
+        tabs={tabs}
+        activeTab={tab}
+        onTab={setTab}
+        isMobile={isMobile}
+        userEmail={session.user?.email}
+        onSignOut={() => supabase.auth.signOut()}
+      />
 
       <main style={{ flex: 1, width: '100%', maxWidth: 1200, margin: '0 auto', padding: isMobile ? '20px 14px' : '32px 20px' }}>
         {currentChannelId && (

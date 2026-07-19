@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { T, FONT } from '../theme';
 
-export default function Navbar({ tabs, activeTab, onTab, isMobile }) {
+export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const hamburger = (
@@ -142,6 +142,40 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile }) {
             <span style={{ color: T.textSecondary, fontSize: 11, fontFamily: FONT.ui }}>
               WisiTube — AI faceless video studio. Part of the WiSiVERSE ecosystem.
             </span>
+            {userEmail && (
+              <div
+                style={{
+                  marginTop: 4,
+                  paddingTop: 10,
+                  borderTop: `1px solid ${T.border}`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span style={{ color: T.text, fontSize: 12, fontFamily: FONT.ui }}>{userEmail}</span>
+                <button
+                  onClick={onSignOut}
+                  style={{
+                    background: 'transparent',
+                    color: T.textSecondary,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 3,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    fontFamily: FONT.ui,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
