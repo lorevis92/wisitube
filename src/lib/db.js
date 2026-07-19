@@ -57,7 +57,10 @@ export async function saveVideo(video) {
     created_at: createdAt ? new Date(createdAt).toISOString() : now,
     updated_at: now,
     topic: topic || '',
-    settings: settings || {},
+    // settings.references[].file is a File (a Blob subclass) that's never cleared out of settings
+    // after the outline step converts it into project.references — strip it here too, not just
+    // project, or every autosave after that point tries to write a File into the jsonb column.
+    settings: stripBlobsForSync(settings || {}),
     display_title: displayTitle || '',
     project: stripBlobsForSync(project),
   };
