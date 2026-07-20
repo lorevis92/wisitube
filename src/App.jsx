@@ -8,6 +8,7 @@ import TitleSelectStep from './steps/TitleSelectStep';
 import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
+import AutomationStep from './steps/AutomationStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost } from './theme';
@@ -469,6 +470,7 @@ export default function App() {
 
   const tabs = [
     { id: 'channels', label: 'Channels', disabled: inFlight },
+    { id: 'automation', label: 'Automation', disabled: inFlight },
     { id: 'create', label: 'Create', disabled: !currentChannelId || inFlight },
     { id: 'storyboard', label: 'Storyboard', disabled: !hasPlan || inFlight },
     { id: 'editor', label: 'Editor', disabled: !hasMedia || inFlight },
@@ -541,6 +543,8 @@ export default function App() {
           ) : (
             <ChannelsListStep onOpenChannel={openChannel} isMobile={isMobile} />
           ))}
+
+        {tab === 'automation' && <AutomationStep userId={session.user?.id} isMobile={isMobile} />}
 
         {tab === 'create' && (
           <>

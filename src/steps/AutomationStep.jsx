@@ -1,0 +1,379 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
+import { listChannels, saveChannel, listAutomationLog } from '../lib/db';
+import { runAutomationCycle } from '../lib/automationEngine';
+import { PROVIDER_LABELS } from '../lib/imageProviders';
+import { VOICE_ENGINE_LABELS } from '../lib/voiceProviders';
+
+// Phase 1 only ships one real recipe (see automationEngine.js getRecipeForContentType) — no other
+// content types are invented here ahead of that.
+const CONTENT_TYPES = [{ value: 'full_pipeline', label: 'Full Pipeline (images)' }];
+
+const LOG_POLL_MS = 1500;
+
+function timeAgo(ts) {
+  if (!ts) return '';
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
+function statusColor(status) {
+  if (status === 'error') return T.primary;
+  if (status === 'dry_run') return T.yellow;
+  if (status === 'skipped') return T.textMuted;
+  return T.green;
+}
+
+export default function AutomationStep({ userId, isMobile }) {
+  const [channels, setChannels] = useState(null); // null = still loading
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(null); // { channelId, channelName, index, total, status }
+  const [logItems, setLogItems] = useState([]);
+  const [logLoading, setLogLoading] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState(''); // '' = all channels
+  // shouldStop() is polled synchronously by the engine between channels — a plain state variable
+  // would be stale inside that closure, so the kill switch has to be a ref.
+  const stopRequestedRef = useRef(false);
+  const pollRef = useRef(null);
+
+  async function loadChannels() {
+    const list = await listChannels();
+    setChannels(list);
+  }
+
+  async function loadLog(filterOverride) {
+    setLogLoading(true);
+    try {
+      const channelId = filterOverride !== undefined ? filterOverride : historyFilter;
+      const items = await listAutomationLog({ channelId: channelId || undefined, limit: 100 });
+      setLogItems(items);
+    } catch (err) {
+      console.error('[AutomationStep] failed to load automation log', err);
+    } finally {
+      setLogLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadChannels();
+    loadLog('');
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function onHistoryFilterChange(value) {
+    setHistoryFilter(value);
+    if (!running) loadLog(value);
+  }
+
+  function updateLocalField(channelId, patch) {
+    setChannels((list) => (list || []).map((c) => (c.id === channelId ? { ...c, ...patch } : c)));
+  }
+
+  // Reads the freshest local state (already merged by updateLocalField on every keystroke/change)
+  // rather than taking the patch directly, so a run of several field edits between saves — or a
+  // save triggered by a sibling field's onChange — never overwrites one field with another's stale copy.
+  async function persistChannel(channelId) {
+    const channel = (channels || []).find((c) => c.id === channelId);
+    if (!channel) return;
+    try {
+      const updated = await saveChannel(channel);
+      setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c)));
+    } catch (err) {
+      console.error('[AutomationStep] failed to save channel automation settings', channelId, err);
+    }
+  }
+
+  function updateAndSaveImmediately(channelId, patch) {
+    updateLocalField(channelId, patch);
+    const channel = (channels || []).find((c) => c.id === channelId);
+    if (!channel) return;
+    saveChannel({ ...channel, ...patch })
+      .then((updated) => setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c))))
+      .catch((err) => console.error('[AutomationStep] failed to save channel automation settings', channelId, err));
+  }
+
+  async function runDryRun() {
+    if (running || !channels || channels.length === 0) return;
+    stopRequestedRef.current = false;
+    setRunning(true);
+    setProgress(null);
+    pollRef.current = setInterval(() => loadLog(historyFilter), LOG_POLL_MS);
+    try {
+      await runAutomationCycle({
+        userId,
+        dryRun: true,
+        onUpdate: (p) => setProgress(p),
+        shouldStop: () => stopRequestedRef.current,
+      });
+    } catch (err) {
+      console.error('[AutomationStep] dry-run cycle failed', err);
+    } finally {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      setRunning(false);
+      loadLog(historyFilter);
+      loadChannels(); // pick up automation_daily_upload_count/spend touched by resetDailyCountersIfNeeded
+    }
+  }
+
+  function stopCycle() {
+    stopRequestedRef.current = true;
+  }
+
+  function channelName(id) {
+    return (channels || []).find((c) => c.id === id)?.name || id?.slice(0, 8) || '—';
+  }
+
+  if (channels === null) {
+    return <div style={{ ...card, textAlign: 'center', color: T.textSecondary, fontFamily: FONT.ui, fontSize: 13 }}>Loading your channels…</div>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div>
+        <div style={{ fontFamily: FONT.display, fontSize: 26, color: T.text }}>Automation</div>
+        <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 6, lineHeight: 1.6, maxWidth: 640 }}>
+          Configure per-channel automation below, then run a dry-run cycle to see exactly what it would do for every enabled channel — no
+          generation, spend, or publishing happens in this phase.
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div style={label}>Channels</div>
+          {running ? (
+            <button onClick={stopCycle} style={{ ...btnGhost, padding: '12px 22px', fontSize: 13, color: T.primary, borderColor: T.primaryBorder }}>
+              🛑 Stop
+            </button>
+          ) : (
+            <button
+              onClick={runDryRun}
+              disabled={channels.length === 0}
+              style={{ ...btnPrimary, padding: '12px 22px', fontSize: 13, opacity: channels.length === 0 ? 0.6 : 1 }}
+            >
+              ▶ Run dry-run cycle
+            </button>
+          )}
+        </div>
+
+        {running && (
+          <div style={{ marginTop: 12, ...mono, fontSize: 12, color: T.textSecondary }}>
+            {progress
+              ? `Channel ${progress.index + 1}/${progress.total}: ${progress.channelName} — ${progress.status}`
+              : 'Starting…'}
+          </div>
+        )}
+
+        {channels.length === 0 ? (
+          <div style={{ marginTop: 14, fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary }}>
+            No channels yet — create one from the Channels tab first.
+          </div>
+        ) : (
+          <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {channels.map((c) => (
+              <div key={c.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                  <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</div>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 11,
+                      fontFamily: FONT.ui,
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      color: T.textSecondary,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!c.automation_enabled}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_enabled: e.target.checked })}
+                    />
+                    Enabled
+                  </label>
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(170px, 1fr))',
+                    gap: 10,
+                    marginTop: 12,
+                  }}
+                >
+                  <div>
+                    <div style={label}>Content type</div>
+                    <select
+                      value={c.content_type || ''}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { content_type: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      <option value="">— Select —</option>
+                      {CONTENT_TYPES.map((ct) => (
+                        <option key={ct.value} value={ct.value}>
+                          {ct.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={label}>Videos / day</div>
+                    <input
+                      type="number"
+                      min="0"
+                      value={c.automation_videos_per_day}
+                      disabled={running}
+                      onChange={(e) => updateLocalField(c.id, { automation_videos_per_day: Number(e.target.value) })}
+                      onBlur={() => persistChannel(c.id)}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    />
+                  </div>
+
+                  <div>
+                    <div style={label}>Daily budget ($)</div>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={c.automation_daily_budget_usd}
+                      disabled={running}
+                      onChange={(e) => updateLocalField(c.id, { automation_daily_budget_usd: Number(e.target.value) })}
+                      onBlur={() => persistChannel(c.id)}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    />
+                  </div>
+
+                  <div>
+                    <div style={label}>Target length (min)</div>
+                    <input
+                      type="number"
+                      min="1"
+                      value={c.automation_length_minutes}
+                      disabled={running}
+                      onChange={(e) => updateLocalField(c.id, { automation_length_minutes: Number(e.target.value) })}
+                      onBlur={() => persistChannel(c.id)}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    />
+                  </div>
+
+                  <div>
+                    <div style={label}>Image provider</div>
+                    <select
+                      value={c.automation_image_provider}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_image_provider: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      {Object.entries(PROVIDER_LABELS).map(([id, lbl]) => (
+                        <option key={id} value={id}>
+                          {lbl}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={label}>Voice engine</div>
+                    <select
+                      value={c.automation_voice_engine}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_voice_engine: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      {Object.entries(VOICE_ENGINE_LABELS).map(([id, lbl]) => (
+                        <option key={id} value={id}>
+                          {lbl}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 10 }}>
+                  Today: {c.automation_daily_upload_count || 0}/{c.automation_videos_per_day || 0} uploads · $
+                  {(c.automation_daily_spend_usd || 0).toFixed(2)} / ${(c.automation_daily_budget_usd || 0).toFixed(2)} spent
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+          <div style={label}>Automation log</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <select
+              value={historyFilter}
+              onChange={(e) => onHistoryFilterChange(e.target.value)}
+              style={{ ...inputStyle, width: 'auto', padding: '6px 10px', fontSize: 12 }}
+            >
+              <option value="">All channels</option>
+              {channels.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <button onClick={() => loadLog(historyFilter)} disabled={logLoading} style={{ ...btnGhost, padding: '6px 12px', fontSize: 10 }}>
+              ↻ Refresh
+            </button>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 14, overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: FONT.ui }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: T.textMuted, fontSize: 10, textTransform: 'uppercase' }}>
+                <th style={{ padding: '6px 8px' }}>Time</th>
+                <th style={{ padding: '6px 8px' }}>Channel</th>
+                <th style={{ padding: '6px 8px' }}>Step</th>
+                <th style={{ padding: '6px 8px' }}>Status</th>
+                <th style={{ padding: '6px 8px' }}>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logItems.length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={{ padding: 14, color: T.textMuted, textAlign: 'center' }}>
+                    {logLoading ? 'Loading…' : 'No log entries yet — run a dry-run cycle to see one.'}
+                  </td>
+                </tr>
+              ) : (
+                logItems.map((item) => (
+                  <tr key={item.id} style={{ borderTop: `1px solid ${T.border}` }}>
+                    <td style={{ ...mono, padding: '6px 8px', color: T.textMuted, whiteSpace: 'nowrap' }}>{timeAgo(item.createdAt)}</td>
+                    <td style={{ padding: '6px 8px', color: T.text }}>{channelName(item.channelId)}</td>
+                    <td style={{ ...mono, padding: '6px 8px', color: T.textSecondary }}>{item.step}</td>
+                    <td style={{ padding: '6px 8px' }}>
+                      <span style={{ ...mono, fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: statusColor(item.status) }}>
+                        {item.status}
+                      </span>
+                    </td>
+                    <td style={{ padding: '6px 8px', color: T.textSecondary }}>{item.message}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}

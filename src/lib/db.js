@@ -94,6 +94,12 @@ export async function deleteVideo(id) {
 // stage ('titles' | 'outline' | 'scenes' | 'programManager'), each value either a non-empty
 // creative-direction string (see src/lib/promptDefaults.js for what it replaces) or absent/empty
 // when that stage uses the default.
+//
+// content_type + automation_* columns configure the automation engine (see
+// src/lib/automationEngine.js and AutomationStep.jsx) — also flat, same convention.
+// automation_last_reset_date/automation_daily_upload_count/automation_daily_spend_usd are the
+// engine's own running state (reset once per day by resetDailyCountersIfNeeded), not something the
+// user edits directly, but they live on the same row since they're per-channel like everything else here.
 
 function fromChannelRow(row) {
   return {
@@ -109,6 +115,16 @@ function fromChannelRow(row) {
     youtube_channel_id: row.youtube_channel_id || '',
     youtube_refresh_token: row.youtube_refresh_token || '',
     prompt_overrides: row.prompt_overrides || {},
+    content_type: row.content_type || '',
+    automation_enabled: !!row.automation_enabled,
+    automation_videos_per_day: row.automation_videos_per_day ?? 1,
+    automation_daily_budget_usd: row.automation_daily_budget_usd ?? 0,
+    automation_image_provider: row.automation_image_provider || 'pollinations',
+    automation_voice_engine: row.automation_voice_engine || 'kokoro',
+    automation_length_minutes: row.automation_length_minutes ?? 5,
+    automation_last_reset_date: row.automation_last_reset_date || null,
+    automation_daily_upload_count: row.automation_daily_upload_count ?? 0,
+    automation_daily_spend_usd: row.automation_daily_spend_usd ?? 0,
   };
 }
 
@@ -127,6 +143,16 @@ export async function saveChannel(channel) {
     youtube_channel_id: channel.youtube_channel_id || '',
     youtube_refresh_token: channel.youtube_refresh_token || '',
     prompt_overrides: channel.prompt_overrides || {},
+    content_type: channel.content_type || '',
+    automation_enabled: !!channel.automation_enabled,
+    automation_videos_per_day: channel.automation_videos_per_day ?? 1,
+    automation_daily_budget_usd: channel.automation_daily_budget_usd ?? 0,
+    automation_image_provider: channel.automation_image_provider || 'pollinations',
+    automation_voice_engine: channel.automation_voice_engine || 'kokoro',
+    automation_length_minutes: channel.automation_length_minutes ?? 5,
+    automation_last_reset_date: channel.automation_last_reset_date || null,
+    automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,
+    automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);
@@ -270,4 +296,43 @@ export async function listPromptVersions(channelId, stage) {
       .limit(20)
   );
   return (data || []).map(fromPromptVersionRow);
+}
+
+// ---- Automation engine log — see src/lib/automationEngine.js and AutomationStep.jsx. One row per
+// step the engine attempted during a cycle (dry-run today; real generation/upload phases once
+// Phase 2 wires them in) — append-only, this is an audit trail, never edited or removed. Powers
+// both the live-progress view (polled while a cycle is running) and the history table. ----
+// wisitube_automation_log columns: id, channel_id, video_id, step, status, message, created_at.
+
+function fromAutomationLogRow(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    videoId: row.video_id,
+    step: row.step,
+    status: row.status, // 'skipped' | 'dry_run' | 'success' | 'error' | …
+    message: row.message || '',
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : null,
+  };
+}
+
+export async function logAutomationStep(channelId, videoId, step, status, message) {
+  const row = {
+    id: createId(),
+    channel_id: channelId,
+    video_id: videoId || null,
+    step,
+    status,
+    message: message || '',
+    created_at: new Date().toISOString(),
+  };
+  const data = unwrap(await supabase.from('wisitube_automation_log').insert(row).select().single());
+  return fromAutomationLogRow(data);
+}
+
+export async function listAutomationLog({ channelId, limit = 50 } = {}) {
+  let query = supabase.from('wisitube_automation_log').select('*').order('created_at', { ascending: false }).limit(limit);
+  if (channelId) query = query.eq('channel_id', channelId);
+  const data = unwrap(await query);
+  return (data || []).map(fromAutomationLogRow);
 }
