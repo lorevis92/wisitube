@@ -16,6 +16,16 @@ function unwrap({ data, error }) {
   return data;
 }
 
+// Local (not UTC) 'YYYY-MM-DD' — mirrors automationEngine.js's own todayDateString (duplicated
+// rather than imported to avoid a circular dependency, since automationEngine.js already imports
+// from this file). Used only as saveChannel's JS-side default for automation_last_reset_date, so a
+// channel's very first save never has to send an explicit null there.
+function todayDateString() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 // jsonb can't hold a Blob — deep-copies value, replacing any Blob instance (scene images/audio,
 // thumbnails, the rendered video) with null. Everything else (narration, prompts, character bible,
 // outline, beat status, and any other plain data) passes through untouched.
@@ -143,6 +153,11 @@ export async function saveChannel(channel) {
     youtube_channel_id: channel.youtube_channel_id || '',
     youtube_refresh_token: channel.youtube_refresh_token || '',
     prompt_overrides: channel.prompt_overrides || {},
+    // Every automation_* field below gets an explicit JS default mirroring the column's SQL
+    // default — a channel that's never touched the Automation tab (e.g. one just created via
+    // ChannelsListStep, which only sets id/name/niche/editorialNotes) has none of these fields in
+    // memory, and sending an explicit `null` for a NOT NULL column with a default bypasses that
+    // default and fails the constraint instead of falling back to it.
     content_type: channel.content_type || '',
     automation_enabled: !!channel.automation_enabled,
     automation_videos_per_day: channel.automation_videos_per_day ?? 1,
@@ -150,7 +165,7 @@ export async function saveChannel(channel) {
     automation_image_provider: channel.automation_image_provider || 'pollinations',
     automation_voice_engine: channel.automation_voice_engine || 'kokoro',
     automation_length_minutes: channel.automation_length_minutes ?? 5,
-    automation_last_reset_date: channel.automation_last_reset_date || null,
+    automation_last_reset_date: channel.automation_last_reset_date || todayDateString(),
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,
   };
