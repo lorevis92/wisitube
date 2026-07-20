@@ -1,14 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
+import { loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
 import { renderToMp4, WebCodecsUnsupportedError } from '../lib/exporter';
-import { recordCost } from '../lib/db';
-import { uploadVideoToYoutube } from '../lib/youtubeUpload';
-import { buildSrtFromScenes } from '../lib/srtBuilder';
-import { generateImage } from '../lib/sceneOrchestrator';
-import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
 import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
+import { generateThumbnail } from '../lib/thumbnailEngine';
+import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
 
 // Official YouTube video category IDs (googleapis.com/youtube/v3/videoCategories) — the ones
 // realistically relevant to faceless explainer-style channels, skipping deprecated categories
@@ -222,95 +219,32 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     });
   }
 
-  // Same telegraphic-vs-natural-language branching StoryboardStep.jsx's fullPrompt() already uses
-  // for scene beats — Pollinations wants compact fragments, Nano Banana 2 / GPT Image 2 want full
-  // sentences. No character/reference anchoring here since thumbnails have no such selector.
-  function thumbnailPrompt(concept) {
-    const flavoredPrompt = `${concept.image_prompt}, YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
-    const style = STYLES[settings.style];
-    const provider = settings.imageProvider || 'pollinations';
-    if (provider === 'pollinations') {
-      return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
-    }
-    // Premium providers bake the overlay text directly into the generated image instead of the
-    // canvas overlay pollinations gets below — an explicit typography instruction steers them
-    // toward something that reads like a real YouTube thumbnail rather than a generic caption.
-    const textInstruction = `Include the exact text '${thumbText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, white or yellow fill with a black outline/drop shadow for readability, positioned in the lower third of the frame, sized large and impactful like professional YouTube thumbnails. The text must be spelled exactly as given, no alterations.`;
-    return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}`, styleDescription: style.natural });
-  }
-
   async function makeThumbnail() {
     setThumbBusy(true);
     setThumbReady(false);
     setThumbBackupFailed(false);
     try {
-      const concept = project.thumbnails[thumbIdx];
-      const provider = settings.imageProvider || 'pollinations';
-      // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already
-      // uses for every scene beat — routes nanobanana/gptimage through fal.ai instead of always
-      // hitting Pollinations regardless of the provider chosen for the rest of the video.
-      const { imageUrl, costUsd } = await generateImage(thumbnailPrompt(concept), provider, [], {
-        width: 1280,
-        height: 720,
+      const thumbBlob = await generateThumbnail(project, {
+        settings,
+        channelId,
+        userId,
+        videoId,
+        thumbIdx,
+        overlayText: thumbText,
         seed: thumbSeed,
-        quality: 'medium',
       });
-      // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
-      if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
-      const img = await loadImage(imageUrl);
-      const c = thumbCanvasRef.current;
-      const ctx = c.getContext('2d');
-      // cover-fit
-      const ir = img.width / img.height;
-      const cr = 1280 / 720;
-      let dw, dh;
-      if (ir > cr) { dh = 720; dw = 720 * ir; } else { dw = 1280; dh = 1280 / ir; }
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, 1280, 720);
-      ctx.drawImage(img, (1280 - dw) / 2, (720 - dh) / 2, dw, dh);
 
-      if (provider === 'pollinations') {
-        await document.fonts.ready;
-        // bottom gradient for legibility
-        const g = ctx.createLinearGradient(0, 380, 0, 720);
-        g.addColorStop(0, 'rgba(0,0,0,0)');
-        g.addColorStop(1, 'rgba(0,0,0,0.75)');
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 380, 1280, 340);
-        // overlay text
-        const text = (thumbText || '').toUpperCase();
-        const words = text.split(/\s+/).filter(Boolean);
-        const lines = words.length > 2 ? [words.slice(0, Math.ceil(words.length / 2)).join(' '), words.slice(Math.ceil(words.length / 2)).join(' ')] : [text];
-        let size = 110;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'alphabetic';
-        const fit = (s) => {
-          ctx.font = `800 ${s}px Syne, sans-serif`;
-          return lines.every((ln) => ctx.measureText(ln).width < 1180);
-        };
-        while (size > 48 && !fit(size)) size -= 6;
-        ctx.font = `800 ${size}px Syne, sans-serif`;
-        const lineH = size * 1.08;
-        lines.forEach((ln, i) => {
-          const y = 720 - 56 - (lines.length - 1 - i) * lineH;
-          ctx.lineWidth = size * 0.14;
-          ctx.lineJoin = 'round';
-          ctx.strokeStyle = '#000000';
-          ctx.strokeText(ln, 640, y);
-          ctx.fillStyle = i === lines.length - 1 ? '#FFD400' : '#FFFFFF';
-          ctx.fillText(ln, 640, y);
-        });
-      }
-      // Premium providers (nanobanana/gptimage) already baked the text into the generated image
-      // itself (see thumbnailPrompt) — the cover-fit above is the only processing it needs.
-
+      // Draw the finished Blob onto the visible preview canvas — same pattern the "restore from
+      // Supabase Storage on resume" effect above already uses, so downloadThumb()/runThumbnail()
+      // (both of which read from thumbCanvasRef) keep working unchanged.
+      const img = await loadImage(URL.createObjectURL(thumbBlob));
+      const ctx = thumbCanvasRef.current.getContext('2d');
+      ctx.drawImage(img, 0, 0, 1280, 720);
       setThumbReady(true);
 
-      // Back up the composited canvas to Supabase Storage so this survives a refresh — never
-      // blocks the generation itself, the canvas above is already usable this session regardless.
+      // Back up to Supabase Storage so this survives a refresh — never blocks the generation
+      // itself, the canvas above is already usable this session regardless.
       try {
-        const thumbBlob = await new Promise((resolve) => c.toBlob(resolve, 'image/png'));
-        if (!thumbBlob) throw new Error('canvas.toBlob returned null');
         const storagePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbBlob);
         setProject((p) => ({ ...p, thumbnailStoragePath: storagePath }));
         setThumbBackupFailed(false);
@@ -336,221 +270,55 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   // Each run* function owns and clears only its own ytErrors key and never throws — a failure in
   // one phase (e.g. the thumbnail) must never wipe out a result already achieved by an earlier one
   // (e.g. a successfully uploaded video), and each phase needs to be independently retryable.
+  // The actual sequence now lives in src/lib/youtubePublishEngine.js — these wrappers just resolve
+  // this component's own state (videoBlob, thumbnail Blob, metadata) and translate its onProgress
+  // events into the same setYtErrors/setYtUploadPct/setYtVideoId calls this file always made.
+
+  function handleYtProgress(evt) {
+    if (evt.kind === 'upload-progress') setYtUploadPct(evt.percent);
+    else if (evt.kind === 'video-id') setYtVideoId(evt.videoId);
+    else if (evt.kind === 'error') setYtErrors((prev) => ({ ...prev, [evt.phase]: evt.message }));
+    else if (evt.kind === 'error-clear') setYtErrors((e) => ({ ...e, [evt.phase]: null }));
+  }
+
+  function buildYtMetadata() {
+    return {
+      title: ytTitle,
+      description: ytDescription,
+      tags: ytTags.split(',').map((t) => t.trim()).filter(Boolean),
+      categoryId: ytCategory,
+      language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
+      privacyStatus: ytPrivacy,
+      scheduleMode: ytScheduleMode,
+      publishAt: ytPublishAt,
+      madeForKids: ytMadeForKids,
+      uploadCaptions: ytUploadCaptions,
+      addToPlaylist: ytAddToPlaylist,
+    };
+  }
 
   async function runUpload() {
-    console.log('[yt-upload] phase=runUpload:enter');
-    setYtErrors((e) => ({ ...e, upload: null }));
-    setYtUploadPct(0);
-    try {
-      const refreshToken = channel?.youtube_refresh_token;
-      if (!refreshToken) throw new Error('This channel is not connected to YouTube.');
-      if (!videoUrl) throw new Error('Render the video first.');
-
-      const publishAt = ytScheduleMode === 'schedule' && ytPublishAt ? new Date(ytPublishAt).toISOString() : null;
-
-      console.log('[yt-upload] phase=init-upload:before', { channelId, videoUrl, publishAt });
-      let initRes;
-      try {
-        initRes = await fetch('/api/youtube', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'init-upload',
-            channelId,
-            refreshToken,
-            title: ytTitle,
-            description: ytDescription,
-            tags: ytTags.split(',').map((t) => t.trim()).filter(Boolean),
-            categoryId: ytCategory,
-            language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
-            privacyStatus: ytPrivacy,
-            publishAt,
-            madeForKids: ytMadeForKids,
-          }),
-        });
-      } catch (err) {
-        console.error('[yt-upload] phase=init-upload:fetch-error', err?.message, err?.stack);
-        throw err;
-      }
-      console.log('[yt-upload] phase=init-upload:after', { status: initRes.status, ok: initRes.ok });
-
-      let initData;
-      try {
-        initData = await initRes.json();
-      } catch (err) {
-        console.error('[yt-upload] phase=init-upload:parse-json-error', err?.message, err?.stack);
-        throw err;
-      }
-      // The exact uploadUrl string is the thing to check first when the PUT below fails before
-      // ever reaching googleapis.com — undefined/malformed here means init-upload didn't return
-      // what this code assumes it did.
-      console.log('[yt-upload] phase=init-upload:data', {
-        uploadUrl: initData.uploadUrl,
-        uploadUrlType: typeof initData.uploadUrl,
-        hasAccessToken: !!initData.accessToken,
-      });
-      if (!initRes.ok) {
-        // error is a string for our own validation failures, but a boolean flag when it's a
-        // passthrough of Google's response (see api/youtube.js init-upload) — the real message is
-        // in detail (plus optionally reason) in that case.
-        const message =
-          typeof initData.error === 'string' && initData.error
-            ? initData.error
-            : `YouTube rejected the upload: ${initData.detail || 'Unknown error'}${initData.reason ? ` (${initData.reason})` : ''}`;
-        throw new Error(message);
-      }
-
-      // Never re-fetch videoUrl (a blob: URL) here — it's known to go invalid across
-      // navigations/idle time even while the string itself still looks fine, which is what caused
-      // "Failed to fetch" with no request ever reaching googleapis.com. Use the Blob already in
-      // memory from this session's render, or the one restored from IndexedDB on resume (see the
-      // mount effect above) — never a re-fetch of the transient URL.
-      const videoBlob = renderedBlob || project.renderedVideoBlob;
-      if (!videoBlob) throw new Error('Render the video first.');
-      console.log('[yt-upload] phase=video-blob:resolved', {
-        source: renderedBlob ? 'in-memory (this session)' : 'project.renderedVideoBlob (resumed from IndexedDB)',
-        size: videoBlob.size,
-        type: videoBlob.type,
-      });
-
-      console.log('[yt-upload] phase=upload-video-to-youtube:before', {
-        uploadUrl: initData.uploadUrl,
-        blobSize: videoBlob.size,
-        hasAccessToken: !!initData.accessToken,
-        hasProgressCallback: true,
-      });
-      let videoId;
-      try {
-        videoId = await uploadVideoToYoutube(initData.uploadUrl, videoBlob, initData.accessToken, (p) => setYtUploadPct(p));
-      } catch (err) {
-        console.error('[yt-upload] phase=upload-video-to-youtube:error', err?.message, err?.stack);
-        throw err;
-      }
-      console.log('[yt-upload] phase=upload-video-to-youtube:after', { videoId });
-
-      setYtVideoId(videoId);
-      return videoId;
-    } catch (e) {
-      console.error('[yt-upload] phase=runUpload:catch', e?.message, e?.stack);
-      setYtErrors((prev) => ({ ...prev, upload: String(e.message || e) }));
-      return null;
-    }
+    // Never re-fetch videoUrl (a blob: URL) here — it's known to go invalid across
+    // navigations/idle time even while the string itself still looks fine, which is what caused
+    // "Failed to fetch" with no request ever reaching googleapis.com. Use the Blob already in
+    // memory from this session's render, or the one restored from IndexedDB on resume (see the
+    // mount effect above) — never a re-fetch of the transient URL.
+    const videoBlob = renderedBlob || project.renderedVideoBlob;
+    return uploadVideo(project, videoBlob, { channel, metadata: buildYtMetadata(), onProgress: handleYtProgress });
   }
 
   async function runThumbnail(videoId) {
-    console.log('[yt-upload] phase=runThumbnail:enter', { videoId, thumbReady });
-    if (!thumbReady) return true; // no custom thumbnail made — YouTube's auto-picked one applies
-    setYtErrors((e) => ({ ...e, thumbnail: null }));
-    try {
-      const refreshToken = channel?.youtube_refresh_token;
-      const dataUrl = thumbCanvasRef.current.toDataURL('image/png');
-      console.log('[yt-upload] phase=set-thumbnail:before', { videoId, dataUrlLength: dataUrl?.length });
-      let res;
-      try {
-        res = await fetch('/api/youtube', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'set-thumbnail', channelId, refreshToken, videoId, thumbnailBlob: dataUrl }),
-        });
-      } catch (err) {
-        console.error('[yt-upload] phase=set-thumbnail:fetch-error', err?.message, err?.stack);
-        throw err;
-      }
-      console.log('[yt-upload] phase=set-thumbnail:after', { status: res.status, ok: res.ok });
-      const data = await res.json();
-      if (!res.ok) {
-        // error is a string for our own validation failures, but a boolean flag when it's a
-        // passthrough of Google's response (see api/youtube.js set-thumbnail) — the real message
-        // is in detail/status in that case.
-        const message =
-          typeof data.error === 'string' && data.error
-            ? data.error
-            : `YouTube rejected the thumbnail (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
-        throw new Error(message);
-      }
-      return true;
-    } catch (e) {
-      console.error('[yt-upload] phase=runThumbnail:catch', e?.message, e?.stack);
-      setYtErrors((prev) => ({ ...prev, thumbnail: String(e.message || e) }));
-      return false;
-    }
+    // no custom thumbnail made — YouTube's auto-picked one applies; skip the toBlob() call entirely.
+    const thumbBlob = thumbReady ? await new Promise((resolve) => thumbCanvasRef.current.toBlob(resolve, 'image/png')) : null;
+    return setThumbnail(videoId, thumbBlob, { channel, onProgress: handleYtProgress });
   }
 
   async function runCaptions(videoId) {
-    console.log('[yt-upload] phase=runCaptions:enter', { videoId, ytUploadCaptions });
-    if (!ytUploadCaptions) return true;
-    setYtErrors((e) => ({ ...e, captions: null }));
-    try {
-      const refreshToken = channel?.youtube_refresh_token;
-      const srtContent = buildSrtFromScenes(project.scenes);
-      console.log('[yt-upload] phase=set-captions:before', { videoId, srtLength: srtContent?.length });
-      let res;
-      try {
-        res = await fetch('/api/youtube', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'set-captions', channelId, refreshToken, videoId, srtContent, language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en' }),
-        });
-      } catch (err) {
-        console.error('[yt-upload] phase=set-captions:fetch-error', err?.message, err?.stack);
-        throw err;
-      }
-      console.log('[yt-upload] phase=set-captions:after', { status: res.status, ok: res.ok });
-      const data = await res.json();
-      if (!res.ok) {
-        // error is a string for our own validation failures, but a boolean flag when it's a
-        // passthrough of Google's response (see api/youtube.js set-captions) — the real message
-        // is in detail/status in that case.
-        const message =
-          typeof data.error === 'string' && data.error
-            ? data.error
-            : `YouTube rejected the captions (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
-        throw new Error(message);
-      }
-      return true;
-    } catch (e) {
-      console.error('[yt-upload] phase=runCaptions:catch', e?.message, e?.stack);
-      setYtErrors((prev) => ({ ...prev, captions: String(e.message || e) }));
-      return false;
-    }
+    return setCaptions(videoId, project, { channel, metadata: buildYtMetadata(), onProgress: handleYtProgress });
   }
 
   async function runPlaylist(videoId) {
-    console.log('[yt-upload] phase=runPlaylist:enter', { videoId, ytAddToPlaylist, series: project.series });
-    if (!ytAddToPlaylist || !project.series) return true;
-    setYtErrors((e) => ({ ...e, playlist: null }));
-    try {
-      const refreshToken = channel?.youtube_refresh_token;
-      console.log('[yt-upload] phase=add-to-playlist:before', { videoId, seriesName: project.series });
-      let res;
-      try {
-        res = await fetch('/api/youtube', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'add-to-playlist', channelId, refreshToken, videoId, seriesName: project.series }),
-        });
-      } catch (err) {
-        console.error('[yt-upload] phase=add-to-playlist:fetch-error', err?.message, err?.stack);
-        throw err;
-      }
-      console.log('[yt-upload] phase=add-to-playlist:after', { status: res.status, ok: res.ok });
-      const data = await res.json();
-      if (!res.ok) {
-        // error is a string for our own validation failures, but a boolean flag when it's a
-        // passthrough of Google's response (see api/youtube.js add-to-playlist) — the real message
-        // is in detail/status in that case.
-        const message =
-          typeof data.error === 'string' && data.error
-            ? data.error
-            : `Could not add the video to its series playlist (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
-        throw new Error(message);
-      }
-      return true;
-    } catch (e) {
-      console.error('[yt-upload] phase=runPlaylist:catch', e?.message, e?.stack);
-      setYtErrors((prev) => ({ ...prev, playlist: String(e.message || e) }));
-      return false;
-    }
+    return addToSeriesPlaylist(videoId, project, { channel, metadata: buildYtMetadata(), onProgress: handleYtProgress });
   }
 
   async function publishToYoutube() {

@@ -1,28 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { STYLES, loadImage, decodeAudio } from '../lib/pollinations';
-import { generateSpeech, onLoadProgress, isModelWarm } from '../lib/tts';
-import { acquireWakeLock, releaseWakeLock } from '../lib/wakeLock';
-import { recordImageTime, recordAudioTime, estimateRemainingSeconds, formatDuration } from '../lib/estimator';
+import { isModelWarm } from '../lib/tts';
+import { estimateRemainingSeconds, formatDuration } from '../lib/estimator';
 import { ANIMATION_LIST } from '../lib/engine';
-import { generateImage, generateAudio, runWithConcurrency, MAX_PAID_CONCURRENCY } from '../lib/sceneOrchestrator';
-import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from '../lib/promptBuilders';
 import { priceForImage } from '../lib/imageProviders';
 import { priceForVoice } from '../lib/voiceProviders';
-import { recordCost } from '../lib/db';
-import { uploadMedia } from '../lib/mediaStorage';
+import { generateBeatImage, generateSceneAudio, generateAllMedia } from '../lib/mediaGenerationEngine';
 import ImageLightbox from '../components/ImageLightbox';
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function blobToDataUri(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
 
 // Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
 // entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
@@ -74,187 +58,28 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       ),
     }));
 
-  // Reference photos (a real face) always win over the text-only character bible for the same
-  // beat — the bible's traits are appended only when there's no active photo anchoring this beat.
-  // Pollinations gets the compact, telegraphic style (its model needs unambiguous fragments);
-  // Nano Banana 2 / GPT Image 2 get full natural-language sentences, with the character's name
-  // used as an explicit semantic anchor when one applies.
-  function fullPrompt(beat) {
-    const hasReference = !!(beat.referenceId && (project.references || []).some((r) => r.id === beat.referenceId));
-    let character = null;
-    let traits = '';
-    if (beat.characterId && !hasReference) {
-      character = (project.characterBible || []).find((c) => c.id === beat.characterId);
-      const variant = character && (character.variants || []).find((v) => v.label === beat.variantLabel);
-      traits = [character?.baseDescription, variant?.description].filter(Boolean).join(', ');
-    }
-
-    const style = STYLES[settings.style];
-    const provider = settings.imageProvider || 'pollinations';
-
-    if (provider === 'pollinations') {
-      return buildTelegraphicPrompt({ scenePrompt: beat.prompt, styleSuffix: style.suffix, characterTraits: traits });
-    }
-    return buildNaturalLanguagePrompt({ scenePrompt: beat.prompt, styleDescription: style.natural, characterName: character?.name, characterTraits: traits });
+  // Translates mediaGenerationEngine.js's onProgress events into this component's own state
+  // updates — same shapes as the update functions above (updateImage(sceneId, beatIndex, patch),
+  // updateScene(sceneId, patch)), so this is a direct passthrough, not a transform.
+  function handleProgress(evt) {
+    if (evt.kind === 'beat') updateImage(evt.sceneId, evt.beatIndex, evt.patch);
+    else if (evt.kind === 'scene') updateScene(evt.sceneId, evt.patch);
+    else if (evt.kind === 'message') setProgressMsg(evt.text);
   }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {
     const scene = project.scenes.find((s) => s.id === sceneId);
     if (!scene) return false;
-    const beat = scene.images[beatIndex];
-    const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
-    const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
-    const provider = settings.imageProvider || 'pollinations';
-    updateImage(sceneId, beatIndex, { status: 'loading', seed, backupFailed: false });
-    const startedAt = performance.now();
-    try {
-      // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
-      // natively as referenceImages, same principle already used for Pollinations kontext.
-      const referenceImages = reference ? [await blobToDataUri(reference.file)] : [];
-      const { imageUrl, costUsd } = await generateImage(fullPrompt(beat), provider, referenceImages, { ...dims, seed, quality: 'medium' });
-      // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
-      if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
-      await loadImage(imageUrl);
-      // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
-      const imageBlob = await (await fetch(imageUrl)).blob();
-      const objectUrl = URL.createObjectURL(imageBlob);
-      recordImageTime((performance.now() - startedAt) / 1000);
-      updateImage(sceneId, beatIndex, { status: 'ready', url: objectUrl, blob: imageBlob });
-
-      // Back up to Supabase Storage so this survives a refresh — never blocks the generation
-      // itself: the Blob set above is already usable this session regardless of whether this
-      // succeeds.
-      try {
-        console.log('[storage-upload] attempting', {
-          userId,
-          videoId,
-          kind: 'scene-image',
-          beatId: beat.id,
-          blobSize: imageBlob?.size,
-          blobType: imageBlob?.type,
-        });
-        const storagePath = await uploadMedia(userId, videoId, 'scene-image', beat.id, imageBlob);
-        updateImage(sceneId, beatIndex, { storagePath, backupFailed: false });
-      } catch (err) {
-        console.error('[storage-upload] FAILED', err.message, err);
-        updateImage(sceneId, beatIndex, { backupFailed: true });
-      }
-
-      return true;
-    } catch {
-      updateImage(sceneId, beatIndex, { status: 'error' });
-      return false;
-    }
+    return generateBeatImage(scene, beatIndex, { settings, project, channelId, userId, videoId, newSeed, onProgress: handleProgress });
   }
 
   async function genAudio(scene) {
-    updateScene(scene.id, { audioStatus: 'loading', audioError: null, audioBackupFailed: false });
-    const startedAt = performance.now();
-    const voiceEngine = settings.voiceEngine || 'kokoro';
-    const wasWarmBefore = isModelWarm();
-    try {
-      let audioBlob;
-      if (voiceEngine === 'minimax') {
-        const { audioUrl: remoteUrl, costUsd } = await generateAudio(scene.narration, settings.voice, { language: settings.language });
-        if (costUsd > 0) await recordCost({ channelId, videoId, provider: 'minimax', type: 'audio', amountUsd: costUsd });
-        audioBlob = await (await fetch(remoteUrl)).blob();
-      } else {
-        audioBlob = await generateSpeech(scene.narration, settings.voice);
-      }
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const buffer = await decodeAudio(audioUrl);
-      // Skip the sample if this call paid the one-time model download/load cost — that's
-      // accounted for separately (the +90s term), and would otherwise wreck the moving average.
-      // MiniMax has no such warm-up cost, so its timings always count.
-      if (voiceEngine === 'minimax' || wasWarmBefore) recordAudioTime((performance.now() - startedAt) / 1000);
-      updateScene(scene.id, { audioStatus: 'ready', audioUrl, audioBlob, audioDuration: buffer.duration, audioError: null });
-
-      // Back up to Supabase Storage so this survives a refresh — never blocks the generation
-      // itself: the Blob set above is already usable this session regardless of whether this
-      // succeeds.
-      try {
-        console.log('[storage-upload] attempting', {
-          userId,
-          videoId,
-          kind: 'scene-audio',
-          beatId: scene.id,
-          blobSize: audioBlob?.size,
-          blobType: audioBlob?.type,
-        });
-        const storagePath = await uploadMedia(userId, videoId, 'scene-audio', scene.id, audioBlob);
-        updateScene(scene.id, { audioStoragePath: storagePath, audioBackupFailed: false });
-      } catch (err) {
-        console.error('[storage-upload] FAILED', err.message, err);
-        updateScene(scene.id, { audioBackupFailed: true });
-      }
-
-      return true;
-    } catch (e) {
-      updateScene(scene.id, { audioStatus: 'error', audioError: e?.message || String(e) });
-      return false;
-    }
+    return generateSceneAudio(scene, { settings, channelId, userId, videoId, onProgress: handleProgress });
   }
 
   async function generateAll() {
     setRunning(true);
-    await acquireWakeLock();
-    const voiceEngine = settings.voiceEngine || 'kokoro';
-    const imageProvider = settings.imageProvider || 'pollinations';
-
-    const unsubscribe = onLoadProgress((info) => {
-      if (info.status === 'progress') {
-        setProgressMsg(`Downloading voice model (~90MB, one time)… ${Math.round(info.progress)}%`);
-      }
-    });
-
-    try {
-      // Phase 1: voiceover for every scene that still needs it. MiniMax is a paid cloud call, so
-      // it goes through the shared concurrency pool exactly like paid images below; Kokoro stays
-      // exactly as before — strictly serial, since it's a single local Web Worker.
-      const pendingAudioScenes = project.scenes.filter((s) => s.audioStatus !== 'ready');
-      if (voiceEngine === 'minimax') {
-        let done = 0;
-        await runWithConcurrency(pendingAudioScenes, MAX_PAID_CONCURRENCY, async (scene) => {
-          await genAudio(scene);
-          done++;
-          setProgressMsg(`Voice ${done}/${pendingAudioScenes.length}…`);
-        });
-      } else {
-        for (let i = 0; i < pendingAudioScenes.length; i++) {
-          setProgressMsg(`Voice ${i + 1}/${pendingAudioScenes.length}…`);
-          await genAudio(pendingAudioScenes[i]);
-        }
-      }
-
-      // Phase 2: images for every beat that still needs one. Paid providers (nanobanana/gptimage)
-      // go through the same pool; Pollinations keeps its exact prior behavior — strictly serial
-      // with a 1.5s stagger between calls, deliberately conservative for the free tier.
-      const pendingImageBeats = [];
-      project.scenes.forEach((s) => s.images.forEach((im, b) => {
-        if (im.status !== 'ready') pendingImageBeats.push({ sceneId: s.id, beatIndex: b });
-      }));
-
-      if (imageProvider === 'pollinations') {
-        for (let i = 0; i < pendingImageBeats.length; i++) {
-          if (i > 0) await sleep(1500);
-          setProgressMsg(`Image ${i + 1}/${pendingImageBeats.length}…`);
-          const { sceneId, beatIndex } = pendingImageBeats[i];
-          await genImage(sceneId, beatIndex);
-        }
-      } else {
-        let done = 0;
-        await runWithConcurrency(pendingImageBeats, MAX_PAID_CONCURRENCY, async ({ sceneId, beatIndex }) => {
-          await genImage(sceneId, beatIndex);
-          done++;
-          setProgressMsg(`Image ${done}/${pendingImageBeats.length}…`);
-        });
-      }
-    } finally {
-      unsubscribe();
-      await releaseWakeLock();
-    }
-
-    setProgressMsg('');
+    await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: handleProgress });
     setRunning(false);
   }
 
