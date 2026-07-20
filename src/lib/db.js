@@ -222,3 +222,52 @@ export async function getTotalCostAllChannels() {
   const data = unwrap(await supabase.from('wisitube_cost_ledger').select('amount_usd'));
   return (data || []).reduce((sum, row) => sum + (row.amount_usd || 0), 0);
 }
+
+// ---- Prompt Lab version history — see ChannelDashboardStep.jsx. One row per distinct
+// creative-direction edit, per channel per stage ('titles' | 'outline' | 'scenes' |
+// 'programManager'), so a channel owner can browse and restore earlier phrasing. Append-only like
+// the cost ledger, but deduplicated: savePromptVersion skips the insert when the content is
+// identical to the most recent version already on file, so re-saving without changes (e.g. a blur
+// with no edits) doesn't pile up identical rows. ----
+// wisitube_prompt_versions columns: id, channel_id, stage, content, created_at.
+
+function fromPromptVersionRow(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    stage: row.stage,
+    content: row.content,
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : null,
+  };
+}
+
+export async function savePromptVersion(channelId, stage, content) {
+  const trimmed = (content || '').trim();
+  if (!trimmed) return null;
+  const existing = unwrap(
+    await supabase
+      .from('wisitube_prompt_versions')
+      .select('content')
+      .eq('channel_id', channelId)
+      .eq('stage', stage)
+      .order('created_at', { ascending: false })
+      .limit(1)
+  );
+  if (existing?.[0]?.content === trimmed) return null; // identical to the latest version — skip
+  const row = { id: createId(), channel_id: channelId, stage, content: trimmed, created_at: new Date().toISOString() };
+  const data = unwrap(await supabase.from('wisitube_prompt_versions').insert(row).select().single());
+  return fromPromptVersionRow(data);
+}
+
+export async function listPromptVersions(channelId, stage) {
+  const data = unwrap(
+    await supabase
+      .from('wisitube_prompt_versions')
+      .select('*')
+      .eq('channel_id', channelId)
+      .eq('stage', stage)
+      .order('created_at', { ascending: false })
+      .limit(20)
+  );
+  return (data || []).map(fromPromptVersionRow);
+}

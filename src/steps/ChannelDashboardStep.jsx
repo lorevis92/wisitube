@@ -1,6 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel, clearYoutubeConnection, getCostsByChannel } from '../lib/db';
+import {
+  listVideosByChannel,
+  deleteVideo,
+  loadChannel,
+  saveChannel,
+  deleteChannel,
+  clearYoutubeConnection,
+  getCostsByChannel,
+  savePromptVersion,
+  listPromptVersions,
+} from '../lib/db';
 import { getMediaUrl } from '../lib/mediaStorage';
 import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
 
@@ -45,9 +55,16 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [totalSpent, setTotalSpent] = useState(0);
   const [showPromptLab, setShowPromptLab] = useState(false);
   // Local in-progress edits per stage, keyed by stage — undefined means "not yet touched this
-  // session, fall back to channel.prompt_overrides[stage]". Kept separate from channel state so
-  // typing doesn't need a round-trip through saveChannel on every keystroke; onBlur is what persists.
+  // session, fall back to channel.prompt_overrides[stage] or the stage's default text". Kept
+  // separate from channel state so typing doesn't need a round-trip through saveChannel on every
+  // keystroke; onBlur is what persists.
   const [promptDrafts, setPromptDrafts] = useState({});
+  // Which stage's version-history dropdown is open (null = none), plus that dropdown's own loading
+  // state and fetched items — refetched every time it's opened rather than cached, so a restore
+  // made moments ago always shows up.
+  const [historyOpenStage, setHistoryOpenStage] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyItems, setHistoryItems] = useState([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,20 +109,51 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     onChannelChange?.(updated);
   }
 
-  // Persists one stage's creative-direction override — an empty/whitespace-only value removes the
-  // key entirely rather than storing an empty string, so "no override" and "override cleared" both
-  // collapse to the same falsy state DEFAULT_CREATIVE_DIRECTION checks fall back on.
+  // Persists one stage's creative-direction override — an empty/whitespace-only value, or a value
+  // that exactly matches the stage's default text (the textarea's un-overridden starting value,
+  // now real editable text rather than a placeholder — see PROMPT_STAGES.map below), both collapse
+  // to "no override" rather than storing the default text back as if it were a custom one.
   async function savePromptOverride(stage, value) {
     if (!channel) return;
     const trimmed = (value || '').trim();
+    const isDefaultText = trimmed === (DEFAULT_CREATIVE_DIRECTION[stage] || '').trim();
+    const effectiveNext = isDefaultText ? '' : trimmed;
     const current = channel.prompt_overrides?.[stage] || '';
-    if (trimmed === current) return;
+    if (effectiveNext === current) return;
     const nextOverrides = { ...(channel.prompt_overrides || {}) };
-    if (trimmed) nextOverrides[stage] = trimmed;
+    if (effectiveNext) nextOverrides[stage] = effectiveNext;
     else delete nextOverrides[stage];
-    const updated = await saveChannel({ ...channel, prompt_overrides: nextOverrides });
+    const [updated] = await Promise.all([
+      saveChannel({ ...channel, prompt_overrides: nextOverrides }),
+      // Only real custom content is worth a version entry — reverting to the default (or clearing)
+      // isn't a "version" of anything, and savePromptVersion no-ops on an empty string anyway.
+      effectiveNext ? savePromptVersion(channel.id, stage, effectiveNext) : Promise.resolve(null),
+    ]);
     setChannel(updated);
     onChannelChange?.(updated);
+  }
+
+  async function toggleHistory(stage) {
+    if (historyOpenStage === stage) {
+      setHistoryOpenStage(null);
+      return;
+    }
+    setHistoryOpenStage(stage);
+    setHistoryLoading(true);
+    try {
+      const items = await listPromptVersions(channel.id, stage);
+      setHistoryItems(items);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  // Restoring is a plain save through the same path every other edit takes — it becomes a new
+  // version entry itself (assuming it differs from whatever's most recent), no special-casing.
+  async function restoreVersion(stage, content) {
+    setPromptDrafts((d) => ({ ...d, [stage]: content }));
+    await savePromptOverride(stage, content);
+    setHistoryOpenStage(null);
   }
 
   // Refining never edits a single suggestion — it relaunches the whole holistic pass with the
@@ -273,24 +321,91 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             </div>
 
             {PROMPT_STAGES.map(({ key, stageLabel }) => {
-              const draftValue = promptDrafts[key] !== undefined ? promptDrafts[key] : channel?.prompt_overrides?.[key] || '';
+              // Never blank: an absent/empty override falls back to the stage's default text as a
+              // real, immediately-editable value — not a placeholder — so the field always shows
+              // exactly what a generation would use right now.
+              const draftValue =
+                promptDrafts[key] !== undefined ? promptDrafts[key] : channel?.prompt_overrides?.[key] || DEFAULT_CREATIVE_DIRECTION[key];
               const hasOverride = !!(channel?.prompt_overrides?.[key] || '').trim();
+              const isHistoryOpen = historyOpenStage === key;
               return (
                 <div key={key} style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                     <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{stageLabel}</div>
-                    {hasOverride && (
-                      <button
-                        onClick={() => {
-                          setPromptDrafts((d) => ({ ...d, [key]: '' }));
-                          savePromptOverride(key, '');
-                        }}
-                        style={{ ...btnGhost, padding: '5px 10px', fontSize: 9 }}
-                      >
-                        Reset to default
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button onClick={() => toggleHistory(key)} style={{ ...btnGhost, padding: '5px 10px', fontSize: 9 }}>
+                        🕐 History
                       </button>
-                    )}
+                      {hasOverride && (
+                        <button
+                          onClick={() => {
+                            setPromptDrafts((d) => ({ ...d, [key]: DEFAULT_CREATIVE_DIRECTION[key] }));
+                            savePromptOverride(key, '');
+                          }}
+                          style={{ ...btnGhost, padding: '5px 10px', fontSize: 9 }}
+                        >
+                          Reset to default
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  {isHistoryOpen && (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 4,
+                        maxHeight: 220,
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {historyLoading ? (
+                        <div style={{ padding: 10, fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>Loading…</div>
+                      ) : historyItems.length === 0 ? (
+                        <div style={{ padding: 10, fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>
+                          No saved versions yet — versions are recorded whenever you edit and leave this field.
+                        </div>
+                      ) : (
+                        historyItems.map((v) => (
+                          <div
+                            key={v.id}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 10,
+                              padding: 10,
+                              borderTop: `1px solid ${T.border}`,
+                            }}
+                          >
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ ...mono, fontSize: 10, color: T.textMuted }}>{timeAgo(v.createdAt)}</div>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: T.textSecondary,
+                                  fontFamily: FONT.ui,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {v.content.slice(0, 60)}
+                                {v.content.length > 60 ? '…' : ''}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => restoreVersion(key, v.content)}
+                              style={{ ...btnGhost, padding: '5px 10px', fontSize: 9, flexShrink: 0 }}
+                            >
+                              Restore
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
 
                   <div
                     style={{
@@ -317,7 +432,6 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                     value={draftValue}
                     onChange={(e) => setPromptDrafts((d) => ({ ...d, [key]: e.target.value }))}
                     onBlur={() => savePromptOverride(key, draftValue)}
-                    placeholder={DEFAULT_CREATIVE_DIRECTION[key]}
                     rows={5}
                     style={{ ...inputStyle, marginTop: 10, fontSize: 12, lineHeight: 1.5, resize: 'vertical' }}
                   />
