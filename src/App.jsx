@@ -239,6 +239,7 @@ export default function App() {
       imageProvider: settings.imageProvider,
       characterBible: plan.characterBible,
       references: plan.references.map((r) => ({ id: r.id, label: r.label })),
+      creativeOverride: currentChannel?.prompt_overrides?.scenes || null,
     };
 
     try {
@@ -554,7 +555,7 @@ export default function App() {
                 and gives you a timeline to fine-tune — then exports a ready-to-upload YouTube video. Free AI, no watermarks.
               </p>
             </div>
-            <CreateStep settings={settings} setSettings={setSettings} onTitles={handleTitles} isMobile={isMobile} />
+            <CreateStep settings={settings} setSettings={setSettings} onTitles={handleTitles} channel={currentChannel} isMobile={isMobile} />
           </>
         )}
 
@@ -564,6 +565,7 @@ export default function App() {
             settings={settings}
             onOutlineReady={handleOutlineReady}
             onBack={() => setTab('create')}
+            channel={currentChannel}
           />
         )}
 

@@ -13,6 +13,20 @@
 
 export const config = { maxDuration: 120 };
 
+// The "channel voice" half of the system prompt — tone, editorial priorities, how to approach
+// outline pacing and character-bible writing. Safe to override per-channel (see creativeOverride
+// below): no required JSON field name or hard correctness rule lives here, only guidance on how to
+// write. Deliberately has no per-request interpolation (title/angle/length/style) — those are
+// facts about this specific video, not stylistic choices, so they're always injected separately
+// (see the `context` constant below) regardless of whether this default or a channel's override is active.
+const DEFAULT_CREATIVE_DIRECTION = `You are a YouTube strategist and scriptwriter for successful faceless animated channels.
+
+Everything you produce must be built AROUND the video's specific narrative angle, not a generic treatment of the topic. Structure the outline so each chapter has a clear role in the narrative arc: the first chapter is the HOOK (open with the angle's most surprising fact or question), middle chapters develop and escalate the angle, the last chapter is the climax and closes with a call to action (subscribe / watch next). Every chapter must build on the last, staying anchored to the chosen angle throughout — never drift into a generic retelling of the topic.
+
+For the character bible: identify every character that appears in more than one scene across the ENTIRE video — including the narrator/protagonist even if not explicitly named by the user. If the user provided character hints, prioritize those details over your own assumptions. Create at least 2 variants when the story spans different life stages, time periods, or notable appearance changes (e.g. young vs old, before/after a transformation) — otherwise a single variant is enough. Every variant must preserve the base_description's core identifying traits while adapting era-specific details, so the character stays recognizable across variants.
+
+For every real, named, identifiable person in the character_bible (historical figures, celebrities, public figures) — search the web to verify their actual physical appearance before writing descriptions. Identify which traits are constant identity anchors that persist across their entire life (bone structure, ear shape, distinctive permanent marks, eye shape/color, general build proportions) versus which traits change by era (hair length/color/style, facial hair, weight, clothing, age-related features). The base_description must contain only the constant anchors. Each variant's description must contain only the era-specific changes — never repeat the constant anchors in variants, they're inherited automatically. For fictional characters or figures the search doesn't surface reliable information about, fall back on your own knowledge or reasonable invention guided by any user-provided character hints. Keep base_description and every variant description short and telegraphic — max 12-15 words each, comma-separated traits, never a full discursive sentence — since these get concatenated directly into image-generation prompts and must stay lean.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -31,7 +45,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes;
+    let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -61,6 +75,8 @@ export default async function handler(req, res) {
             .filter((r) => r && typeof r.label === 'string' && r.label.trim())
             .map((r) => ({ label: r.label.trim() }))
         : [];
+
+      creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
     } catch (err) {
       console.error('[generate-outline] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -69,7 +85,8 @@ export default async function handler(req, res) {
     // Nano Banana 2 / GPT Image 2 are LLM-native models with real-world knowledge of well-known
     // people and characters, unlike Pollinations' Flux/Kontext — writing exhaustive physical
     // descriptions for a recognizable figure is redundant at best and can actively fight what the
-    // model would otherwise render correctly from the name alone.
+    // model would otherwise render correctly from the name alone. A technical fact about the
+    // chosen image provider, not a stylistic choice — always included regardless of creativeOverride.
     const providerAwareCharacterNote = imageProvider !== 'pollinations'
       ? `
 
@@ -84,24 +101,19 @@ ${refs.map((r) => `- label: "${r.label}"`).join('\n')}
 Keep the character_bible consistent with these — if a reference photo's label describes a character, that character's name and variants in character_bible should align with it.`
       : '';
 
-    const characterBibleSection = `
-
-Character bible: identify every character that appears in more than one scene across the ENTIRE video — including the narrator/protagonist even if not explicitly named by the user. If the user provided character hints, prioritize those details over your own assumptions. Create at least 2 variants when the story spans different life stages, time periods, or notable appearance changes (e.g. young vs old, before/after a transformation) — otherwise a single variant is enough. Every variant must preserve the base_description's core identifying traits while adapting era-specific details, so the character stays recognizable across variants.
-
-For every real, named, identifiable person in the character_bible (historical figures, celebrities, public figures) — search the web to verify their actual physical appearance before writing descriptions. Identify which traits are constant identity anchors that persist across their entire life (bone structure, ear shape, distinctive permanent marks, eye shape/color, general build proportions) versus which traits change by era (hair length/color/style, facial hair, weight, clothing, age-related features). The base_description must contain only the constant anchors. Each variant's description must contain only the era-specific changes — never repeat the constant anchors in variants, they're inherited automatically. For fictional characters or figures the search doesn't surface reliable information about, fall back on your own knowledge or reasonable invention guided by any user-provided character hints. Keep base_description and every variant description short and telegraphic — max 12-15 words each, comma-separated traits, never a full discursive sentence — since these get concatenated directly into image-generation prompts and must stay lean.
-
-CRITICAL: descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.
-
-Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}`;
-
-    const systemPrompt = `You are a YouTube strategist and scriptwriter for successful faceless animated channels.
-
-The video's title and narrative angle have already been chosen — everything you produce must be built AROUND that specific angle, not a generic treatment of the topic.
-
-Video title: "${title}"
+    // Facts about THIS specific video (title, angle, length, visual style) — always injected
+    // regardless of which creative direction is active (default or a channel's override), since an
+    // override changes HOW to write, never WHAT video this is.
+    const context = `Video title: "${title}"
 Narrative angle: ${angle || '(none specified — infer a coherent angle from the title itself)'}
+Video length: ~${lengthMinutes} minutes — split into a sensible number of chapters, roughly one chapter every 1.5-2 minutes.
 
-You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
+CRITICAL: character descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.`;
+
+    // The output-format half — field names, types, and hard correctness rules that downstream
+    // parsing (client) and the next pipeline stage (api/generate-scenes.js, which references these
+    // exact character/chapter ids) depend on. NEVER influenced by creativeOverride, in any case.
+    const SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
 JSON schema:
 {
@@ -113,12 +125,12 @@ JSON schema:
   "total_scenes": ${totalScenes}
 }
 
-Rules for the outline:
+Rules:
 - The sum of every chapter's scene_count MUST equal exactly ${totalScenes}.
-- Split into a sensible number of chapters for a ~${lengthMinutes}-minute video — roughly one chapter every 1.5-2 minutes.
-- Each chapter has a clear role in the narrative arc: the first chapter is the HOOK (open with the angle's most surprising fact or question), middle chapters develop and escalate the angle, the last chapter is the climax and closes with a call to action (subscribe / watch next).
-- Every chapter must build on the last, staying anchored to the chosen title's specific angle throughout — never drift into a generic retelling of the topic.
-- Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).${characterBibleSection}`;
+- Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).
+- Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}`;
+
+    const systemPrompt = `${context}\n\n${creativeOverride || DEFAULT_CREATIVE_DIRECTION}\n\n${SCHEMA_INSTRUCTIONS}`;
 
     const userLines = [
       `Topic: "${topic}"`,

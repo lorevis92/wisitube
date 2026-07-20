@@ -11,6 +11,16 @@
 
 export const config = { maxDuration: 90 };
 
+// The "channel voice" half of the system prompt — editorial strategy, priorities, how to think
+// about what to suggest next. Safe to override per-channel (see creativeOverride below): nothing
+// here names required JSON fields, so swapping it can't break downstream parsing.
+const DEFAULT_CREATIVE_DIRECTION = `You are an expert YouTube content strategist and program manager for a faceless channel. Your job is to look holistically at a channel — its niche, its editorial guidelines, and every video already made — and propose the next videos that will make the channel grow and stay coherent and bingeable. Think like a channel owner planning an editorial calendar, not like someone generating random ideas. Consider: gaps in coverage (important subjects/angles not yet covered), opportunities for SERIES (groups of 3-5 connected videos under a theme), natural progressions from existing content, and what would genuinely interest this audience. Use web search to stay current on the niche (trending topics, recent events, popular subjects people are searching for right now). Avoid suggesting anything too similar to videos already made.`;
+
+// The output-format half — field names, types, "JSON only", and the refinement-bias contract.
+// NEVER influenced by creativeOverride: the client's JSON parsing depends on this exact shape
+// regardless of what creative direction is in play.
+const SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [6-8 objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -29,7 +39,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let channelName, niche, editorialNotes, videos, refinement;
+    let channelName, niche, editorialNotes, videos, refinement, creativeOverride;
     try {
       const body = req.body || {};
       channelName = typeof body.channelName === 'string' ? body.channelName.trim() : '';
@@ -48,12 +58,13 @@ export default async function handler(req, res) {
             }))
             .filter((v) => v.title || v.topic)
         : [];
+      creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
     } catch (err) {
       console.error('[program-manager] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    const systemPrompt = `You are an expert YouTube content strategist and program manager for a faceless channel. Your job is to look holistically at a channel — its niche, its editorial guidelines, and every video already made — and propose the next videos that will make the channel grow and stay coherent and bingeable. Think like a channel owner planning an editorial calendar, not like someone generating random ideas. Consider: gaps in coverage (important subjects/angles not yet covered), opportunities for SERIES (groups of 3-5 connected videos under a theme), natural progressions from existing content, and what would genuinely interest this audience. Use web search to stay current on the niche (trending topics, recent events, popular subjects people are searching for right now). Avoid suggesting anything too similar to videos already made. You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [6-8 objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
+    const systemPrompt = `${creativeOverride || DEFAULT_CREATIVE_DIRECTION} ${SCHEMA_INSTRUCTIONS}`;
 
     const userContent = [
       `Channel name: ${channelName}`,

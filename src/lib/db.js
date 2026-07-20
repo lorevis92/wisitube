@@ -89,7 +89,11 @@ export async function deleteVideo(id) {
 // last_suggestions (jsonb), youtube_connected (bool), youtube_channel_name, youtube_channel_id,
 // youtube_refresh_token (flat columns — no nested youtube object, that's not how this table is
 // shaped) — the app-level channel object mirrors these same flat, snake_case field names rather
-// than reintroducing a nested `youtube` object at this boundary.
+// than reintroducing a nested `youtube` object at this boundary. prompt_overrides (jsonb) follows
+// the same flat-field convention — see ChannelDashboardStep.jsx's Prompt Lab: keyed by pipeline
+// stage ('titles' | 'outline' | 'scenes' | 'programManager'), each value either a non-empty
+// creative-direction string (see src/lib/promptDefaults.js for what it replaces) or absent/empty
+// when that stage uses the default.
 
 function fromChannelRow(row) {
   return {
@@ -104,6 +108,7 @@ function fromChannelRow(row) {
     youtube_channel_name: row.youtube_channel_name || '',
     youtube_channel_id: row.youtube_channel_id || '',
     youtube_refresh_token: row.youtube_refresh_token || '',
+    prompt_overrides: row.prompt_overrides || {},
   };
 }
 
@@ -121,6 +126,7 @@ export async function saveChannel(channel) {
     youtube_channel_name: channel.youtube_channel_name || '',
     youtube_channel_id: channel.youtube_channel_id || '',
     youtube_refresh_token: channel.youtube_refresh_token || '',
+    prompt_overrides: channel.prompt_overrides || {},
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

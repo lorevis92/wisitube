@@ -2,6 +2,14 @@ import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listVideosByChannel, deleteVideo, loadChannel, saveChannel, deleteChannel, clearYoutubeConnection, getCostsByChannel } from '../lib/db';
 import { getMediaUrl } from '../lib/mediaStorage';
+import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
+
+const PROMPT_STAGES = [
+  { key: 'titles', stageLabel: 'Titles & Angles' },
+  { key: 'outline', stageLabel: 'Outline & Structure' },
+  { key: 'scenes', stageLabel: 'Scene Writing' },
+  { key: 'programManager', stageLabel: 'Content Program Manager' },
+];
 
 function timeAgo(ts) {
   if (!ts) return '';
@@ -35,6 +43,11 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [refiningIndex, setRefiningIndex] = useState(null);
   const [refineText, setRefineText] = useState('');
   const [totalSpent, setTotalSpent] = useState(0);
+  const [showPromptLab, setShowPromptLab] = useState(false);
+  // Local in-progress edits per stage, keyed by stage — undefined means "not yet touched this
+  // session, fall back to channel.prompt_overrides[stage]". Kept separate from channel state so
+  // typing doesn't need a round-trip through saveChannel on every keystroke; onBlur is what persists.
+  const [promptDrafts, setPromptDrafts] = useState({});
 
   useEffect(() => {
     let cancelled = false;
@@ -79,6 +92,22 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     onChannelChange?.(updated);
   }
 
+  // Persists one stage's creative-direction override — an empty/whitespace-only value removes the
+  // key entirely rather than storing an empty string, so "no override" and "override cleared" both
+  // collapse to the same falsy state DEFAULT_CREATIVE_DIRECTION checks fall back on.
+  async function savePromptOverride(stage, value) {
+    if (!channel) return;
+    const trimmed = (value || '').trim();
+    const current = channel.prompt_overrides?.[stage] || '';
+    if (trimmed === current) return;
+    const nextOverrides = { ...(channel.prompt_overrides || {}) };
+    if (trimmed) nextOverrides[stage] = trimmed;
+    else delete nextOverrides[stage];
+    const updated = await saveChannel({ ...channel, prompt_overrides: nextOverrides });
+    setChannel(updated);
+    onChannelChange?.(updated);
+  }
+
   // Refining never edits a single suggestion — it relaunches the whole holistic pass with the
   // extra instruction folded in, replacing the entire list at once.
   async function fetchSuggestions(refinementText) {
@@ -95,6 +124,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
           editorialNotes: channel.editorialNotes || '',
           existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
           refinement: refinementText || '',
+          creativeOverride: channel.prompt_overrides?.programManager || null,
         }),
       });
       const data = await res.json();
@@ -214,6 +244,88 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             </button>
           )}
         </div>
+      </div>
+
+      <div style={card}>
+        <button
+          onClick={() => setShowPromptLab((v) => !v)}
+          style={{
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            cursor: 'pointer',
+          }}
+        >
+          <span style={label}>Prompt Lab</span>
+          <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+            {showPromptLab ? 'CLOSE ▲' : 'SHOW ▼'}
+          </span>
+        </button>
+
+        {showPromptLab && (
+          <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 20 }}>
+            <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, lineHeight: 1.5 }}>
+              Edit the creative direction each AI generation step follows for this channel — tone, editorial priorities, how to write titles, outlines and scenes. The technical output format each step must return is fixed and shown read-only below its editor.
+            </div>
+
+            {PROMPT_STAGES.map(({ key, stageLabel }) => {
+              const draftValue = promptDrafts[key] !== undefined ? promptDrafts[key] : channel?.prompt_overrides?.[key] || '';
+              const hasOverride = !!(channel?.prompt_overrides?.[key] || '').trim();
+              return (
+                <div key={key} style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{stageLabel}</div>
+                    {hasOverride && (
+                      <button
+                        onClick={() => {
+                          setPromptDrafts((d) => ({ ...d, [key]: '' }));
+                          savePromptOverride(key, '');
+                        }}
+                        style={{ ...btnGhost, padding: '5px 10px', fontSize: 9 }}
+                      >
+                        Reset to default
+                      </button>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: 8,
+                      padding: 10,
+                      borderRadius: 4,
+                      background: T.surfaceAlt,
+                      color: T.textMuted,
+                      fontSize: 11,
+                      fontFamily: FONT.mono,
+                      whiteSpace: 'pre-wrap',
+                      lineHeight: 1.5,
+                      maxHeight: 140,
+                      overflowY: 'auto',
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+                      Technical format — not editable
+                    </div>
+                    {SCHEMA_INSTRUCTIONS_DISPLAY[key]}
+                  </div>
+
+                  <textarea
+                    value={draftValue}
+                    onChange={(e) => setPromptDrafts((d) => ({ ...d, [key]: e.target.value }))}
+                    onBlur={() => savePromptOverride(key, draftValue)}
+                    placeholder={DEFAULT_CREATIVE_DIRECTION[key]}
+                    rows={5}
+                    style={{ ...inputStyle, marginTop: 10, fontSize: 12, lineHeight: 1.5, resize: 'vertical' }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div style={card}>

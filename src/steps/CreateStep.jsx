@@ -10,7 +10,7 @@ import FullScreenLoader from '../components/FullScreenLoader';
 
 const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
 
-export default function CreateStep({ settings, setSettings, onTitles, isMobile }) {
+export default function CreateStep({ settings, setSettings, onTitles, channel, isMobile }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [voiceTest, setVoiceTest] = useState('');
@@ -113,6 +113,7 @@ export default function CreateStep({ settings, setSettings, onTitles, isMobile }
         body: JSON.stringify({
           topic: settings.topic.trim(),
           language: settings.language,
+          creativeOverride: channel?.prompt_overrides?.titles || null,
         }),
       });
       const data = await res.json();

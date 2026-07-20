@@ -10,6 +10,16 @@
 
 export const config = { maxDuration: 30 };
 
+// The "channel voice" half of the system prompt — tone, editorial priorities, how to approach the
+// task. Safe to override per-channel (see creativeOverride below): nothing here constrains the
+// output format, so swapping it can't break downstream parsing.
+const DEFAULT_CREATIVE_DIRECTION = `You are a YouTube strategist for successful faceless animated channels. Given a topic, propose 5 distinct, highly clickable video titles — curiosity-driven but not misleading, max 70 chars each. Each title implies a specific narrative angle (what the video will actually focus on), and the 5 angles must be genuinely different from each other — not just reworded versions of the same idea. For each title, write "angle": one short phrase naming that specific narrative cut (e.g. for the title "Why Napoleon Lost in Russia" the angle is "focus on the strategic blunder"; for the title "The Winter That Destroyed an Empire" the angle is "focus on human suffering").`;
+
+// The output-format half — field names, types, "JSON only". NEVER influenced by creativeOverride:
+// the client's JSON parsing (see below) depends on this exact shape regardless of what creative
+// direction is in play.
+const SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "titles": [5 objects: { "title": string, "angle": string }] }.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -28,7 +38,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate the request body.
-    let topic, language;
+    let topic, language, creativeOverride;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -36,12 +46,13 @@ export default async function handler(req, res) {
       if (!topic || topic.length > 500) {
         return res.status(400).json({ error: 'Invalid topic' });
       }
+      creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
     } catch (err) {
       console.error('[generate-titles] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    const systemPrompt = `You are a YouTube strategist for successful faceless animated channels. Given a topic, propose 5 distinct, highly clickable video titles — curiosity-driven but not misleading, max 70 chars each. Each title implies a specific narrative angle (what the video will actually focus on), and the 5 angles must be genuinely different from each other — not just reworded versions of the same idea. For each title, write "angle": one short phrase naming that specific narrative cut (e.g. for the title "Why Napoleon Lost in Russia" the angle is "focus on the strategic blunder"; for the title "The Winter That Destroyed an Empire" the angle is "focus on human suffering"). You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "titles": [5 objects: { "title": string, "angle": string }] }.`;
+    const systemPrompt = `${creativeOverride || DEFAULT_CREATIVE_DIRECTION} ${SCHEMA_INSTRUCTIONS}`;
 
     // Phase 2: call Anthropic.
     let response;

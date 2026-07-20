@@ -5,7 +5,7 @@ import { estimateTotalSeconds, estimateScenesChunkSeconds } from '../lib/estimat
 import { isModelWarm } from '../lib/tts';
 import FullScreenLoader from '../components/FullScreenLoader';
 
-export default function TitleSelectStep({ titleOptions, settings, onOutlineReady, onBack }) {
+export default function TitleSelectStep({ titleOptions, settings, onOutlineReady, onBack, channel }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -32,6 +32,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           characterHints,
           generalNotes: (settings.generalNotes || '').trim(),
           references,
+          creativeOverride: channel?.prompt_overrides?.outline || null,
         }),
       });
       const data = await res.json();

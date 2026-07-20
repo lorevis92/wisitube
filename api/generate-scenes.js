@@ -15,6 +15,15 @@
 
 export const config = { maxDuration: 90 };
 
+// The "channel voice" half of the system prompt — narration tone and shot-writing style. Safe to
+// override per-channel (see creativeOverride below): no required JSON field name or hard
+// correctness rule lives here. No per-request interpolation on purpose — video-specific facts
+// (title, topic, chapter continuity) are always injected separately (see the `context` constant
+// below) regardless of whether this default or a channel's override is active.
+const DEFAULT_CREATIVE_DIRECTION = `You are a YouTube scriptwriter continuing a faceless animated video already in progress.
+
+Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers. Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -34,7 +43,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, chapterTitle, chapterSummary, sceneCount, language, style, imageProvider, vertical;
-    let characterBible, refs, previousTail, isVeryFirstChunk, isVeryLastChunk;
+    let characterBible, refs, previousTail, isVeryFirstChunk, isVeryLastChunk, creativeOverride;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -74,6 +83,7 @@ export default async function handler(req, res) {
       previousTail = typeof body.previousTail === 'string' ? body.previousTail.trim() : '';
       isVeryFirstChunk = !!body.isVeryFirstChunk;
       isVeryLastChunk = !!body.isVeryLastChunk;
+      creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
     } catch (err) {
       console.error('[generate-scenes] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -120,12 +130,17 @@ For EVERY image beat where one of these characters is visibly present — as the
       .filter(Boolean)
       .join(' ');
 
-    const systemPrompt = `You are a YouTube scriptwriter continuing a faceless animated video already in progress.
-
-Video title: "${title || topic}"
+    // Facts about THIS specific chunk (title, topic, chapter continuity) — always injected
+    // regardless of which creative direction is active (default or a channel's override), since an
+    // override changes HOW to write, never WHAT is being continued.
+    const context = `Video title: "${title || topic}"
 Topic: "${topic}"
 
-You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
+${continuityNote}`;
+
+    // The output-format half — field names, types, and hard correctness rules the client's parsing
+    // depends on. NEVER influenced by creativeOverride, in any case.
+    const SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
 JSON schema:
 {
@@ -141,14 +156,11 @@ JSON schema:
   }]
 }
 
-Rules for scenes:
-- Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers.
-- Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes.
-- Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.
+Rules:
 - image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.
-- If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterAssignmentSection}
+- If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterAssignmentSection}`;
 
-${continuityNote}`;
+    const systemPrompt = `${context}\n\n${creativeOverride || DEFAULT_CREATIVE_DIRECTION}\n\n${SCHEMA_INSTRUCTIONS}`;
 
     // Phase 2: call Anthropic.
     let response;
