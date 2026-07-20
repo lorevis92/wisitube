@@ -21,6 +21,19 @@ function extensionForBlob(blob) {
 // Returns the storage path (not a public URL — the bucket is private, use getMediaUrl/
 // downloadMediaAsBlob to read it back).
 export async function uploadMedia(userId, videoId, kind, id, blob) {
+  // supabase.auth.getSession() awaits the client's own internal session hydration/refresh before
+  // resolving — calling it right before the Storage request (rather than trusting the client's
+  // ambient in-memory state) closes off any race where the JWT the request would otherwise send
+  // hasn't finished loading/refreshing yet. Without it, the request goes out effectively
+  // unauthenticated and RLS on storage.objects rejects the insert ("new row violates row-level
+  // security policy") even though the path itself is built from the correct userId.
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) {
+    throw new Error('No authenticated Supabase session — cannot upload to Storage (the request would be rejected by RLS as anonymous).');
+  }
+
   const path = `${userId}/${videoId}/${kind}/${id}.${extensionForBlob(blob)}`;
   const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { upsert: true, contentType: blob.type });
   if (error) throw error;
