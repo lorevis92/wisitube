@@ -1,9 +1,12 @@
-// Multi-channel automation engine — Phase 1: the cycle loop, its safety caps, and its
-// observability, running in dry-run mode only. Nothing here calls a generation API, spends money,
-// or publishes anything; every "would do X" step is a log line describing what a real cycle would
-// have done at that point. Phase 2 wires getRecipeForContentType's placeholder id to the actual
-// titles → outline → scenes → media → render → thumbnail → YouTube pipeline.
+// Multi-channel automation engine. Phase 1 shipped the cycle loop, its safety caps, and its
+// observability in dry-run mode only. Phase 2a wires getRecipeForContentType's 'full_pipeline' id
+// to the real titles → outline → scenes → media → render → thumbnail → YouTube pipeline
+// (src/lib/recipes/fullPipelineRecipe.js) — real generation, real spend, real publishing, but
+// still only ever started manually from AutomationStep.jsx (no auto-start; that's Phase 2b).
 import { saveChannel, listChannels, logAutomationStep } from './db';
+import { priceForImage } from './imageProviders';
+import { priceForVoice } from './voiceProviders';
+import { runFullPipeline } from './recipes/fullPipelineRecipe';
 
 const PAID_IMAGE_PROVIDERS = ['nanobanana', 'gptimage'];
 const PAID_VOICE_ENGINES = ['minimax'];
@@ -61,16 +64,35 @@ export function canRunChannelToday(channel) {
   return { ok: true, reason: null };
 }
 
-// Placeholder recipe registry — Phase 2 replaces the string id with the actual pipeline function
-// reference (or a lookup into one). Only 'full_pipeline' exists today; everything else means "no
-// recipe available for this content type yet," not an error.
+// Recipe registry — returns the actual pipeline function for a content type, or null if none
+// exists yet (not an error: getRecipeForContentType(null) is how "no recipe available for this
+// content type" is represented to the caller, see runAutomationCycle below).
 export function getRecipeForContentType(contentType) {
   switch (contentType) {
     case 'full_pipeline':
-      return 'full_pipeline';
+      return runFullPipeline;
     default:
       return null;
   }
+}
+
+// Same pricing functions the manual "Confirm paid generation" dialog uses (StoryboardStep.jsx),
+// applied to an estimated (not exact) beat count/narration length — real scenes don't exist yet at
+// the point runAutomationCycle needs this, only automation_length_minutes. totalScenes mirrors
+// api/generate-outline.js's own math so the estimate is at least consistent with what the outline
+// call will actually request.
+const ESTIMATED_CHARS_PER_SCENE = 120; // generate-scenes.js caps each scene at 200 chars; this is a realistic average, not the worst case.
+
+function estimateFullPipelineCost(channel) {
+  const lengthMinutes = Number(channel.automation_length_minutes) || 5;
+  const totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
+  const beats = totalScenes * 2;
+  const provider = channel.automation_image_provider || 'pollinations';
+  const voiceEngine = channel.automation_voice_engine || 'kokoro';
+
+  const imageTotal = beats * priceForImage(provider, { width: 1280, height: 720, quality: 'medium', hasReference: false });
+  const voiceTotal = priceForVoice(voiceEngine, totalScenes * ESTIMATED_CHARS_PER_SCENE);
+  return imageTotal + voiceTotal;
 }
 
 // Thin, literally-named wrapper around db.js's insert — kept as its own export here because the
@@ -96,12 +118,12 @@ const DRY_RUN_STEPS = [
 
 /**
  * userId: the authenticated user running this cycle — not used to filter here (listChannels()
- * already comes back scoped to the caller via Supabase RLS), kept as a parameter for the caller's
- * own bookkeeping and so callers don't have to thread session state through some other path.
- * dryRun: when true (the only supported value in Phase 1), no generation/spend/publish APIs are
- * called — every eligible channel just gets its would-be steps logged.
+ * already comes back scoped to the caller via Supabase RLS), passed straight through to the recipe
+ * (it needs it for Storage paths/cost-ledger writes) and kept for the caller's own bookkeeping.
+ * dryRun: true logs the would-be steps without calling any generation/spend/publish API (Phase 1).
+ * false actually runs the channel's recipe — real generation, real spend, real YouTube publish.
  * onUpdate({ channelId, channelName, index, total, status }): called once per channel, after that
- * channel's turn is fully resolved (skipped, dry-run logged, or errored) — status is
+ * channel's turn is fully resolved (skipped, logged/run, or errored) — status is
  * 'skipped' | 'done' | 'error'.
  * shouldStop(): polled once at the top of each channel's turn (never mid-channel) — returning true
  * ends the cycle immediately without starting the next channel.
@@ -138,10 +160,28 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, shou
         for (const { step, message } of DRY_RUN_STEPS) {
           await logStep(channel.id, null, step, 'dry_run', message.replace('{provider}', provider));
         }
+      } else {
+        // Pre-flight budget check — the recipe itself only finds out the real cost as it spends it
+        // (via recordCost calls deep inside mediaGenerationEngine.js/thumbnailEngine.js), so this
+        // has to be an estimate computed before any of that runs, not a check against real spend.
+        const budget = Number(channel.automation_daily_budget_usd) || 0;
+        const spent = Number(channel.automation_daily_spend_usd) || 0;
+        const estimate = estimateFullPipelineCost(channel);
+        if (budget > 0 && estimate > budget - spent) {
+          await logStep(channel.id, null, 'budget', 'skipped', 'estimated cost exceeds remaining daily budget');
+          report('skipped');
+          continue;
+        }
+
+        const result = await recipe(channel, { userId, logStep });
+        // A failed run never reaches here (the recipe throws, caught below) — so the upload count
+        // only ever increments for a video that actually finished and published.
+        channel = await saveChannel({
+          ...channel,
+          automation_daily_upload_count: (Number(channel.automation_daily_upload_count) || 0) + 1,
+          automation_daily_spend_usd: (Number(channel.automation_daily_spend_usd) || 0) + (result.costUsd || 0),
+        });
       }
-      // Real (non-dry-run) execution: Phase 2 branches on `recipe` here to actually run the
-      // pipeline, then bump automation_daily_upload_count/automation_daily_spend_usd. Not wired up
-      // yet — dryRun is the only mode this phase supports.
 
       report('done');
     } catch (err) {

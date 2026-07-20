@@ -101,7 +101,7 @@ export default function AutomationStep({ userId, isMobile }) {
       .catch((err) => console.error('[AutomationStep] failed to save channel automation settings', channelId, err));
   }
 
-  async function runDryRun() {
+  async function runCycle(dryRun) {
     if (running || !channels || channels.length === 0) return;
     stopRequestedRef.current = false;
     setRunning(true);
@@ -110,12 +110,12 @@ export default function AutomationStep({ userId, isMobile }) {
     try {
       await runAutomationCycle({
         userId,
-        dryRun: true,
+        dryRun,
         onUpdate: (p) => setProgress(p),
         shouldStop: () => stopRequestedRef.current,
       });
     } catch (err) {
-      console.error('[AutomationStep] dry-run cycle failed', err);
+      console.error(`[AutomationStep] ${dryRun ? 'dry-run' : 'real'} cycle failed`, err);
     } finally {
       if (pollRef.current) {
         clearInterval(pollRef.current);
@@ -123,8 +123,18 @@ export default function AutomationStep({ userId, isMobile }) {
       }
       setRunning(false);
       loadLog(historyFilter);
-      loadChannels(); // pick up automation_daily_upload_count/spend touched by resetDailyCountersIfNeeded
+      loadChannels(); // pick up automation_daily_upload_count/spend touched by the cycle
     }
+  }
+
+  function runDryRun() {
+    runCycle(true);
+  }
+
+  function runRealCycle() {
+    const ok = window.confirm('This will generate real content and publish to YouTube. Continue?');
+    if (!ok) return;
+    runCycle(false);
   }
 
   function stopCycle() {
@@ -144,8 +154,9 @@ export default function AutomationStep({ userId, isMobile }) {
       <div>
         <div style={{ fontFamily: FONT.display, fontSize: 26, color: T.text }}>Automation</div>
         <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 6, lineHeight: 1.6, maxWidth: 640 }}>
-          Configure per-channel automation below, then run a dry-run cycle to see exactly what it would do for every enabled channel — no
-          generation, spend, or publishing happens in this phase.
+          Configure per-channel automation below. Dry-run shows exactly what a cycle would do for every enabled channel with no generation,
+          spend, or publishing. Real cycle actually does it — generates a real video and publishes it to YouTube for every eligible channel.
+          Both are started manually here; nothing runs on its own yet.
         </div>
       </div>
 
@@ -157,13 +168,30 @@ export default function AutomationStep({ userId, isMobile }) {
               🛑 Stop
             </button>
           ) : (
-            <button
-              onClick={runDryRun}
-              disabled={channels.length === 0}
-              style={{ ...btnPrimary, padding: '12px 22px', fontSize: 13, opacity: channels.length === 0 ? 0.6 : 1 }}
-            >
-              ▶ Run dry-run cycle
-            </button>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                onClick={runDryRun}
+                disabled={channels.length === 0}
+                style={{ ...btnGhost, padding: '12px 22px', fontSize: 13, opacity: channels.length === 0 ? 0.6 : 1 }}
+              >
+                ▶ Run dry-run cycle
+              </button>
+              <button
+                onClick={runRealCycle}
+                disabled={channels.length === 0}
+                title="Generates real content and publishes to YouTube — real spend, real uploads"
+                style={{
+                  ...btnPrimary,
+                  padding: '12px 22px',
+                  fontSize: 13,
+                  border: `2px solid ${T.primary}`,
+                  boxShadow: `0 0 0 1px ${T.primary}`,
+                  opacity: channels.length === 0 ? 0.6 : 1,
+                }}
+              >
+                ▶▶ Run real cycle
+              </button>
+            </div>
           )}
         </div>
 
