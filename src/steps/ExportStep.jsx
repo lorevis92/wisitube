@@ -2,10 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
-import { renderToMp4, WebCodecsUnsupportedError } from '../lib/exporter';
+import { WebCodecsUnsupportedError } from '../lib/exporter';
 import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
 import { generateThumbnail } from '../lib/thumbnailEngine';
 import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
+import { renderVideoForExport } from '../lib/videoRenderEngine';
 
 // Official YouTube video category IDs (googleapis.com/youtube/v3/videoCategories) — the ones
 // realistically relevant to faceless explainer-style channels, skipping deprecated categories
@@ -153,33 +154,31 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const items = await Promise.all(
-        scenes.map(async (s) => ({
-          images: await Promise.all(
-            s.images.map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))
-          ),
-          buffer: await decodeAudio(s.audioUrl),
-          duration: (s.audioDuration || 0) + s.pad,
-          narration: s.narration,
-        }))
-      );
-
       let blob, ext;
       try {
-        blob = await renderToMp4({
-          items,
-          width: dims.W,
-          height: dims.H,
-          subtitles: project.subtitles,
+        blob = await renderVideoForExport(project, settings, {
           onProgress: (frameIndex, totalFrames) => setPct(Math.min(100, Math.round((frameIndex / totalFrames) * 100))),
           signal: controller.signal,
         });
         ext = 'mp4';
       } catch (e) {
         if (!(e instanceof WebCodecsUnsupportedError)) throw e;
-        // Fast path unavailable in this browser — fall back to the original real-time recorder.
+        // Fast path unavailable in this browser — fall back to the original real-time recorder,
+        // which needs a live, DOM-mounted canvas to captureStream() from (canvasRef below) —
+        // rebuilding items here is cheap: loadImage/decodeAudio both cache by URL, so this just
+        // re-reads what renderVideoForExport already resolved a moment ago.
         setUsingFallback(true);
         setPct(0);
+        const items = await Promise.all(
+          scenes.map(async (s) => ({
+            images: await Promise.all(
+              s.images.map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))
+            ),
+            buffer: await decodeAudio(s.audioUrl),
+            duration: (s.audioDuration || 0) + s.pad,
+            narration: s.narration,
+          }))
+        );
         const playback = await playTimeline({
           canvas: canvasRef.current,
           items,
