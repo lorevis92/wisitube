@@ -9,6 +9,7 @@ import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
 import AutomationStep from './steps/AutomationStep';
+import AutomationMirrorStep from './steps/AutomationMirrorStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost } from './theme';
@@ -64,6 +65,12 @@ export default function App() {
   const [session, setSession] = useState(undefined);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
   const [tab, setTab] = useState('channels');
+  // Lightweight, App-level mirror of whatever the automation engine is doing right now — set by
+  // AutomationStep.jsx (see its onRunUpdate prop below) from runAutomationCycle/runFullPipeline's
+  // onProgress events, independent of which tab/screen the user actually has open. null whenever no
+  // real (non-dry-run) automation cycle is currently running. Shape: { channelId, channelName,
+  // videoId, phase, phaseDetail, project, log }.
+  const [currentAutomationRun, setCurrentAutomationRun] = useState(null);
   const [currentChannelId, setCurrentChannelId] = useState(null);
   const [currentChannelName, setCurrentChannelName] = useState('');
   // Single source of truth for the currently open channel's full record (including youtube.*) —
@@ -501,6 +508,8 @@ export default function App() {
         isMobile={isMobile}
         userEmail={session.user?.email}
         onSignOut={() => supabase.auth.signOut()}
+        hasActiveAutomation={!!currentAutomationRun}
+        onReturnToAutomation={() => setTab('automation-mirror')}
       />
 
       <main style={{ flex: 1, width: '100%', maxWidth: 1200, margin: '0 auto', padding: isMobile ? '20px 14px' : '32px 20px' }}>
@@ -544,7 +553,11 @@ export default function App() {
             <ChannelsListStep onOpenChannel={openChannel} isMobile={isMobile} />
           ))}
 
-        {tab === 'automation' && <AutomationStep userId={session.user?.id} isMobile={isMobile} />}
+        {tab === 'automation' && (
+          <AutomationStep userId={session.user?.id} isMobile={isMobile} onRunUpdate={setCurrentAutomationRun} />
+        )}
+
+        {tab === 'automation-mirror' && <AutomationMirrorStep run={currentAutomationRun} isMobile={isMobile} />}
 
         {tab === 'create' && (
           <>

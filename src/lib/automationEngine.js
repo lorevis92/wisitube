@@ -125,10 +125,15 @@ const DRY_RUN_STEPS = [
  * onUpdate({ channelId, channelName, index, total, status }): called once per channel, after that
  * channel's turn is fully resolved (skipped, logged/run, or errored) — status is
  * 'skipped' | 'done' | 'error'.
+ * onProgress({ channelId, channelName, step, message, videoId, project }): live, in-memory
+ * phase-level updates while a real (non-dry-run) recipe is running — never fires for dry runs
+ * (there's no recipe call to report from) or for skipped channels. Tagged with channel identity
+ * here so a single callback can drive global UI state (see App.jsx's currentAutomationRun /
+ * AutomationMirrorStep.jsx) without needing to know which channel is currently active.
  * shouldStop(): polled once at the top of each channel's turn (never mid-channel) — returning true
  * ends the cycle immediately without starting the next channel.
  */
-export async function runAutomationCycle({ userId, dryRun = true, onUpdate, shouldStop = () => false }) {
+export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onProgress, shouldStop = () => false }) {
   const allChannels = await listChannels();
   const channels = allChannels.filter((c) => c.automation_enabled === true);
 
@@ -173,7 +178,12 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, shou
           continue;
         }
 
-        const result = await recipe(channel, { userId, logStep });
+        onProgress?.({ channelId: channel.id, channelName: channel.name, step: 'starting', message: 'Starting run…' });
+        const result = await recipe(channel, {
+          userId,
+          logStep,
+          onProgress: (evt) => onProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
+        });
         // A failed run never reaches here (the recipe throws, caught below) — so the upload count
         // only ever increments for a video that actually finished and published.
         channel = await saveChannel({

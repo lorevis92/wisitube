@@ -31,7 +31,7 @@ function statusColor(status) {
   return T.green;
 }
 
-export default function AutomationStep({ userId, isMobile }) {
+export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   const [channels, setChannels] = useState(null); // null = still loading
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null); // { channelId, channelName, index, total, status }
@@ -102,6 +102,26 @@ export default function AutomationStep({ userId, isMobile }) {
       .catch((err) => console.error('[AutomationStep] failed to save channel automation settings', channelId, err));
   }
 
+  // Turns automationEngine.js's { channelId, channelName, step, message, videoId, project } events
+  // into the shape App.jsx's currentAutomationRun / AutomationMirrorStep.jsx expect — kept as a
+  // functional update (reads prev) so a channel switch mid-cycle resets the rolling log instead of
+  // mixing lines from two different channels together.
+  function applyProgressToGlobalRun(evt) {
+    onRunUpdate?.((prev) => {
+      const sameChannel = prev && prev.channelId === evt.channelId;
+      const log = [...(sameChannel ? prev.log || [] : []), { ts: Date.now(), phase: evt.step, message: evt.message }].slice(-40);
+      return {
+        channelId: evt.channelId,
+        channelName: evt.channelName,
+        videoId: evt.videoId ?? (sameChannel ? prev.videoId : null),
+        phase: evt.step,
+        phaseDetail: evt.message,
+        project: evt.project ?? (sameChannel ? prev.project : null),
+        log,
+      };
+    });
+  }
+
   async function runCycle(dryRun) {
     if (running || !channels || channels.length === 0) return;
     stopRequestedRef.current = false;
@@ -113,6 +133,7 @@ export default function AutomationStep({ userId, isMobile }) {
         userId,
         dryRun,
         onUpdate: (p) => setProgress(p),
+        onProgress: applyProgressToGlobalRun,
         shouldStop: () => stopRequestedRef.current,
       });
     } catch (err) {
@@ -125,6 +146,7 @@ export default function AutomationStep({ userId, isMobile }) {
       setRunning(false);
       loadLog(historyFilter);
       loadChannels(); // pick up automation_daily_upload_count/spend touched by the cycle
+      onRunUpdate?.(null); // the whole cycle ended (or was stopped) — no run left to mirror
     }
   }
 

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { T, FONT } from '../theme';
 
-export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut }) {
+export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut, hasActiveAutomation, onReturnToAutomation }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const hamburger = (
@@ -89,6 +89,35 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
     </div>
   );
 
+  // Small, always-present-when-relevant badge — only rendered while an automation run is actually
+  // active (see App.jsx's currentAutomationRun), and disappears on its own the moment the run ends
+  // or is stopped, since it's driven straight off that same piece of state.
+  const returnBadge = hasActiveAutomation && (
+    <button
+      onClick={onReturnToAutomation}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        background: T.yellow,
+        color: '#FFFFFF',
+        border: 'none',
+        borderRadius: 3,
+        padding: '7px 12px',
+        fontSize: 11,
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        letterSpacing: '0.03em',
+        fontFamily: FONT.ui,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        animation: 'wisiPulse 1.6s infinite',
+      }}
+    >
+      👁 Return to current generation
+    </button>
+  );
+
   return (
     <nav
       style={{
@@ -107,7 +136,10 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
               {brand}
               <div style={{ width: 34 }} />
             </div>
-            <div style={{ marginTop: 10 }}>{pills}</div>
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {pills}
+              {returnBadge}
+            </div>
           </>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
@@ -115,7 +147,10 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
               {hamburger}
               {brand}
             </div>
-            {pills}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {returnBadge}
+              {pills}
+            </div>
           </div>
         )}
         {menuOpen && (

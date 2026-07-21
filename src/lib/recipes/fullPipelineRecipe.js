@@ -173,7 +173,12 @@ function buildAutomationSettings(channel) {
 export async function runFullPipeline(channel, { userId, onProgress, logStep }) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
-  const report = (step, message) => onProgress?.({ step, message });
+  // Declared here (rather than at their original spot further down) so report() can close over
+  // them from the very first call — both stay null until the phases that create them run, which
+  // is fine: the mirror view (AutomationMirrorStep.jsx) only reads project once phase === 'media'.
+  let videoId = null;
+  let project = null;
+  const report = (step, message) => onProgress?.({ step, message, videoId, project });
 
   // ---- Phase: suggestion ----
   let suggestion;
@@ -212,11 +217,11 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   }
 
   // ---- Phase: video record ----
-  const videoId = createId();
+  videoId = createId();
   const createdAt = Date.now();
   // Shared by every saveVideo call below — reads whatever `project`/`plan` are in scope at call
   // time, so each phase just has to update those two variables before persisting.
-  let project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null };
+  project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null };
   let plan = null;
   const persist = () =>
     saveVideo({
