@@ -97,11 +97,12 @@ export async function generateAllScenes(outline, context, onProgress) {
   return allScenes;
 }
 
-async function callGenerateImage(payload) {
+async function callGenerateImage(payload, signal) {
   const res = await fetch('/api/generate-image', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Image generation failed');
@@ -114,18 +115,22 @@ async function callGenerateImage(payload) {
  * provider: 'pollinations' | 'nanobanana' | 'gptimage'
  * referenceImages: array of data-URI or plain-URL strings, optional
  * opts: { width, height, seed, quality }
+ * signal: optional AbortSignal, forwarded to fetch — omitted by every existing caller (unaffected),
+ * used by mediaGenerationEngine.js's timeout wrapper to actually cancel a hung request rather than
+ * just giving up on waiting for it.
  * Returns { imageUrl, provider, costUsd }. Same one-retry-with-backoff resilience as scene calls.
  */
-export async function generateImage(prompt, provider, referenceImages, opts = {}) {
+export async function generateImage(prompt, provider, referenceImages, opts = {}, signal) {
   const payload = { provider, prompt, referenceImages: referenceImages || [], ...opts };
-  return withRetry(() => callGenerateImage(payload));
+  return withRetry(() => callGenerateImage(payload, signal));
 }
 
-async function callGenerateAudio(payload) {
+async function callGenerateAudio(payload, signal) {
   const res = await fetch('/api/generate-audio', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Audio generation failed');
@@ -137,11 +142,12 @@ async function callGenerateAudio(payload) {
  * text: narration to synthesize
  * voice: MiniMax voice_id
  * opts: { language }
+ * signal: optional AbortSignal, forwarded to fetch — same purpose as generateImage's above.
  * Returns { audioUrl, costUsd }. Same one-retry-with-backoff resilience as scene/image calls.
  */
-export async function generateAudio(text, voice, opts = {}) {
+export async function generateAudio(text, voice, opts = {}, signal) {
   const payload = { text, voice, ...opts };
-  return withRetry(() => callGenerateAudio(payload));
+  return withRetry(() => callGenerateAudio(payload, signal));
 }
 
 /**

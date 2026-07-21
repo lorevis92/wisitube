@@ -21,6 +21,59 @@ import { MINIMAX_VOICES } from '../voiceProviders';
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
 
+const NETWORK_WAIT_POLL_MS = 30000;
+const NETWORK_WAIT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+// Same detection heuristic as mediaGenerationEngine.js's own copy (a real network drop, not an
+// application error) — duplicated rather than shared since this file already duplicates other
+// small, stable constants from elsewhere (YOUTUBE_LANGUAGE_CODES below) and no shared
+// network-error-classification module exists yet.
+function isNetworkError(err) {
+  if (err?.name === 'AbortError') return true;
+  const msg = String(err?.message || err || '');
+  return /Failed to fetch|NetworkError|Load failed|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_NETWORK/i.test(msg);
+}
+
+// Polls navigator.onLine every 30s until it's true or NETWORK_WAIT_TIMEOUT_MS has elapsed.
+// Resolves immediately (true) if already online — a transient blip that already cleared by the
+// time this runs shouldn't cost a 30s wait.
+async function waitForOnline() {
+  const deadline = Date.now() + NETWORK_WAIT_TIMEOUT_MS;
+  while (!navigator.onLine) {
+    if (Date.now() >= deadline) return false;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, NETWORK_WAIT_POLL_MS));
+  }
+  return true;
+}
+
+/**
+ * Runs one recipe phase (phaseFn). mediaGenerationEngine.js/sceneOrchestrator.js already retry an
+ * individual network call a few times on their own — this is the outer, whole-phase-level
+ * fallback for when a Wi-Fi drop outlasts all of that: if phaseFn still fails with a network
+ * error, wait for the browser to report itself back online (polling every 30s, capped at 10
+ * minutes) and retry the ENTIRE phase exactly once more. Any other failure (an application error,
+ * or a second network failure after that one retry) propagates immediately — this is a single
+ * extra chance, not an unbounded loop, so one channel's connectivity problem can't stall the whole
+ * automation cycle.
+ */
+async function withPhaseNetworkResilience(phaseName, channelId, videoId, logStep, phaseFn) {
+  try {
+    return await phaseFn();
+  } catch (err) {
+    if (!isNetworkError(err)) throw err;
+
+    if (!navigator.onLine) {
+      await logStep(channelId, videoId, phaseName, 'retrying', 'network unavailable — waiting for connection to return (up to 10 min)');
+      const cameBack = await waitForOnline();
+      if (!cameBack) throw new Error('network unavailable for over 10 minutes');
+    }
+
+    await logStep(channelId, videoId, phaseName, 'retrying', `network error, retrying phase once: ${err.message}`);
+    return await phaseFn();
+  }
+}
+
 // Same transform App.jsx's buildScenesFromRaw performs on api/generate-scenes.js's raw output —
 // duplicated here rather than imported (App.jsx is a React component, not a shared module; this is
 // a pure data transform with no framework dependency). Its own counters are separate from App.jsx's
@@ -125,24 +178,26 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // ---- Phase: suggestion ----
   let suggestion;
   try {
-    const existingVideos = await listVideosByChannel(channelId);
-    const res = await fetch('/api/program-manager', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        channelName: channel.name,
-        niche: channel.niche || '',
-        editorialNotes: channel.editorialNotes || '',
-        existingVideos: existingVideos.map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
-        refinement: '',
-        creativeOverride: channel.prompt_overrides?.programManager || null,
-      }),
+    suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
+      const existingVideos = await listVideosByChannel(channelId);
+      const res = await fetch('/api/program-manager', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channelName: channel.name,
+          niche: channel.niche || '',
+          editorialNotes: channel.editorialNotes || '',
+          existingVideos: existingVideos.map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
+          refinement: '',
+          creativeOverride: channel.prompt_overrides?.programManager || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Content Program Manager request failed');
+      const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+      if (!suggestions.length) throw new Error('Content Program Manager returned no suggestions');
+      return suggestions.find((s) => s.priority === 'high') || suggestions[0];
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Content Program Manager request failed');
-    const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
-    if (!suggestions.length) throw new Error('Content Program Manager returned no suggestions');
-    suggestion = suggestions.find((s) => s.priority === 'high') || suggestions[0];
     await logStep(
       channelId,
       null,
@@ -176,7 +231,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     });
 
   try {
-    await persist();
+    await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
     await logStep(channelId, videoId, 'video-record', 'success', 'created video record');
     report('video-record', 'Created video record');
   } catch (err) {
@@ -186,59 +241,61 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
 
   // ---- Phase: outline ----
   try {
-    const res = await fetch('/api/generate-outline', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        topic: suggestion.title,
+    await withPhaseNetworkResilience('outline', channelId, videoId, logStep, async () => {
+      const res = await fetch('/api/generate-outline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: suggestion.title,
+          title: suggestion.title,
+          angle: suggestion.angle || '',
+          language: settings.language,
+          lengthMinutes: settings.lengthMinutes,
+          style: STYLES[settings.style].label,
+          imageProvider: settings.imageProvider,
+          characterHints: [],
+          generalNotes: '',
+          references: [],
+          creativeOverride: channel.prompt_overrides?.outline || null,
+        }),
+      });
+      const outlineData = await res.json();
+      if (!res.ok) throw new Error(outlineData.error || 'Outline generation failed');
+
+      const characterBible = (outlineData.character_bible || []).map((c) => ({
+        id: c.id || crypto.randomUUID(),
+        name: c.name || '',
+        baseDescription: c.base_description || '',
+        variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
+      }));
+
+      plan = {
         title: suggestion.title,
         angle: suggestion.angle || '',
-        language: settings.language,
-        lengthMinutes: settings.lengthMinutes,
-        style: STYLES[settings.style].label,
-        imageProvider: settings.imageProvider,
-        characterHints: [],
-        generalNotes: '',
+        description: outlineData.description || '',
+        tags: outlineData.tags || [],
+        thumbnails: outlineData.thumbnail_concepts || [],
+        characterBible,
         references: [],
-        creativeOverride: channel.prompt_overrides?.outline || null,
-      }),
+        outline: outlineData.outline || [],
+        totalScenes: outlineData.total_scenes || 0,
+      };
+
+      project = {
+        titles: [plan.title],
+        selectedTitle: 0,
+        description: plan.description,
+        tags: plan.tags,
+        thumbnails: plan.thumbnails,
+        subtitles: true,
+        references: plan.references,
+        characterBible: plan.characterBible,
+        scenes: [],
+        series: suggestion.series || null,
+      };
+
+      await persist();
     });
-    const outlineData = await res.json();
-    if (!res.ok) throw new Error(outlineData.error || 'Outline generation failed');
-
-    const characterBible = (outlineData.character_bible || []).map((c) => ({
-      id: c.id || crypto.randomUUID(),
-      name: c.name || '',
-      baseDescription: c.base_description || '',
-      variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
-    }));
-
-    plan = {
-      title: suggestion.title,
-      angle: suggestion.angle || '',
-      description: outlineData.description || '',
-      tags: outlineData.tags || [],
-      thumbnails: outlineData.thumbnail_concepts || [],
-      characterBible,
-      references: [],
-      outline: outlineData.outline || [],
-      totalScenes: outlineData.total_scenes || 0,
-    };
-
-    project = {
-      titles: [plan.title],
-      selectedTitle: 0,
-      description: plan.description,
-      tags: plan.tags,
-      thumbnails: plan.thumbnails,
-      subtitles: true,
-      references: plan.references,
-      characterBible: plan.characterBible,
-      scenes: [],
-      series: suggestion.series || null,
-    };
-
-    await persist();
     await logStep(channelId, videoId, 'outline', 'success', `${plan.outline.length} chapters, ${plan.totalScenes} scenes planned`);
     report('outline', 'Outline ready');
   } catch (err) {
@@ -248,26 +305,28 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
 
   // ---- Phase: scenes ----
   try {
-    const context = {
-      topic: suggestion.title,
-      title: plan.title,
-      language: settings.language,
-      style: STYLES[settings.style].label,
-      format: settings.format,
-      imageProvider: settings.imageProvider,
-      characterBible: plan.characterBible,
-      references: [],
-      creativeOverride: channel.prompt_overrides?.scenes || null,
-    };
+    await withPhaseNetworkResilience('scenes', channelId, videoId, logStep, async () => {
+      const context = {
+        topic: suggestion.title,
+        title: plan.title,
+        language: settings.language,
+        style: STYLES[settings.style].label,
+        format: settings.format,
+        imageProvider: settings.imageProvider,
+        characterBible: plan.characterBible,
+        references: [],
+        creativeOverride: channel.prompt_overrides?.scenes || null,
+      };
 
-    const rawScenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
-      report('scenes', `${soFar.length}/${total} scenes written`);
-      project = { ...project, scenes: buildScenesFromRaw(soFar) };
-      persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
+      const rawScenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
+        report('scenes', `${soFar.length}/${total} scenes written`);
+        project = { ...project, scenes: buildScenesFromRaw(soFar) };
+        persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
+      });
+
+      project = { ...project, scenes: buildScenesFromRaw(rawScenes) };
+      await persist();
     });
-
-    project = { ...project, scenes: buildScenesFromRaw(rawScenes) };
-    await persist();
     await logStep(channelId, videoId, 'scenes', 'success', `${project.scenes.length} scenes generated`);
   } catch (err) {
     await logStep(channelId, videoId, 'scenes', 'error', String(err?.message || err));
@@ -276,21 +335,28 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
 
   // ---- Phase: media (images + audio) ----
   try {
-    await generateAllMedia(project, {
-      settings,
-      channelId,
-      userId,
-      videoId,
-      onProgress: (evt) => {
-        project = applyMediaProgress(project, evt);
-        if (evt.kind === 'message' && evt.text) report('media', evt.text);
-      },
+    await withPhaseNetworkResilience('media', channelId, videoId, logStep, async () => {
+      await generateAllMedia(project, {
+        settings,
+        channelId,
+        userId,
+        videoId,
+        onProgress: (evt) => {
+          project = applyMediaProgress(project, evt);
+          if (evt.kind === 'message' && evt.text) report('media', evt.text);
+          // Per-item network retries from mediaGenerationEngine.js's own timeout+retry wrapper —
+          // surfaced here as a 'retrying' log row rather than left as suspicious silence. Fired
+          // before the item's own retry, so it never blocks or replaces the item's eventual
+          // 'beat'/'scene' status update.
+          if (evt.kind === 'retry') logStep(channelId, videoId, 'media', 'retrying', evt.message).catch(() => {});
+        },
+      });
+
+      const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
+      if (!allReady) throw new Error('Some scenes failed to generate media (image or audio)');
+
+      await persist();
     });
-
-    const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
-    if (!allReady) throw new Error('Some scenes failed to generate media (image or audio)');
-
-    await persist();
     await logStep(channelId, videoId, 'media', 'success', 'all images and audio generated');
     report('media', 'Media complete');
   } catch (err) {
@@ -301,11 +367,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // ---- Phase: render ----
   let videoBlob;
   try {
-    videoBlob = await renderVideoForExport(project, settings, {
-      onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
+    await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
+      videoBlob = await renderVideoForExport(project, settings, {
+        onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
+      });
+      project = { ...project, renderedVideoBlob: videoBlob };
+      await persist();
     });
-    project = { ...project, renderedVideoBlob: videoBlob };
-    await persist();
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');
     report('render', 'Render complete');
   } catch (err) {
@@ -319,20 +387,22 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // ---- Phase: thumbnail ----
   let thumbnailBlob;
   try {
-    const concept = plan.thumbnails[0];
-    if (!concept) throw new Error('No thumbnail concept available from the outline');
-    thumbnailBlob = await generateThumbnail(project, {
-      settings,
-      channelId,
-      userId,
-      videoId,
-      thumbIdx: 0,
-      overlayText: concept.overlay_text || '',
-      seed: Math.floor(Math.random() * 999999),
+    await withPhaseNetworkResilience('thumbnail', channelId, videoId, logStep, async () => {
+      const concept = plan.thumbnails[0];
+      if (!concept) throw new Error('No thumbnail concept available from the outline');
+      thumbnailBlob = await generateThumbnail(project, {
+        settings,
+        channelId,
+        userId,
+        videoId,
+        thumbIdx: 0,
+        overlayText: concept.overlay_text || '',
+        seed: Math.floor(Math.random() * 999999),
+      });
+      const thumbnailStoragePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob);
+      project = { ...project, thumbnailStoragePath };
+      await persist();
     });
-    const thumbnailStoragePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob);
-    project = { ...project, thumbnailStoragePath };
-    await persist();
     await logStep(channelId, videoId, 'thumbnail', 'success', 'thumbnail created');
     report('thumbnail', 'Thumbnail ready');
   } catch (err) {
@@ -343,37 +413,39 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // ---- Phase: YouTube ----
   let youtubeVideoId;
   try {
-    const metadata = {
-      title: plan.title,
-      description: plan.description,
-      tags: plan.tags,
-      categoryId: DEFAULT_YOUTUBE_CATEGORY_ID,
-      language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
-      privacyStatus: 'public',
-      scheduleMode: 'now',
-      publishAt: null,
-      madeForKids: false,
-      uploadCaptions: true,
-      addToPlaylist: !!suggestion.series,
-    };
+    const message = await withPhaseNetworkResilience('youtube', channelId, videoId, logStep, async () => {
+      const metadata = {
+        title: plan.title,
+        description: plan.description,
+        tags: plan.tags,
+        categoryId: DEFAULT_YOUTUBE_CATEGORY_ID,
+        language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
+        privacyStatus: 'public',
+        scheduleMode: 'now',
+        publishAt: null,
+        madeForKids: false,
+        uploadCaptions: true,
+        addToPlaylist: !!suggestion.series,
+      };
 
-    // publishToYoutube never throws for a degraded (but non-fatal) thumbnail/captions/playlist
-    // phase — same as the manual UI, where each of those stays independently retryable and doesn't
-    // block the upload that already succeeded. Collected here only to attach a warning to the
-    // 'success' log message, not to fail the phase outright.
-    const subErrors = [];
-    youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
-      channel,
-      metadata,
-      onProgress: (evt) => {
-        if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
-        if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
-      },
+      // publishToYoutube never throws for a degraded (but non-fatal) thumbnail/captions/playlist
+      // phase — same as the manual UI, where each of those stays independently retryable and
+      // doesn't block the upload that already succeeded. Collected here only to attach a warning
+      // to the 'success' log message, not to fail the phase outright.
+      const subErrors = [];
+      youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
+        channel,
+        metadata,
+        onProgress: (evt) => {
+          if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
+          if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
+        },
+      });
+
+      if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
+
+      return subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
     });
-
-    if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
-
-    const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
     await logStep(channelId, videoId, 'youtube', 'success', message);
     report('youtube', 'Published to YouTube');
   } catch (err) {

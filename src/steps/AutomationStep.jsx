@@ -26,6 +26,7 @@ function timeAgo(ts) {
 function statusColor(status) {
   if (status === 'error') return T.primary;
   if (status === 'dry_run') return T.yellow;
+  if (status === 'retrying') return T.yellow;
   if (status === 'skipped') return T.textMuted;
   return T.green;
 }

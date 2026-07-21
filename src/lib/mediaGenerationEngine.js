@@ -13,6 +13,11 @@
 //   { kind: 'beat', sceneId, beatIndex, patch }  — same shape as StoryboardStep's updateImage(sceneId, beatIndex, patch)
 //   { kind: 'scene', sceneId, patch }            — same shape as StoryboardStep's updateScene(sceneId, patch)
 //   { kind: 'message', text }                    — same shape as StoryboardStep's setProgressMsg(text)
+//   { kind: 'retry', message }                   — a network-error retry is about to happen (see
+//                                                   withNetworkRetry below); runFullPipeline turns
+//                                                   this into a logStep(..., 'retrying', ...) row,
+//                                                   the interactive UI just ignores it (no dedicated
+//                                                   handling in StoryboardStep.jsx yet)
 import { STYLES, loadImage, decodeAudio } from './pollinations';
 import { generateSpeech, onLoadProgress, isModelWarm } from './tts';
 import { acquireWakeLock, releaseWakeLock } from './wakeLock';
@@ -23,6 +28,65 @@ import { recordCost } from './db';
 import { uploadMedia } from './mediaStorage';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const GENERATION_TIMEOUT_MS = 45000;
+const UPLOAD_TIMEOUT_MS = 20000;
+// Two retries beyond the first attempt, at 5s then 15s — matches the automation resilience spec.
+const NETWORK_RETRY_DELAYS_MS = [5000, 15000];
+
+// A failure that means the request never really got an answer from the server — dropped Wi-Fi, a
+// DNS lookup that failed, or this file's own timeout below giving up on waiting — as opposed to an
+// application error (400/403 from a provider), where the server DID respond and retrying would
+// just repeat the same rejection.
+function isNetworkError(err) {
+  if (err?.name === 'AbortError') return true;
+  const msg = String(err?.message || err || '');
+  return /Failed to fetch|NetworkError|Load failed|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_NETWORK/i.test(msg);
+}
+
+// Races fn(signal) against a timer that aborts it. fn isn't required to honor the signal (e.g.
+// uploadMedia has no signal support) — even then this stops WAITING after timeoutMs so the caller
+// can retry or give up, rather than hanging forever on a connection that will never resolve.
+function withTimeout(fn, timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return fn(controller.signal)
+    .catch((err) => {
+      if (timedOut) {
+        const timeoutErr = new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s`);
+        timeoutErr.name = 'AbortError';
+        throw timeoutErr;
+      }
+      throw err;
+    })
+    .finally(() => clearTimeout(timer));
+}
+
+/**
+ * Wraps a single network call (image/audio generation, Storage upload) with a timeout and a
+ * retry-with-backoff — but ONLY retries when the failure looks like a network problem (see
+ * isNetworkError above). An application error (bad request, provider rejection) is never retried:
+ * it isn't going to resolve itself. onRetry(attempt, totalAttempts, err), if given, fires right
+ * before each wait so the caller can surface "retrying" somewhere (see the onProgress 'retry'
+ * event this module's callers emit).
+ */
+async function withNetworkRetry(fn, timeoutMs, onRetry) {
+  const totalAttempts = NETWORK_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await withTimeout(fn, timeoutMs);
+    } catch (err) {
+      if (attempt > NETWORK_RETRY_DELAYS_MS.length || !isNetworkError(err)) throw err;
+      const delay = NETWORK_RETRY_DELAYS_MS[attempt - 1];
+      onRetry?.(attempt + 1, totalAttempts, err);
+      await sleep(delay);
+    }
+  }
+}
 
 function blobToDataUri(blob) {
   return new Promise((resolve, reject) => {
@@ -75,11 +139,13 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
     // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
     // natively as referenceImages, same principle already used for Pollinations kontext.
     const referenceImages = reference ? [await blobToDataUri(reference.file)] : [];
-    const { imageUrl, costUsd } = await generateImage(buildImagePrompt(beat, { project, settings }), provider, referenceImages, {
-      ...dims,
-      seed,
-      quality: 'medium',
-    });
+    const imagePrompt = buildImagePrompt(beat, { project, settings });
+    const { imageUrl, costUsd } = await withNetworkRetry(
+      (signal) => generateImage(imagePrompt, provider, referenceImages, { ...dims, seed, quality: 'medium' }, signal),
+      GENERATION_TIMEOUT_MS,
+      (attempt, total, err) =>
+        onProgress?.({ kind: 'retry', message: `Image generation retry ${attempt}/${total} after network error: ${err.message}` })
+    );
     // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
     if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
     await loadImage(imageUrl);
@@ -101,7 +167,12 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
         blobSize: imageBlob?.size,
         blobType: imageBlob?.type,
       });
-      const storagePath = await uploadMedia(userId, videoId, 'scene-image', beat.id, imageBlob);
+      const storagePath = await withNetworkRetry(
+        () => uploadMedia(userId, videoId, 'scene-image', beat.id, imageBlob),
+        UPLOAD_TIMEOUT_MS,
+        (attempt, total, err) =>
+          onProgress?.({ kind: 'retry', message: `Storage upload retry ${attempt}/${total} after network error: ${err.message}` })
+      );
       onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { storagePath, backupFailed: false } });
     } catch (err) {
       console.error('[storage-upload] FAILED', err.message, err);
@@ -127,7 +198,12 @@ export async function generateSceneAudio(scene, { settings, channelId, userId, v
   try {
     let audioBlob;
     if (voiceEngine === 'minimax') {
-      const { audioUrl: remoteUrl, costUsd } = await generateAudio(scene.narration, settings.voice, { language: settings.language });
+      const { audioUrl: remoteUrl, costUsd } = await withNetworkRetry(
+        (signal) => generateAudio(scene.narration, settings.voice, { language: settings.language }, signal),
+        GENERATION_TIMEOUT_MS,
+        (attempt, total, err) =>
+          onProgress?.({ kind: 'retry', message: `Audio generation retry ${attempt}/${total} after network error: ${err.message}` })
+      );
       if (costUsd > 0) await recordCost({ channelId, videoId, provider: 'minimax', type: 'audio', amountUsd: costUsd });
       audioBlob = await (await fetch(remoteUrl)).blob();
     } else {
@@ -157,7 +233,12 @@ export async function generateSceneAudio(scene, { settings, channelId, userId, v
         blobSize: audioBlob?.size,
         blobType: audioBlob?.type,
       });
-      const storagePath = await uploadMedia(userId, videoId, 'scene-audio', scene.id, audioBlob);
+      const storagePath = await withNetworkRetry(
+        () => uploadMedia(userId, videoId, 'scene-audio', scene.id, audioBlob),
+        UPLOAD_TIMEOUT_MS,
+        (attempt, total, err) =>
+          onProgress?.({ kind: 'retry', message: `Storage upload retry ${attempt}/${total} after network error: ${err.message}` })
+      );
       onProgress?.({ kind: 'scene', sceneId: scene.id, patch: { audioStoragePath: storagePath, audioBackupFailed: false } });
     } catch (err) {
       console.error('[storage-upload] FAILED', err.message, err);
