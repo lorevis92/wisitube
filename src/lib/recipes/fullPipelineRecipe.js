@@ -128,10 +128,12 @@ function applyMediaProgress(project, evt) {
   return project;
 }
 
-// Hardcoded until the Automation tab grows dedicated style/language/voice pickers — flagged to the
-// user, same as the YouTube category default below. Mirrors App.jsx's own settings defaults for a
-// brand-new manual video, so automated videos look/sound like what a first-time manual user gets
-// without touching any advanced settings.
+// Still hardcoded until the Automation tab grows dedicated language pickers — flagged to the user,
+// same as the YouTube category default below. Mirrors App.jsx's own settings defaults for a
+// brand-new manual video, so automated videos sound like what a first-time manual user gets
+// without touching any advanced settings. Visual style and voice are configurable per channel now
+// (see buildAutomationSettings below) — these two remaining constants are just their fallback
+// values for channels that have never touched those fields.
 const DEFAULT_STYLE = 'facestick';
 const DEFAULT_LANGUAGE = 'English';
 const DEFAULT_FORMAT = '16:9';
@@ -149,7 +151,7 @@ function buildAutomationSettings(channel) {
   // the engine's own default when it's empty (channels created before this field existed).
   const voice = channel.automation_voice || (voiceEngine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE);
   return {
-    style: DEFAULT_STYLE,
+    style: channel.automation_style || DEFAULT_STYLE,
     language: DEFAULT_LANGUAGE,
     format: DEFAULT_FORMAT,
     imageProvider: channel.automation_image_provider || 'pollinations',

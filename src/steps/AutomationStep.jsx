@@ -5,6 +5,7 @@ import { runAutomationCycle } from '../lib/automationEngine';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
+import { STYLES } from '../lib/pollinations';
 
 // Same fallback CreateStep.jsx uses when switching engines — keeps automation_voice pointing at a
 // voice that's actually valid for whichever automation_voice_engine ends up selected.
@@ -352,6 +353,22 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
                       onBlur={() => persistChannel(c.id)}
                       style={{ ...inputStyle, marginTop: 6 }}
                     />
+                  </div>
+
+                  <div>
+                    <div style={label}>Visual style</div>
+                    <select
+                      value={c.automation_style || 'facestick'}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_style: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      {Object.entries(STYLES).map(([id, s]) => (
+                        <option key={id} value={id}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div>
