@@ -123,15 +123,21 @@ const DRY_RUN_STEPS = [
  * dryRun: true logs the would-be steps without calling any generation/spend/publish API (Phase 1).
  * false actually runs the channel's recipe — real generation, real spend, real YouTube publish.
  * onUpdate({ channelId, channelName, index, total, status }): called once per channel, after that
- * channel's turn is fully resolved (skipped, logged/run, or errored) — status is
- * 'skipped' | 'done' | 'error'.
+ * channel's turn is fully resolved — status is 'skipped' | 'done' | 'error'. For a real cycle, a
+ * channel's "turn" can now cover several videos in a row (see the exhaustion loop below), but this
+ * still fires only once at the end of all of them, not once per video — onProgress (below) is the
+ * one that fires per phase/per video.
  * onProgress({ channelId, channelName, step, message, videoId, project }): live, in-memory
  * phase-level updates while a real (non-dry-run) recipe is running — never fires for dry runs
  * (there's no recipe call to report from) or for skipped channels. Tagged with channel identity
  * here so a single callback can drive global UI state (see App.jsx's currentAutomationRun /
- * AutomationMirrorStep.jsx) without needing to know which channel is currently active.
- * shouldStop(): polled once at the top of each channel's turn (never mid-channel) — returning true
- * ends the cycle immediately without starting the next channel.
+ * AutomationMirrorStep.jsx) without needing to know which channel is currently active. Fires once
+ * per video started, not once per channel — a channel producing several videos in a row emits one
+ * 'starting' (and its own phase sequence) per video.
+ * shouldStop(): polled at the top of each channel's turn AND between videos of the same channel
+ * (see the exhaustion loop below) — never mid-video. Returning true ends the current channel's
+ * turn (finishing whatever video is already in flight) and, on the next channel-loop iteration,
+ * ends the whole cycle without starting another channel.
  */
 export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onProgress, shouldStop = () => false }) {
   const allChannels = await listChannels();
@@ -165,35 +171,73 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
         for (const { step, message } of DRY_RUN_STEPS) {
           await logStep(channel.id, null, step, 'dry_run', message.replace('{provider}', provider));
         }
+        report('done');
       } else {
-        // Pre-flight budget check — the recipe itself only finds out the real cost as it spends it
-        // (via recordCost calls deep inside mediaGenerationEngine.js/thumbnailEngine.js), so this
-        // has to be an estimate computed before any of that runs, not a check against real spend.
-        const budget = Number(channel.automation_daily_budget_usd) || 0;
-        const spent = Number(channel.automation_daily_spend_usd) || 0;
-        const estimate = estimateFullPipelineCost(channel);
-        if (budget > 0 && estimate > budget - spent) {
-          await logStep(channel.id, null, 'budget', 'skipped', 'estimated cost exceeds remaining daily budget');
+        // Exhaust this channel's daily quota before moving on to the next channel: keep generating
+        // videos on it until canRunChannelToday says no (upload cap reached or budget exhausted) or
+        // the caller asks to stop — not just one video then straight to the next channel. `channel`
+        // is reassigned to saveChannel's own return after every video, since
+        // automation_daily_upload_count/automation_daily_spend_usd were just updated and the next
+        // canRunChannelToday/budget check needs to see that, not the stale pre-run values.
+        let videosCompleted = 0;
+        let exhaustionReason = null;
+        while (true) {
+          // Pre-flight budget check — the recipe itself only finds out the real cost as it spends
+          // it (via recordCost calls deep inside mediaGenerationEngine.js/thumbnailEngine.js), so
+          // this has to be an estimate computed before any of that runs, not a check against real
+          // spend. Re-evaluated every iteration since `channel`'s spend just changed.
+          const budget = Number(channel.automation_daily_budget_usd) || 0;
+          const spent = Number(channel.automation_daily_spend_usd) || 0;
+          const estimate = estimateFullPipelineCost(channel);
+          if (budget > 0 && estimate > budget - spent) {
+            exhaustionReason = 'estimated cost exceeds remaining daily budget';
+            break;
+          }
+
+          onProgress?.({ channelId: channel.id, channelName: channel.name, step: 'starting', message: 'Starting run…' });
+          // eslint-disable-next-line no-await-in-loop
+          const result = await recipe(channel, {
+            userId,
+            logStep,
+            onProgress: (evt) => onProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
+          });
+          // A failed run never reaches here (the recipe throws, caught below) — so the upload
+          // count only ever increments for a video that actually finished and published.
+          // eslint-disable-next-line no-await-in-loop
+          channel = await saveChannel({
+            ...channel,
+            automation_daily_upload_count: (Number(channel.automation_daily_upload_count) || 0) + 1,
+            automation_daily_spend_usd: (Number(channel.automation_daily_spend_usd) || 0) + (result.costUsd || 0),
+          });
+          videosCompleted++;
+
+          if (shouldStop()) break;
+          const next = canRunChannelToday(channel);
+          if (!next.ok) {
+            exhaustionReason = next.reason;
+            break;
+          }
+        }
+
+        if (exhaustionReason) {
+          await logStep(
+            channel.id,
+            null,
+            'eligibility',
+            'skipped',
+            `${exhaustionReason} (after ${videosCompleted} video${videosCompleted === 1 ? '' : 's'} this cycle)`
+          );
+        }
+
+        // Zero videos produced this turn (e.g. the budget estimate failed on the very first
+        // attempt) is still a genuine skip, not a "done" — same distinction the pre-existing
+        // single-run code made.
+        if (videosCompleted === 0) {
           report('skipped');
           continue;
         }
-
-        onProgress?.({ channelId: channel.id, channelName: channel.name, step: 'starting', message: 'Starting run…' });
-        const result = await recipe(channel, {
-          userId,
-          logStep,
-          onProgress: (evt) => onProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
-        });
-        // A failed run never reaches here (the recipe throws, caught below) — so the upload count
-        // only ever increments for a video that actually finished and published.
-        channel = await saveChannel({
-          ...channel,
-          automation_daily_upload_count: (Number(channel.automation_daily_upload_count) || 0) + 1,
-          automation_daily_spend_usd: (Number(channel.automation_daily_spend_usd) || 0) + (result.costUsd || 0),
-        });
+        report('done');
       }
-
-      report('done');
     } catch (err) {
       console.error('[automationEngine] channel cycle failed', channel?.id, err);
       await logStep(channel?.id, null, 'cycle', 'error', String(err?.message || err));
