@@ -135,6 +135,9 @@ function fromChannelRow(row) {
     automation_last_reset_date: row.automation_last_reset_date || null,
     automation_daily_upload_count: row.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: row.automation_daily_spend_usd ?? 0,
+    // Defaults to true (opt-out, not opt-in): a channel that's never touched this toggle keeps the
+    // pre-existing behavior of publishing every produced video automatically.
+    automation_auto_publish: row.automation_auto_publish ?? true,
   };
 }
 
@@ -168,6 +171,7 @@ export async function saveChannel(channel) {
     automation_last_reset_date: channel.automation_last_reset_date || todayDateString(),
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,
+    automation_auto_publish: channel.automation_auto_publish ?? true,
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

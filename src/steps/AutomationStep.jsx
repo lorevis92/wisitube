@@ -236,26 +236,49 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
               <div key={c.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 14 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
                   <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</div>
-                  <label
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 11,
-                      fontFamily: FONT.ui,
-                      fontWeight: 700,
-                      textTransform: 'uppercase',
-                      color: T.textSecondary,
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={!!c.automation_enabled}
-                      disabled={running}
-                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_enabled: e.target.checked })}
-                    />
-                    Enabled
-                  </label>
+                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                    <label
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        fontFamily: FONT.ui,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        color: T.textSecondary,
+                      }}
+                      title="When off, produced videos are rendered and saved but never uploaded to YouTube — review and publish them by hand from Storyboard/Editor/Export."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={c.automation_auto_publish !== false}
+                        disabled={running}
+                        onChange={(e) => updateAndSaveImmediately(c.id, { automation_auto_publish: e.target.checked })}
+                      />
+                      Auto-publish to YouTube
+                    </label>
+                    <label
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        fontFamily: FONT.ui,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        color: T.textSecondary,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!c.automation_enabled}
+                        disabled={running}
+                        onChange={(e) => updateAndSaveImmediately(c.id, { automation_enabled: e.target.checked })}
+                      />
+                      Enabled
+                    </label>
+                  </div>
                 </div>
 
                 <div

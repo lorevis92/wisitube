@@ -433,50 +433,60 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // publishing the same video twice. A duplicate public upload is a worse outcome than a failed
   // cycle, so this phase fails immediately on any error (network or not) and asks for a manual
   // check instead of an automatic retry.
-  let youtubeVideoId;
-  try {
-    const metadata = {
-      title: plan.title,
-      description: plan.description,
-      tags: plan.tags,
-      categoryId: DEFAULT_YOUTUBE_CATEGORY_ID,
-      language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
-      privacyStatus: 'public',
-      scheduleMode: 'now',
-      publishAt: null,
-      madeForKids: false,
-      uploadCaptions: true,
-      addToPlaylist: !!suggestion.series,
-    };
+  let youtubeVideoId = null;
+  if (channel.automation_auto_publish === false) {
+    // Auto-publish is off for this channel — the video is already fully produced (render +
+    // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
+    // exactly where a manually-created video would sit: reviewable and independently publishable
+    // by hand from Storyboard/Editor/Export. automation_daily_upload_count still increments in
+    // automationEngine.js after this returns — it counts videos *produced*, not videos published.
+    await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
+    report('youtube', 'Auto-publish disabled — ready for manual review');
+  } else {
+    try {
+      const metadata = {
+        title: plan.title,
+        description: plan.description,
+        tags: plan.tags,
+        categoryId: DEFAULT_YOUTUBE_CATEGORY_ID,
+        language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
+        privacyStatus: 'public',
+        scheduleMode: 'now',
+        publishAt: null,
+        madeForKids: false,
+        uploadCaptions: true,
+        addToPlaylist: !!suggestion.series,
+      };
 
-    // publishToYoutube never throws for a degraded (but non-fatal) thumbnail/captions/playlist
-    // phase — same as the manual UI, where each of those stays independently retryable and
-    // doesn't block the upload that already succeeded. Collected here only to attach a warning
-    // to the 'success' log message, not to fail the phase outright.
-    const subErrors = [];
-    youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
-      channel,
-      metadata,
-      onProgress: (evt) => {
-        if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
-        if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
-      },
-    });
+      // publishToYoutube never throws for a degraded (but non-fatal) thumbnail/captions/playlist
+      // phase — same as the manual UI, where each of those stays independently retryable and
+      // doesn't block the upload that already succeeded. Collected here only to attach a warning
+      // to the 'success' log message, not to fail the phase outright.
+      const subErrors = [];
+      youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
+        channel,
+        metadata,
+        onProgress: (evt) => {
+          if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
+          if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
+        },
+      });
 
-    if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
+      if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 
-    const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
-    await logStep(channelId, videoId, 'youtube', 'success', message);
-    report('youtube', 'Published to YouTube');
-  } catch (err) {
-    if (isNetworkError(err)) {
-      const message =
-        'YouTube publish failed due to a network error — check YouTube Studio manually before retrying, to avoid a duplicate upload.';
-      await logStep(channelId, videoId, 'youtube', 'error', message);
-      throw new Error(message);
+      const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
+      await logStep(channelId, videoId, 'youtube', 'success', message);
+      report('youtube', 'Published to YouTube');
+    } catch (err) {
+      if (isNetworkError(err)) {
+        const message =
+          'YouTube publish failed due to a network error — check YouTube Studio manually before retrying, to avoid a duplicate upload.';
+        await logStep(channelId, videoId, 'youtube', 'error', message);
+        throw new Error(message);
+      }
+      await logStep(channelId, videoId, 'youtube', 'error', String(err?.message || err));
+      throw err;
     }
-    await logStep(channelId, videoId, 'youtube', 'error', String(err?.message || err));
-    throw err;
   }
 
   // Total real spend for this video, from the cost-ledger entries recordCost wrote along the way
