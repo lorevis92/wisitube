@@ -131,6 +131,10 @@ function fromChannelRow(row) {
     automation_daily_budget_usd: row.automation_daily_budget_usd ?? 0,
     automation_image_provider: row.automation_image_provider || 'pollinations',
     automation_voice_engine: row.automation_voice_engine || 'kokoro',
+    // '' (not a fixed voice id) since the right default depends on automation_voice_engine, which
+    // this column doesn't know about — callers (AutomationStep.jsx, fullPipelineRecipe.js) fall
+    // back to a per-engine default when this is empty, same as content_type's own '' default below.
+    automation_voice: row.automation_voice || '',
     automation_length_minutes: row.automation_length_minutes ?? 5,
     automation_last_reset_date: row.automation_last_reset_date || null,
     automation_daily_upload_count: row.automation_daily_upload_count ?? 0,
@@ -167,6 +171,7 @@ export async function saveChannel(channel) {
     automation_daily_budget_usd: channel.automation_daily_budget_usd ?? 0,
     automation_image_provider: channel.automation_image_provider || 'pollinations',
     automation_voice_engine: channel.automation_voice_engine || 'kokoro',
+    automation_voice: channel.automation_voice || '',
     automation_length_minutes: channel.automation_length_minutes ?? 5,
     automation_last_reset_date: channel.automation_last_reset_date || todayDateString(),
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,

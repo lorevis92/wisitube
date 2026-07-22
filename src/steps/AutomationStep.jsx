@@ -3,7 +3,15 @@ import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '..
 import { listChannels, saveChannel, listAutomationLog } from '../lib/db';
 import { runAutomationCycle } from '../lib/automationEngine';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
-import { VOICE_ENGINE_LABELS } from '../lib/voiceProviders';
+import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
+import { KOKORO_VOICES } from '../lib/tts';
+
+// Same fallback CreateStep.jsx uses when switching engines — keeps automation_voice pointing at a
+// voice that's actually valid for whichever automation_voice_engine ends up selected.
+const DEFAULT_KOKORO_VOICE = 'af_heart';
+function defaultVoiceForEngine(engine) {
+  return engine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE;
+}
 
 // Phase 1 only ships one real recipe (see automationEngine.js getRecipeForContentType) — no other
 // content types are invented here ahead of that.
@@ -367,7 +375,13 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
                     <select
                       value={c.automation_voice_engine}
                       disabled={running}
-                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_voice_engine: e.target.value })}
+                      onChange={(e) => {
+                        const engine = e.target.value;
+                        // Switching engines can leave automation_voice pointing at a voice id from
+                        // the other engine's list (e.g. a MiniMax voice while now on Kokoro) — reset
+                        // it to that engine's default in the same update, same as CreateStep.jsx.
+                        updateAndSaveImmediately(c.id, { automation_voice_engine: engine, automation_voice: defaultVoiceForEngine(engine) });
+                      }}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
                       {Object.entries(VOICE_ENGINE_LABELS).map(([id, lbl]) => (
@@ -375,6 +389,32 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
                           {lbl}
                         </option>
                       ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={label}>Voice</div>
+                    <select
+                      value={c.automation_voice || defaultVoiceForEngine(c.automation_voice_engine)}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_voice: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      {c.automation_voice_engine === 'minimax'
+                        ? MINIMAX_VOICES.map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.label}
+                            </option>
+                          ))
+                        : Object.entries(KOKORO_VOICES).map(([group, voices]) => (
+                            <optgroup key={group} label={group}>
+                              {voices.map((v) => (
+                                <option key={v.id} value={v.id}>
+                                  {v.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
                     </select>
                   </div>
                 </div>

@@ -145,13 +145,16 @@ const YOUTUBE_LANGUAGE_CODES = { English: 'en', Italiano: 'it', Español: 'es', 
 
 function buildAutomationSettings(channel) {
   const voiceEngine = channel.automation_voice_engine || 'kokoro';
+  // channel.automation_voice is configurable per channel (AutomationStep.jsx) — only fall back to
+  // the engine's own default when it's empty (channels created before this field existed).
+  const voice = channel.automation_voice || (voiceEngine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE);
   return {
     style: DEFAULT_STYLE,
     language: DEFAULT_LANGUAGE,
     format: DEFAULT_FORMAT,
     imageProvider: channel.automation_image_provider || 'pollinations',
     voiceEngine,
-    voice: voiceEngine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE,
+    voice,
     lengthMinutes: Number(channel.automation_length_minutes) || 5,
   };
 }
