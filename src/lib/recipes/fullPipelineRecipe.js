@@ -107,11 +107,12 @@ function buildScenesFromRaw(rawScenes) {
   });
 }
 
-// Applies one mediaGenerationEngine.js onProgress event to a local project copy — same reducer
-// shape generateSceneMedia uses internally. Needed here because generateAllMedia only reports
-// through onProgress (there's no React state to read back from in a headless caller), and this
-// recipe has to know the final per-beat/per-scene status afterward to detect partial failures
-// generateAllMedia doesn't throw for on its own (a single failed beat just stays 'error', silently).
+// Applies one mediaGenerationEngine.js onProgress event to a local project copy — the same
+// per-beat/per-scene patch shape StoryboardStep.jsx's updateImage/updateScene apply to React state.
+// Needed here because generateAllMedia only reports through onProgress (there's no React state to
+// read back from in a headless caller), and this recipe has to know the final per-beat/per-scene
+// status afterward to detect partial failures generateAllMedia doesn't throw for on its own (a
+// single failed beat just stays 'error', silently).
 function applyMediaProgress(project, evt) {
   if (evt.kind === 'beat') {
     return {
@@ -354,6 +355,16 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
           // before the item's own retry, so it never blocks or replaces the item's eventual
           // 'beat'/'scene' status update.
           if (evt.kind === 'retry') logStep(channelId, videoId, 'media', 'retrying', evt.message).catch(() => {});
+          // Persist the instant a single beat/audio reaches a terminal state (ready or error) —
+          // not just once at the end of the whole phase (see below). generateAllMedia never throws
+          // for an individual item failure, so without this, a mid-phase failure (a provider rate
+          // limit, say) would leave every already-succeeded item's Storage upload orphaned: the
+          // file exists, but the video record is never updated to reference it, since the phase's
+          // own persist() further down only runs once every item has succeeded. Fire-and-forget,
+          // same pattern as the scenes phase above.
+          const beatDone = evt.kind === 'beat' && (evt.patch?.status === 'ready' || evt.patch?.status === 'error');
+          const audioDone = evt.kind === 'scene' && (evt.patch?.audioStatus === 'ready' || evt.patch?.audioStatus === 'error');
+          if (beatDone || audioDone) persist().catch((err) => console.error('[fullPipelineRecipe] partial media save failed', err));
         },
       });
 

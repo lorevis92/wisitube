@@ -5,9 +5,10 @@
 //
 // Every generation step reports through `onProgress` rather than touching React state directly, so
 // this module has no framework dependency — StoryboardStep.jsx translates each event into its own
-// updateImage/updateScene/setProgressMsg calls (see handleProgress there), and a future headless
-// caller (the automation engine, Phase 2) can ignore onProgress entirely and just await the
-// returned data.
+// updateImage/updateScene/setProgressMsg calls (see handleProgress there), and the headless
+// automation recipe (fullPipelineRecipe.js) reduces the same events into its own local project copy
+// instead of ignoring them, since it needs the final per-item status to persist progress and detect
+// partial failures.
 //
 // onProgress event shapes:
 //   { kind: 'beat', sceneId, beatIndex, patch }  — same shape as StoryboardStep's updateImage(sceneId, beatIndex, patch)
@@ -250,39 +251,6 @@ export async function generateSceneAudio(scene, { settings, channelId, userId, v
     onProgress?.({ kind: 'scene', sceneId: scene.id, patch: { audioStatus: 'error', audioError: e?.message || String(e) } });
     return false;
   }
-}
-
-/**
- * Generates every pending media item (narration + both image beats) for a single scene, and
- * returns the fully updated scene object — the interactive UI doesn't call this directly (it uses
- * generateBeatImage/generateSceneAudio individually so status dots update as each item finishes),
- * but a headless caller (no onProgress) can just await the return value. sceneIndex is accepted for
- * callers that want to label progress/log messages by position; this function's own logic doesn't
- * depend on it.
- */
-export async function generateSceneMedia(scene, sceneIndex, { settings, project, channelId, userId, videoId, onProgress } = {}) {
-  let working = { ...scene, images: scene.images.map((im) => ({ ...im })) };
-
-  const applyAndForward = (evt) => {
-    if (evt.kind === 'beat') {
-      working = { ...working, images: working.images.map((im, i) => (i === evt.beatIndex ? { ...im, ...evt.patch } : im)) };
-    } else if (evt.kind === 'scene') {
-      working = { ...working, ...evt.patch };
-    }
-    onProgress?.(evt);
-  };
-
-  if (working.audioStatus !== 'ready') {
-    await generateSceneAudio(working, { settings, channelId, userId, videoId, onProgress: applyAndForward });
-  }
-  for (let b = 0; b < working.images.length; b++) {
-    if (working.images[b].status !== 'ready') {
-      // eslint-disable-next-line no-await-in-loop
-      await generateBeatImage(working, b, { settings, project, channelId, userId, videoId, onProgress: applyAndForward });
-    }
-  }
-
-  return working;
 }
 
 /**
