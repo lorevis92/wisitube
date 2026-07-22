@@ -12,6 +12,7 @@ import {
   listPromptVersions,
 } from '../lib/db';
 import { getMediaUrl } from '../lib/mediaStorage';
+import { listChannelPlaylists } from '../lib/youtubePublishEngine';
 import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
 
 const PROMPT_STAGES = [
@@ -65,6 +66,11 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [historyOpenStage, setHistoryOpenStage] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyItems, setHistoryItems] = useState([]);
+  // Read-only playlist panel — fetched on demand (button click) rather than on mount, since it's
+  // one more YouTube API round-trip that most dashboard visits don't need.
+  const [playlistsOpen, setPlaylistsOpen] = useState(false);
+  const [playlistsLoading, setPlaylistsLoading] = useState(false);
+  const [playlists, setPlaylists] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,6 +169,9 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     setSuggestionsLoading(true);
     setSuggestionsError('');
     try {
+      // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
+      // and returns [] rather than throwing, so this never blocks getting suggestions.
+      const existingPlaylists = await listChannelPlaylists(channel);
       const res = await fetch('/api/program-manager', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -173,6 +182,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
           existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
           refinement: refinementText || '',
           creativeOverride: channel.prompt_overrides?.programManager || null,
+          existingPlaylists,
         }),
       });
       const data = await res.json();
@@ -187,6 +197,21 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       setSuggestionsError(String(e.message || e));
     } finally {
       setSuggestionsLoading(false);
+    }
+  }
+
+  async function togglePlaylists() {
+    if (playlistsOpen) {
+      setPlaylistsOpen(false);
+      return;
+    }
+    setPlaylistsOpen(true);
+    setPlaylistsLoading(true);
+    try {
+      const list = await listChannelPlaylists(channel);
+      setPlaylists(list);
+    } finally {
+      setPlaylistsLoading(false);
     }
   }
 
@@ -292,6 +317,44 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             </button>
           )}
         </div>
+
+        {channel?.youtube_connected && (
+          <div style={{ marginTop: 12 }}>
+            <button onClick={togglePlaylists} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
+              📂 {playlistsOpen ? 'Hide' : 'View'} channel playlists
+            </button>
+            {playlistsOpen && (
+              <div style={{ marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 4, padding: 10, maxHeight: 220, overflowY: 'auto' }}>
+                {playlistsLoading ? (
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>Loading…</div>
+                ) : !playlists || playlists.length === 0 ? (
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>No playlists found on this channel.</div>
+                ) : (
+                  playlists.map((p, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        gap: 10,
+                        padding: '6px 0',
+                        borderTop: i > 0 ? `1px solid ${T.border}` : 'none',
+                        fontSize: 12,
+                        fontFamily: FONT.ui,
+                        color: T.text,
+                      }}
+                    >
+                      <span>{p.name}</span>
+                      <span style={{ ...mono, color: T.textMuted }}>
+                        {p.videoCount} video{p.videoCount === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div style={card}>

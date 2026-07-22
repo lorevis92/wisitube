@@ -278,3 +278,32 @@ export async function publishToYoutube(project, videoBlob, thumbnailBlob, { chan
   console.log('[yt-upload] phase=publishToYoutube:exit');
   return videoId;
 }
+
+/**
+ * Read-only list of the channel's own YouTube playlists (name + video count) — used to give the
+ * Content Program Manager context on existing series (see api/program-manager.js's
+ * existingPlaylists) and to power ChannelDashboardStep.jsx's "View channel playlists" panel.
+ * Shared by both the automation recipe and the manual dashboard rather than duplicated, since
+ * neither owns the YouTube API call itself.
+ *
+ * Returns [] (not a thrown error) whenever there's nothing to show — no refresh token (channel not
+ * connected) or the request itself failed — since this is enrichment/context, not a required step
+ * for whatever's calling it.
+ */
+export async function listChannelPlaylists(channel) {
+  const refreshTokenValue = channel?.youtube_refresh_token;
+  if (!refreshTokenValue) return [];
+  try {
+    const res = await fetch('/api/youtube', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'list-playlists', refreshToken: refreshTokenValue }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not list playlists');
+    return Array.isArray(data.playlists) ? data.playlists : [];
+  } catch (err) {
+    console.error('[youtubePublishEngine] listChannelPlaylists failed', err);
+    return [];
+  }
+}

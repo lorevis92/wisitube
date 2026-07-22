@@ -18,6 +18,30 @@ function defaultVoiceForEngine(engine) {
 // content types are invented here ahead of that.
 const CONTENT_TYPES = [{ value: 'full_pipeline', label: 'Full Pipeline (images)' }];
 
+// Same list as CreateStep.jsx's own local LANGUAGES const — duplicated rather than imported since
+// CreateStep.jsx doesn't export it (small, stable, controlled-duplication pattern already used
+// elsewhere in this codebase, e.g. YOUTUBE_LANGUAGE_CODES in fullPipelineRecipe.js/ExportStep.jsx).
+const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
+
+// Same list as ExportStep.jsx's own local YOUTUBE_CATEGORIES const — duplicated for the same reason.
+const YOUTUBE_CATEGORIES = [
+  { id: '27', label: 'Education' },
+  { id: '28', label: 'Science & Technology' },
+  { id: '24', label: 'Entertainment' },
+  { id: '22', label: 'People & Blogs' },
+  { id: '23', label: 'Comedy' },
+  { id: '25', label: 'News & Politics' },
+  { id: '26', label: 'Howto & Style' },
+  { id: '1', label: 'Film & Animation' },
+  { id: '10', label: 'Music' },
+  { id: '20', label: 'Gaming' },
+  { id: '17', label: 'Sports' },
+  { id: '19', label: 'Travel & Events' },
+  { id: '2', label: 'Autos & Vehicles' },
+  { id: '15', label: 'Pets & Animals' },
+  { id: '29', label: 'Nonprofits & Activism' },
+];
+
 const LOG_POLL_MS = 1500;
 
 function timeAgo(ts) {
@@ -434,6 +458,90 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
                           ))}
                     </select>
                   </div>
+
+                  <div>
+                    <div style={label}>Language</div>
+                    <select
+                      value={c.automation_language || 'English'}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_language: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      {LANGUAGES.map((l) => (
+                        <option key={l} value={l}>
+                          {l}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={label}>Format</div>
+                    <select
+                      value={c.automation_format || '16:9'}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_format: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      <option value="16:9">16:9 (landscape)</option>
+                      <option value="9:16">9:16 (vertical)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={label}>YouTube category</div>
+                    <select
+                      value={c.automation_youtube_category || '27'}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_youtube_category: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6 }}
+                    >
+                      {YOUTUBE_CATEGORIES.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {cat.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 11,
+                      fontFamily: FONT.ui,
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      color: T.textSecondary,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!c.automation_made_for_kids}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_made_for_kids: e.target.checked })}
+                    />
+                    Made for kids
+                  </label>
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 4, lineHeight: 1.5 }}>
+                    Only enable this if the channel is genuinely directed at children — this has real legal implications.
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <div style={label}>Current initiative (optional)</div>
+                  <textarea
+                    value={c.automation_directive || ''}
+                    disabled={running}
+                    onChange={(e) => updateLocalField(c.id, { automation_directive: e.target.value })}
+                    onBlur={() => persistChannel(c.id)}
+                    placeholder="e.g. Make a 5-part series on unusual local customs around the world, one country per video, avoid repeating countries already covered."
+                    rows={2}
+                    style={{ ...inputStyle, marginTop: 6, resize: 'vertical' }}
+                  />
                 </div>
 
                 <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 10 }}>

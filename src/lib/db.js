@@ -136,6 +136,13 @@ function fromChannelRow(row) {
     // back to a per-engine default when this is empty, same as content_type's own '' default below.
     automation_voice: row.automation_voice || '',
     automation_style: row.automation_style || 'facestick',
+    automation_language: row.automation_language || 'English',
+    automation_format: row.automation_format || '16:9',
+    automation_youtube_category: row.automation_youtube_category || '27',
+    automation_made_for_kids: !!row.automation_made_for_kids,
+    // '' = no active directive — a channel that's never set one gets ordinary Content Program
+    // Manager suggestions (see api/program-manager.js's activeDirective handling).
+    automation_directive: row.automation_directive || '',
     automation_length_minutes: row.automation_length_minutes ?? 5,
     automation_last_reset_date: row.automation_last_reset_date || null,
     automation_daily_upload_count: row.automation_daily_upload_count ?? 0,
@@ -174,6 +181,11 @@ export async function saveChannel(channel) {
     automation_voice_engine: channel.automation_voice_engine || 'kokoro',
     automation_voice: channel.automation_voice || '',
     automation_style: channel.automation_style || 'facestick',
+    automation_language: channel.automation_language || 'English',
+    automation_format: channel.automation_format || '16:9',
+    automation_youtube_category: channel.automation_youtube_category || '27',
+    automation_made_for_kids: !!channel.automation_made_for_kids,
+    automation_directive: channel.automation_directive || '',
     automation_length_minutes: channel.automation_length_minutes ?? 5,
     automation_last_reset_date: channel.automation_last_reset_date || todayDateString(),
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,

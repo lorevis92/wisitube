@@ -14,7 +14,7 @@ import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
-import { publishToYoutube } from '../youtubePublishEngine';
+import { publishToYoutube, listChannelPlaylists } from '../youtubePublishEngine';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
@@ -128,12 +128,9 @@ function applyMediaProgress(project, evt) {
   return project;
 }
 
-// Still hardcoded until the Automation tab grows dedicated language pickers — flagged to the user,
-// same as the YouTube category default below. Mirrors App.jsx's own settings defaults for a
-// brand-new manual video, so automated videos sound like what a first-time manual user gets
-// without touching any advanced settings. Visual style and voice are configurable per channel now
-// (see buildAutomationSettings below) — these two remaining constants are just their fallback
-// values for channels that have never touched those fields.
+// Style/language/format/voice/YouTube category/made-for-kids are all configurable per channel now
+// (see buildAutomationSettings and the YouTube phase's metadata below) — these constants are just
+// fallback values for channels that were created before a given field existed.
 const DEFAULT_STYLE = 'facestick';
 const DEFAULT_LANGUAGE = 'English';
 const DEFAULT_FORMAT = '16:9';
@@ -152,8 +149,8 @@ function buildAutomationSettings(channel) {
   const voice = channel.automation_voice || (voiceEngine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE);
   return {
     style: channel.automation_style || DEFAULT_STYLE,
-    language: DEFAULT_LANGUAGE,
-    format: DEFAULT_FORMAT,
+    language: channel.automation_language || DEFAULT_LANGUAGE,
+    format: channel.automation_format || DEFAULT_FORMAT,
     imageProvider: channel.automation_image_provider || 'pollinations',
     voiceEngine,
     voice,
@@ -191,6 +188,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   try {
     suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
       const existingVideos = await listVideosByChannel(channelId);
+      // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
+      // and returns [] rather than throwing, so this never blocks the suggestion phase on its own.
+      const existingPlaylists = await listChannelPlaylists(channel);
       const res = await fetch('/api/program-manager', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -201,6 +201,8 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
           existingVideos: existingVideos.map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
           refinement: '',
           creativeOverride: channel.prompt_overrides?.programManager || null,
+          activeDirective: channel.automation_directive || '',
+          existingPlaylists,
         }),
       });
       const data = await res.json();
@@ -453,12 +455,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
         title: plan.title,
         description: plan.description,
         tags: plan.tags,
-        categoryId: DEFAULT_YOUTUBE_CATEGORY_ID,
+        categoryId: channel.automation_youtube_category || DEFAULT_YOUTUBE_CATEGORY_ID,
         language: YOUTUBE_LANGUAGE_CODES[settings.language] || 'en',
         privacyStatus: 'public',
         scheduleMode: 'now',
         publishAt: null,
-        madeForKids: false,
+        madeForKids: channel.automation_made_for_kids === true,
         uploadCaptions: true,
         addToPlaylist: !!suggestion.series,
       };

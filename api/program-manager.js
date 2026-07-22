@@ -39,7 +39,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let channelName, niche, editorialNotes, videos, refinement, creativeOverride;
+    let channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists;
     try {
       const body = req.body || {};
       channelName = typeof body.channelName === 'string' ? body.channelName.trim() : '';
@@ -59,12 +59,34 @@ export default async function handler(req, res) {
             .filter((v) => v.title || v.topic)
         : [];
       creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+      // Channel owner's standing series/initiative instruction (src/lib/db.js automation_directive)
+      // — takes priority over the general creative direction, see the system prompt below.
+      activeDirective = typeof body.activeDirective === 'string' ? body.activeDirective.trim() : '';
+      // The channel's existing YouTube playlists (src/lib/youtubePublishEngine.js
+      // listChannelPlaylists) — context so suggestions prefer continuing one over always
+      // inventing a new series.
+      existingPlaylists = Array.isArray(body.existingPlaylists)
+        ? body.existingPlaylists
+            .filter((p) => p && typeof p === 'object')
+            .map((p) => ({ name: typeof p.name === 'string' ? p.name.trim() : '', videoCount: Number(p.videoCount) || 0 }))
+            .filter((p) => p.name)
+        : [];
     } catch (err) {
       console.error('[program-manager] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    const systemPrompt = `${creativeOverride || DEFAULT_CREATIVE_DIRECTION} ${SCHEMA_INSTRUCTIONS}`;
+    let systemPrompt = creativeOverride || DEFAULT_CREATIVE_DIRECTION;
+    if (activeDirective) {
+      systemPrompt += ` The channel owner has an active creative directive that takes priority over general suggestions: "${activeDirective}". Your suggestions must primarily serve this directive — check the existing videos list to see what's already been covered under it, and propose the logical next step, not a repeat or an unrelated idea. Only fall back to general channel-growth suggestions if the directive appears fully satisfied by existing content.`;
+    }
+    if (existingPlaylists.length) {
+      const playlistList = existingPlaylists
+        .map((p) => `"${p.name}" (${p.videoCount} video${p.videoCount === 1 ? '' : 's'})`)
+        .join(', ');
+      systemPrompt += ` This channel already has these YouTube playlists: ${playlistList}. When a suggestion is part of a series, prefer continuing one of these existing playlists when relevant, rather than always inventing a brand new one — continuity keeps the channel's series coherent and bingeable.`;
+    }
+    systemPrompt += ` ${SCHEMA_INSTRUCTIONS}`;
 
     const userContent = [
       `Channel name: ${channelName}`,

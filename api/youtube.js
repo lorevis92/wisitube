@@ -15,6 +15,7 @@
 //   action=set-thumbnail    (was api/youtube-set-thumbnail.js)
 //   action=set-captions     (was api/youtube-set-captions.js)
 //   action=add-to-playlist  (was api/youtube-add-to-playlist.js)
+//   action=list-playlists   (read-only: name + video count of the channel's own playlists)
 
 export const config = { maxDuration: 90 };
 
@@ -56,6 +57,8 @@ export default async function handler(req, res) {
       return setCaptions(req, res);
     case 'add-to-playlist':
       return addToPlaylist(req, res);
+    case 'list-playlists':
+      return listPlaylists(req, res);
     default:
       return res.status(400).json({ error: 'Unknown or missing action' });
   }
@@ -862,6 +865,97 @@ async function addToPlaylist(req, res) {
     return res.status(200).json({ playlistId, created });
   } catch (err) {
     console.error('[youtube-add-to-playlist] phase=unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
+
+// ---- action=list-playlists ----
+//
+// Read-only list of the channel's own playlists (name + video count) — used to give the Content
+// Program Manager context on existing series so it prefers continuing one over always inventing a
+// new one (see api/program-manager.js's existingPlaylists), and to power
+// ChannelDashboardStep.jsx's "View channel playlists" panel. Never mutates anything.
+//
+// WisiTube has no server-side storage: the refresh token lives in the browser's IndexedDB (see
+// src/lib/db.js) and is passed in on every call that needs one, including this one.
+//
+// Every phase has its own try/catch so a failure anywhere returns a clear JSON error with a phase
+// tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
+async function listPlaylists(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  // Outer safety net: the phase-specific catches below should handle everything, but this
+  // guarantees we never let an uncaught exception fall through to a platform-level 502.
+  try {
+    // Phase 1: validate the request body.
+    let refreshTokenValue;
+    try {
+      const body = req.body || {};
+      refreshTokenValue = typeof body.refreshToken === 'string' ? body.refreshToken.trim() : '';
+      if (!refreshTokenValue) return res.status(400).json({ error: 'This channel is not connected to YouTube' });
+    } catch (err) {
+      console.error('[youtube-list-playlists] phase=validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    // Phase 2: exchange the refresh token for a fresh access token via our own endpoint.
+    let accessToken;
+    try {
+      const base = req.headers.host ? `https://${req.headers.host}` : APP_URL;
+      const refreshRes = await fetch(`${base}/api/youtube`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'refresh-token', refreshToken: refreshTokenValue }),
+      });
+      const refreshData = await refreshRes.json();
+      if (!refreshRes.ok || !refreshData.accessToken) {
+        throw new Error(refreshData.error || 'Could not refresh the YouTube access token');
+      }
+      accessToken = refreshData.accessToken;
+    } catch (err) {
+      console.error('[youtube-list-playlists] phase=refresh-token', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not refresh YouTube access', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    // Phase 3: page through every playlist on the channel — contentDetails.itemCount is the video
+    // count, snippet.title is the name; that's all either caller (program-manager's prompt context,
+    // the dashboard's read-only panel) needs.
+    let playlists = [];
+    try {
+      let pageToken = '';
+      for (let page = 0; page < MAX_PLAYLIST_PAGES; page++) {
+        const url = new URL('https://www.googleapis.com/youtube/v3/playlists');
+        url.searchParams.set('part', 'snippet,contentDetails');
+        url.searchParams.set('mine', 'true');
+        url.searchParams.set('maxResults', '50');
+        if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+        // eslint-disable-next-line no-await-in-loop
+        const listRes = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+        // eslint-disable-next-line no-await-in-loop
+        const listText = await listRes.text();
+        if (!listRes.ok) {
+          console.error('[youtube-list-playlists] phase=list-http-error status=', listRes.status, 'body=', listText.slice(0, 300));
+          return res.status(502).json({ error: `Could not list playlists (HTTP ${listRes.status})`, detail: listText.slice(0, 300) });
+        }
+        const listData = JSON.parse(listText);
+        playlists.push(
+          ...(listData.items || []).map((p) => ({
+            name: p.snippet?.title || '',
+            videoCount: p.contentDetails?.itemCount ?? 0,
+          }))
+        );
+        pageToken = listData.nextPageToken || '';
+        if (!pageToken) break;
+      }
+    } catch (err) {
+      console.error('[youtube-list-playlists] phase=list-playlists', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not list existing playlists', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    return res.status(200).json({ playlists });
+  } catch (err) {
+    console.error('[youtube-list-playlists] phase=unexpected', err?.message, err?.stack);
     return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
   }
 }
