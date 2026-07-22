@@ -418,6 +418,10 @@ export default function App() {
       // re-fetching a blob: URL that may no longer be valid (see ExportStep.jsx runUpload).
       renderedVideoBlob: record.renderedVideoBlob || null,
       thumbnailStoragePath: record.thumbnailStoragePath || null,
+      // Set once this video is actually published (automation's youtube phase, or a manual upload
+      // from ExportStep) — carried through resume so ExportStep can tell it's already live and
+      // refuse to offer a full re-upload (see its project.youtubeVideoId branch).
+      youtubeVideoId: record.youtubeVideoId || null,
     });
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());

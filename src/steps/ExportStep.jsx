@@ -85,7 +85,11 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   const [ytBusy, setYtBusy] = useState(false);
   const [ytUploadPct, setYtUploadPct] = useState(0);
-  const [ytVideoId, setYtVideoId] = useState('');
+  // Hydrated from the persisted record (see fullPipelineRecipe.js's youtube phase and
+  // handleYtProgress below) rather than always starting empty — a video already published in a
+  // previous session (automation or manual) needs to be recognized as such immediately on mount,
+  // not just after a fresh upload in this one.
+  const [ytVideoId, setYtVideoId] = useState(project.youtubeVideoId || '');
   const [ytErrors, setYtErrors] = useState({}); // { upload, thumbnail, captions, playlist }
   const [ytFormError, setYtFormError] = useState('');
 
@@ -275,8 +279,13 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   function handleYtProgress(evt) {
     if (evt.kind === 'upload-progress') setYtUploadPct(evt.percent);
-    else if (evt.kind === 'video-id') setYtVideoId(evt.videoId);
-    else if (evt.kind === 'error') setYtErrors((prev) => ({ ...prev, [evt.phase]: evt.message }));
+    else if (evt.kind === 'video-id') {
+      setYtVideoId(evt.videoId);
+      // Rides on the project record itself (same pattern as renderedVideoBlob/thumbnailStoragePath
+      // above) so App.jsx's existing debounced autosave persists it — without this, a manual
+      // upload would be just as forgettable on refresh as the automation path used to be.
+      setProject((p) => ({ ...p, youtubeVideoId: evt.videoId }));
+    } else if (evt.kind === 'error') setYtErrors((prev) => ({ ...prev, [evt.phase]: evt.message }));
     else if (evt.kind === 'error-clear') setYtErrors((e) => ({ ...e, [evt.phase]: null }));
   }
 
@@ -620,80 +629,126 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
           {ytFormError && <div style={{ marginTop: 12, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{ytFormError}</div>}
 
-          <div style={{ marginTop: 18 }}>
-            <button
-              onClick={publishToYoutube}
-              disabled={ytBusy || !videoUrl}
-              style={{ ...btnPrimary, padding: '12px 20px', opacity: ytBusy || !videoUrl ? 0.6 : 1 }}
-            >
-              {ytBusy ? 'Publishing…' : ytVideoId ? '↻ Retry remaining steps' : '▲ Upload to YouTube'}
-            </button>
-            {!videoUrl && (
-              <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6 }}>Render the video first.</div>
-            )}
-          </div>
-
-          {(ytBusy || ytVideoId) && !ytErrors.upload && (
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>
-                {ytVideoId ? '✓ Video uploaded' : `Uploading… ${ytUploadPct}%`}
+          {/* Once project.youtubeVideoId is set (from a previous session's automation run or manual
+              upload — see handleYtProgress/fullPipelineRecipe.js's youtube phase), the primary
+              upload action is deliberately gone, not just relabeled: this is the one path that would
+              otherwise let a resumed video be re-uploaded as a duplicate. Only the three finishing
+              steps stay individually retryable, exactly as they already were mid-session. */}
+          {project.youtubeVideoId ? (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ fontSize: 13, fontFamily: FONT.ui, color: T.text }}>
+                ✓ Published —{' '}
+                <a href={`https://youtube.com/watch?v=${project.youtubeVideoId}`} target="_blank" rel="noreferrer" style={{ color: T.primary }}>
+                  View on YouTube →
+                </a>
               </div>
-              {!ytVideoId && (
-                <div style={{ height: 8, background: T.surfaceAlt, borderRadius: 4, overflow: 'hidden' }}>
-                  <div style={{ width: `${ytUploadPct}%`, height: '100%', background: T.primary, transition: 'width 0.3s' }} />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Per-phase failures — the upload can succeed while a later phase fails, so each one
-              gets its own message and its own retry button rather than one blanket error. */}
-          {[
-            { key: 'upload', label: 'Upload' },
-            { key: 'thumbnail', label: 'Thumbnail' },
-            { key: 'captions', label: 'Captions' },
-            { key: 'playlist', label: 'Series playlist' },
-          ].map(
-            ({ key, label: phaseLabel }) =>
-              ytErrors[key] && (
-                <div
-                  key={key}
-                  style={{
-                    marginTop: 10,
-                    padding: 10,
-                    border: `1px solid ${T.primaryBorder}`,
-                    background: T.primaryLight,
-                    borderRadius: 4,
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 10,
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
-                    <strong>{phaseLabel} failed:</strong> {ytErrors[key]}
-                  </div>
-                  <button onClick={() => retryPhase(key)} disabled={ytBusy} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
-                    Retry {phaseLabel.toLowerCase()}
+              <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6, maxWidth: 560, lineHeight: 1.6 }}>
+                This video is already live — re-uploading isn't offered here, to avoid publishing a duplicate. If the
+                thumbnail, captions, or series playlist didn't take, retry just that one step.
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                {[
+                  { key: 'thumbnail', label: 'Thumbnail' },
+                  { key: 'captions', label: 'Captions' },
+                  { key: 'playlist', label: 'Series playlist' },
+                ].map(({ key, label: phaseLabel }) => (
+                  <button key={key} onClick={() => retryPhase(key)} disabled={ytBusy} style={{ ...btnGhost, padding: '8px 14px', fontSize: 12 }}>
+                    {ytBusy ? '…' : `↻ Retry ${phaseLabel.toLowerCase()}`}
                   </button>
-                </div>
-              )
-          )}
-
-          {ytVideoId && !ytErrors.upload && (
-            <div style={{ marginTop: 14, fontSize: 13, fontFamily: FONT.ui, color: T.text }}>
-              {ytScheduleMode === 'schedule' ? (
-                <>⏱ Scheduled — processing, check YouTube Studio.</>
-              ) : (
-                <>
-                  ✓{' '}
-                  <a href={`https://youtube.com/watch?v=${ytVideoId}`} target="_blank" rel="noreferrer" style={{ color: T.primary }}>
-                    View on YouTube →
-                  </a>
-                </>
+                ))}
+              </div>
+              {['thumbnail', 'captions', 'playlist'].map(
+                (key) =>
+                  ytErrors[key] && (
+                    <div
+                      key={key}
+                      style={{ marginTop: 10, padding: 10, border: `1px solid ${T.primaryBorder}`, background: T.primaryLight, borderRadius: 4 }}
+                    >
+                      <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
+                        <strong>{key} failed:</strong> {ytErrors[key]}
+                      </div>
+                    </div>
+                  )
               )}
             </div>
+          ) : (
+            <>
+              <div style={{ marginTop: 18 }}>
+                <button
+                  onClick={publishToYoutube}
+                  disabled={ytBusy || !videoUrl}
+                  style={{ ...btnPrimary, padding: '12px 20px', opacity: ytBusy || !videoUrl ? 0.6 : 1 }}
+                >
+                  {ytBusy ? 'Publishing…' : '▲ Upload to YouTube'}
+                </button>
+                {!videoUrl && (
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6 }}>Render the video first.</div>
+                )}
+              </div>
+
+              {(ytBusy || ytVideoId) && !ytErrors.upload && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>
+                    {ytVideoId ? '✓ Video uploaded' : `Uploading… ${ytUploadPct}%`}
+                  </div>
+                  {!ytVideoId && (
+                    <div style={{ height: 8, background: T.surfaceAlt, borderRadius: 4, overflow: 'hidden' }}>
+                      <div style={{ width: `${ytUploadPct}%`, height: '100%', background: T.primary, transition: 'width 0.3s' }} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Per-phase failures — the upload can succeed while a later phase fails, so each one
+                  gets its own message and its own retry button rather than one blanket error. */}
+              {[
+                { key: 'upload', label: 'Upload' },
+                { key: 'thumbnail', label: 'Thumbnail' },
+                { key: 'captions', label: 'Captions' },
+                { key: 'playlist', label: 'Series playlist' },
+              ].map(
+                ({ key, label: phaseLabel }) =>
+                  ytErrors[key] && (
+                    <div
+                      key={key}
+                      style={{
+                        marginTop: 10,
+                        padding: 10,
+                        border: `1px solid ${T.primaryBorder}`,
+                        background: T.primaryLight,
+                        borderRadius: 4,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 10,
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
+                        <strong>{phaseLabel} failed:</strong> {ytErrors[key]}
+                      </div>
+                      <button onClick={() => retryPhase(key)} disabled={ytBusy} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
+                        Retry {phaseLabel.toLowerCase()}
+                      </button>
+                    </div>
+                  )
+              )}
+
+              {ytVideoId && !ytErrors.upload && (
+                <div style={{ marginTop: 14, fontSize: 13, fontFamily: FONT.ui, color: T.text }}>
+                  {ytScheduleMode === 'schedule' ? (
+                    <>⏱ Scheduled — processing, check YouTube Studio.</>
+                  ) : (
+                    <>
+                      ✓{' '}
+                      <a href={`https://youtube.com/watch?v=${ytVideoId}`} target="_blank" rel="noreferrer" style={{ color: T.primary }}>
+                        View on YouTube →
+                      </a>
+                    </>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

@@ -474,6 +474,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
 
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 
+      // Persisted so a later Storyboard/Editor/Export session (or a resumed browser tab) knows
+      // this video is already live — without this, ExportStep.jsx would have no way to tell and
+      // could re-upload the same video as a duplicate.
+      project = { ...project, youtubeVideoId };
+      await persist();
+
       const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
       await logStep(channelId, videoId, 'youtube', 'success', message);
       report('youtube', 'Published to YouTube');
