@@ -10,6 +10,13 @@ export const PROVIDER_LABELS = {
 };
 
 export const NANOBANANA_PRICES = { '0.5K': 0.06, '1K': 0.08, '2K': 0.12, '4K': 0.16 };
+// Gemini Batch API pricing for image generation (see api/gemini-batch.js) — deliberately separate
+// from NANOBANANA_PRICES above: same underlying model family, but routed directly through Google's
+// batch endpoint instead of fal.ai, at batch's discounted rate. Only the 0.5K tier is priced so far
+// (the resolution this isolated mechanism has actually been tested at) — not wired into the
+// provider-selection dropdowns (PROVIDER_LABELS) yet, since the batch pipeline itself isn't
+// connected to any generation flow until it's been verified via AutomationStep.jsx's test panel.
+export const NANOBANANA_BATCH_PRICES = { '0.5K': 0.0225 };
 export const GPTIMAGE_PRICES = { low: 0.006, medium: 0.053, high: 0.211 };
 // GPT Image 2 always bills high-fidelity input at its maximum rate when a reference image is
 // present, so the estimate/cost gets a flat margin added in that case rather than trying to
@@ -33,6 +40,10 @@ export function priceForImage(provider, { width = 1280, height = 720, quality = 
   if (provider === 'nanobanana') {
     const tier = resolutionTier(width, height);
     return NANOBANANA_PRICES[tier] ?? NANOBANANA_PRICES['1K'];
+  }
+  if (provider === 'nanobanana-batch') {
+    const tier = resolutionTier(width, height);
+    return NANOBANANA_BATCH_PRICES[tier] ?? NANOBANANA_BATCH_PRICES['0.5K'];
   }
   if (provider === 'gptimage') {
     const base = GPTIMAGE_PRICES[quality] ?? GPTIMAGE_PRICES.medium;

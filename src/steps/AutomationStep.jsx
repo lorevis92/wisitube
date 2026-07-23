@@ -76,6 +76,18 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   const stopRequestedRef = useRef(false);
   const pollRef = useRef(null);
 
+  // Gemini Batch API isolated test panel (api/gemini-batch.js) — entirely separate from the
+  // channels/cycle state above; not read by runAutomationCycle or fullPipelineRecipe.js in any way.
+  const [batchPromptsText, setBatchPromptsText] = useState('');
+  const [batchItems, setBatchItems] = useState([]); // [{id, prompt}] captured at submit time
+  const [batchJobId, setBatchJobId] = useState('');
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [batchStatus, setBatchStatus] = useState(null); // { state, googleState, done, raw }
+  const [batchStatusLoading, setBatchStatusLoading] = useState(false);
+  const [batchResults, setBatchResults] = useState(null); // [{id, imageBase64, mimeType, error}]
+  const [batchResultsLoading, setBatchResultsLoading] = useState(false);
+  const [batchError, setBatchError] = useState('');
+
   async function loadChannels() {
     const list = await listChannels();
     setChannels(list);
@@ -199,6 +211,81 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
 
   function channelName(id) {
     return (channels || []).find((c) => c.id === id)?.name || id?.slice(0, 8) || '—';
+  }
+
+  // One line per prompt → { id, prompt }, ids stable within a submission ("test-1", "test-2"...) so
+  // fetchBatchResults can join results back to the textarea line they came from by id.
+  function parseBatchPrompts() {
+    return batchPromptsText
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((prompt, i) => ({ id: `test-${i + 1}`, prompt }));
+  }
+
+  async function submitTestBatch() {
+    const items = parseBatchPrompts();
+    if (!items.length) return;
+    setBatchError('');
+    setBatchSubmitting(true);
+    setBatchStatus(null);
+    setBatchResults(null);
+    setBatchJobId('');
+    try {
+      const res = await fetch('/api/gemini-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'submit', items, resolution: '0.5K' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || 'Submit failed');
+      setBatchItems(items);
+      setBatchJobId(data.jobId);
+    } catch (err) {
+      setBatchError(String(err.message || err));
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }
+
+  async function checkBatchStatus() {
+    if (!batchJobId) return;
+    setBatchError('');
+    setBatchStatusLoading(true);
+    try {
+      const res = await fetch('/api/gemini-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'status', jobId: batchJobId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || 'Status check failed');
+      setBatchStatus(data);
+    } catch (err) {
+      setBatchError(String(err.message || err));
+    } finally {
+      setBatchStatusLoading(false);
+    }
+  }
+
+  async function fetchBatchResults() {
+    if (!batchJobId) return;
+    setBatchError('');
+    setBatchResultsLoading(true);
+    try {
+      const res = await fetch('/api/gemini-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'results', jobId: batchJobId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || 'Fetch results failed');
+      setBatchResults(data.results || []);
+    } catch (err) {
+      setBatchError(String(err.message || err));
+    } finally {
+      setBatchResultsLoading(false);
+    }
   }
 
   if (channels === null) {
@@ -612,6 +699,98 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Isolated Gemini Batch API test panel (api/gemini-batch.js) — deliberately not wired to
+          runAutomationCycle/fullPipelineRecipe.js. Exists only to verify the submit/status/results
+          mechanism (id → image mapping, 0.5K quality) by hand before anything depends on it. */}
+      <div style={card}>
+        <div style={label}>🧪 Gemini Batch API — isolated test panel</div>
+        <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6, lineHeight: 1.6, maxWidth: 640 }}>
+          Submits a small batch of test prompts directly to api/gemini-batch.js — not connected to the automation
+          recipe yet. Use this to confirm each result maps back to the right prompt and that 0.5K quality is good
+          enough before wiring it into the real pipeline.
+        </div>
+
+        <div style={{ marginTop: 14 }}>
+          <div style={label}>Test prompts (one per line)</div>
+          <textarea
+            value={batchPromptsText}
+            onChange={(e) => setBatchPromptsText(e.target.value)}
+            placeholder={'a red bicycle leaning against a brick wall\na cup of coffee on a wooden table\na cat sleeping on a sunny windowsill'}
+            rows={5}
+            style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+          <button
+            onClick={submitTestBatch}
+            disabled={batchSubmitting || !batchPromptsText.trim()}
+            style={{ ...btnPrimary, opacity: batchSubmitting || !batchPromptsText.trim() ? 0.6 : 1 }}
+          >
+            {batchSubmitting ? 'Submitting…' : 'Submit test batch'}
+          </button>
+          <button
+            onClick={checkBatchStatus}
+            disabled={!batchJobId || batchStatusLoading}
+            style={{ ...btnGhost, opacity: !batchJobId ? 0.6 : 1 }}
+          >
+            {batchStatusLoading ? 'Checking…' : 'Check status'}
+          </button>
+          {batchStatus?.state === 'succeeded' && (
+            <button onClick={fetchBatchResults} disabled={batchResultsLoading} style={{ ...btnGhost, opacity: batchResultsLoading ? 0.6 : 1 }}>
+              {batchResultsLoading ? 'Fetching…' : 'Fetch results'}
+            </button>
+          )}
+        </div>
+
+        {batchJobId && <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 10 }}>Job: {batchJobId}</div>}
+        {batchStatus && (
+          <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
+            Status: {batchStatus.state}
+            {batchStatus.googleState ? ` (${batchStatus.googleState})` : ''}
+          </div>
+        )}
+        {batchError && <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 10 }}>{batchError}</div>}
+
+        {batchResults && (
+          <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+            {batchItems.map((item) => {
+              const result = batchResults.find((r) => r.id === item.id);
+              return (
+                <div key={item.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
+                  <div style={{ ...mono, fontSize: 9, color: T.textMuted, marginBottom: 6 }}>{item.id}</div>
+                  <div
+                    style={{
+                      borderRadius: 4,
+                      overflow: 'hidden',
+                      border: `1px solid ${T.border}`,
+                      background: T.surfaceAlt,
+                      aspectRatio: '1/1',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {result?.imageBase64 ? (
+                      <img
+                        src={`data:${result.mimeType || 'image/jpeg'};base64,${result.imageBase64}`}
+                        alt={item.prompt}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
+                    ) : (
+                      <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textAlign: 'center', padding: 8 }}>
+                        {result?.error ? `Error: ${result.error}` : 'No image'}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.4 }}>{item.prompt}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
