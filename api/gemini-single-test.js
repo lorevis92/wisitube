@@ -22,7 +22,10 @@ const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 // Same model as api/gemini-batch.js's DEFAULT_MODEL — kept as a separate literal here on purpose
 // (see file header).
 const MODEL = 'gemini-3.1-flash-image-preview';
-const VALID_IMAGE_SIZES = ['0.5K', '1K', '2K', '4K'];
+// Same mapping as api/gemini-batch.js's IMAGE_SIZE_BY_RESOLUTION — '0.5K' is the label this file's
+// caller uses, but Gemini's imageConfig.imageSize rejects that literal string for the lowest tier;
+// the value it actually accepts there is '512'. '1K'/'2K'/'4K' pass through unchanged.
+const IMAGE_SIZE_BY_RESOLUTION = { '0.5K': '512', '1K': '1K', '2K': '2K', '4K': '4K' };
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -45,7 +48,7 @@ export default async function handler(req, res) {
       prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
       if (!prompt) return res.status(400).json({ error: 'Invalid prompt' });
       resolution = typeof body.resolution === 'string' && body.resolution.trim() ? body.resolution.trim() : '0.5K';
-      if (!VALID_IMAGE_SIZES.includes(resolution)) resolution = '0.5K';
+      if (!IMAGE_SIZE_BY_RESOLUTION[resolution]) resolution = '0.5K';
     } catch (err) {
       console.error('[gemini-single-test] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -57,7 +60,7 @@ export default async function handler(req, res) {
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         responseModalities: ['IMAGE'],
-        imageConfig: { imageSize: resolution },
+        imageConfig: { imageSize: IMAGE_SIZE_BY_RESOLUTION[resolution] },
       },
     };
 

@@ -35,14 +35,14 @@ const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 // falling back to the Pro model here.
 const DEFAULT_MODEL = 'gemini-3.1-flash-image-preview';
 
-// Gemini's imageConfig.imageSize accepts these values literally (confirmed live — an earlier
-// version of this file mistranslated '0.5K' to '512px', which was never actually necessary).
-// Anything else falls back to '0.5K', matching src/lib/imageProviders.js's NANOBANANA_BATCH_PRICES
-// default tier.
-const VALID_IMAGE_SIZES = ['0.5K', '1K', '2K', '4K'];
+// '0.5K' is this file's own (and the UI's) label for the lowest tier — matching
+// src/lib/imageProviders.js's NANOBANANA_BATCH_PRICES key — but Gemini's imageConfig.imageSize
+// rejects that exact string for the lowest tier; the literal value it accepts there is '512'
+// (confirmed live). '1K'/'2K'/'4K' are accepted as-is, no translation needed.
+const IMAGE_SIZE_BY_RESOLUTION = { '0.5K': '512', '1K': '1K', '2K': '2K', '4K': '4K' };
 
 function resolveImageSize(resolution) {
-  return VALID_IMAGE_SIZES.includes(resolution) ? resolution : '0.5K';
+  return IMAGE_SIZE_BY_RESOLUTION[resolution] || IMAGE_SIZE_BY_RESOLUTION['0.5K'];
 }
 
 // Maps whichever "<PREFIX>_STATE_<NAME>" string Google actually sends to this file's own
