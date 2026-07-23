@@ -251,15 +251,26 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
     }
   }
 
+  // Manual edits to the Job ID field void whatever status/results were showing for whichever job
+  // was there before — otherwise pasting a different job id would leave a stale "succeeded" status
+  // (and its results grid) on screen for a job that's no longer the one in the field.
+  function updateBatchJobId(value) {
+    setBatchJobId(value);
+    setBatchStatus(null);
+    setBatchResults(null);
+    setBatchError('');
+  }
+
   async function checkBatchStatus() {
-    if (!batchJobId) return;
+    const jobId = batchJobId.trim();
+    if (!jobId) return;
     setBatchError('');
     setBatchStatusLoading(true);
     try {
       const res = await fetch('/api/gemini-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'status', jobId: batchJobId }),
+        body: JSON.stringify({ action: 'status', jobId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || data.error || 'Status check failed');
@@ -272,14 +283,15 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   }
 
   async function fetchBatchResults() {
-    if (!batchJobId) return;
+    const jobId = batchJobId.trim();
+    if (!jobId) return;
     setBatchError('');
     setBatchResultsLoading(true);
     try {
       const res = await fetch('/api/gemini-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'results', jobId: batchJobId }),
+        body: JSON.stringify({ action: 'results', jobId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || data.error || 'Fetch results failed');
@@ -726,6 +738,20 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
           />
         </div>
 
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>Job ID</div>
+          <input
+            value={batchJobId}
+            onChange={(e) => updateBatchJobId(e.target.value)}
+            placeholder="batches/..."
+            style={{ ...inputStyle, marginTop: 8 }}
+          />
+          <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 4 }}>
+            Filled in automatically after a submit — or paste one from a previous session to check/fetch it without
+            resubmitting.
+          </div>
+        </div>
+
         <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
           <button
             onClick={submitTestBatch}
@@ -736,8 +762,8 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
           </button>
           <button
             onClick={checkBatchStatus}
-            disabled={!batchJobId || batchStatusLoading}
-            style={{ ...btnGhost, opacity: !batchJobId ? 0.6 : 1 }}
+            disabled={!batchJobId.trim() || batchStatusLoading}
+            style={{ ...btnGhost, opacity: !batchJobId.trim() ? 0.6 : 1 }}
           >
             {batchStatusLoading ? 'Checking…' : 'Check status'}
           </button>
@@ -747,8 +773,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
             </button>
           )}
         </div>
-
-        {batchJobId && <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 10 }}>Job: {batchJobId}</div>}
         {batchStatus && (
           <>
             <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
