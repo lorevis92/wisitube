@@ -17,8 +17,8 @@ import { createId, saveVideo, saveYoutubeConnection } from './lib/db';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
 import { supabase } from './lib/supabase';
-import { downloadMediaAsBlob } from './lib/mediaStorage';
 import { resumePendingBatches } from './lib/batchResumption';
+import { rehydrateProjectMedia } from './lib/mediaRehydration';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -352,66 +352,19 @@ export default function App() {
     setGenerationError('');
     setResuming(true);
 
-    const scenes = await Promise.all(
-      (record.scenes || []).map(async (s) => {
-        const images = await Promise.all(
-          (s.images || []).map(async (im) => {
-            if (im.blob) return { ...im, url: im.url || URL.createObjectURL(im.blob) };
-            if (!im.storagePath) return im;
-            try {
-              const blob = await downloadMediaAsBlob(im.storagePath);
-              return { ...im, blob, url: URL.createObjectURL(blob) };
-            } catch (err) {
-              console.error('[handleResume] could not restore scene image from storage', im.storagePath, err);
-              return im;
-            }
-          })
-        );
-
-        let audioBlob = s.audioBlob;
-        let audioUrl = s.audioUrl;
-        if (audioBlob) {
-          audioUrl = audioUrl || URL.createObjectURL(audioBlob);
-        } else if (s.audioStoragePath) {
-          try {
-            audioBlob = await downloadMediaAsBlob(s.audioStoragePath);
-            audioUrl = URL.createObjectURL(audioBlob);
-          } catch (err) {
-            console.error('[handleResume] could not restore scene audio from storage', s.audioStoragePath, err);
-          }
-        }
-
-        return { ...s, images, audioBlob, audioUrl };
-      })
-    );
-
-    // Reference photos are stripped the same way — only needed again if the user regenerates a
-    // beat that anchors to one, so restore them here too rather than lazily in StoryboardStep.
-    const references = await Promise.all(
-      (record.references || []).map(async (r) => {
-        if (r.file || !r.storagePath) return r;
-        try {
-          const file = await downloadMediaAsBlob(r.storagePath);
-          return { ...r, file };
-        } catch (err) {
-          console.error('[handleResume] could not restore reference photo from storage', r.storagePath, err);
-          return r;
-        }
-      })
-    );
-
-    if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile
-
-    let resumedProject = {
+    // Rebuilds usable blob: URLs for every ready image/audio/reference from their Supabase Storage
+    // backups — shared with fullPipelineRecipe.js's automation-resume path (see
+    // src/lib/mediaRehydration.js), since blob: URLs never survive a reload either way.
+    let resumedProject = await rehydrateProjectMedia({
       titles: record.titles || [],
       selectedTitle: record.selectedTitle || 0,
       description: record.description || '',
       tags: record.tags || [],
       thumbnails: record.thumbnails || [],
       subtitles: !!record.subtitles,
-      references,
+      references: record.references || [],
       characterBible: record.characterBible || [],
-      scenes,
+      scenes: record.scenes || [],
       series: record.series || null,
       // Not rebuilt into an object URL here (unlike images/audio above) — ExportStep does that
       // itself on mount, since it also needs the raw Blob for a same-mount YouTube upload without
@@ -424,7 +377,9 @@ export default function App() {
       youtubeVideoId: record.youtubeVideoId || null,
       pendingImageBatches: record.pendingImageBatches || [],
       batchRecoveryCycles: record.batchRecoveryCycles || 0,
-    };
+    });
+
+    if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile
 
     // Reopening a video with Gemini Batch jobs still in flight must never show whatever was true
     // the moment the tab closed — check on every batch this video has outstanding (and fill any
@@ -436,6 +391,7 @@ export default function App() {
         resumedProject = await resumePendingBatches(resumedProject, {
           userId: session?.user?.id,
           videoId: record.id,
+          channelId: record.channelId,
           settings: record.settings || settings,
           persist: (proj) =>
             saveVideo({
@@ -463,7 +419,7 @@ export default function App() {
     // Resume only ever happens from within a channel's dashboard, so currentChannelId is already
     // set — this just guards against staleness (e.g. a video record whose channelId differs).
     if (record.channelId) setCurrentChannelId(record.channelId);
-    const hasAllMedia = scenes.length > 0 && scenes.every(isSceneMediaReady);
+    const hasAllMedia = resumedProject.scenes.length > 0 && resumedProject.scenes.every(isSceneMediaReady);
     setTab(hasAllMedia ? 'editor' : 'storyboard');
     setResuming(false);
   }

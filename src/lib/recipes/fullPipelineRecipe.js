@@ -14,6 +14,7 @@ import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
 import { generateAllMediaViaBatch } from '../geminiBatchImageEngine';
 import { resumePendingBatches } from '../batchResumption';
+import { rehydrateProjectMedia } from '../mediaRehydration';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube, listChannelPlaylists } from '../youtubePublishEngine';
@@ -248,7 +249,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   if (resumable) {
     videoId = resumable.id;
     createdAt = resumable.createdAt || Date.now();
-    project = resumable;
+    // blob: URLs never survive a reload — a beat/audio that finished on an earlier cycle (in a
+    // browser session that's since closed) has a storagePath but a dead url/audioUrl string.
+    // Rehydrating here, before anything below checks readiness or touches render/thumbnail/
+    // YouTube, means those phases always see valid, loadable media regardless of which session
+    // each piece was actually completed in.
+    project = await rehydrateProjectMedia(resumable);
     plan = {
       title: resumable.displayTitle || resumable.topic || '',
       description: resumable.description || '',
