@@ -394,11 +394,17 @@ async function results(req, res, apiKey) {
       const imagePart = candidateParts.find((p) => p?.inline_data || p?.inlineData);
       const inlineData = imagePart?.inline_data || imagePart?.inlineData || null;
 
+      // item.error is whatever shape Gemini sent for this one request — commonly
+      // { code, message, status, details: [...] } — but "Request contains an invalid argument" is
+      // exactly the kind of message that means nothing without the rest of that object (which
+      // field, which value). error stays a short string for at-a-glance status; errorDetail carries
+      // the whole thing, untruncated, so the actual cause is visible instead of guessed at again.
       return {
         id: key || `unmatched-${index}`,
         imageBase64: inlineData?.data || null,
         mimeType: inlineData?.mime_type || inlineData?.mimeType || 'image/jpeg',
-        error: item?.error ? String(item.error?.message || JSON.stringify(item.error)).slice(0, 300) : null,
+        error: item?.error ? item.error?.message || 'Request failed' : null,
+        errorDetail: item?.error || null,
       };
     });
 

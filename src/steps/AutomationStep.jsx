@@ -84,7 +84,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchStatus, setBatchStatus] = useState(null); // { state, googleState, stateSource, done, raw }
   const [batchStatusLoading, setBatchStatusLoading] = useState(false);
-  const [batchResults, setBatchResults] = useState(null); // [{id, imageBase64, mimeType, error}]
+  const [batchResults, setBatchResults] = useState(null); // [{id, imageBase64, mimeType, error, errorDetail}]
   const [batchResultsLoading, setBatchResultsLoading] = useState(false);
   const [batchError, setBatchError] = useState('');
   // Raw status response viewer — collapsed by default, here so a status-mapping mismatch can be
@@ -819,6 +819,26 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
                     )}
                   </div>
                   <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.4 }}>{item.prompt}</div>
+                  {result?.errorDetail && (
+                    <pre
+                      style={{
+                        marginTop: 8,
+                        padding: 8,
+                        background: T.primaryLight,
+                        border: `1px solid ${T.primaryBorder}`,
+                        borderRadius: 4,
+                        fontSize: 10,
+                        lineHeight: 1.5,
+                        color: T.primary,
+                        maxHeight: 200,
+                        overflow: 'auto',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {JSON.stringify(result.errorDetail, null, 2)}
+                    </pre>
+                  )}
                 </div>
               );
             })}
