@@ -26,11 +26,14 @@
 export const config = { maxDuration: 60 };
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-// Documented batch-capable image generation model (ai.google.dev/gemini-api/docs/batch-api) — NOT
-// "gemini-3.1-flash-image" (the name floated when this file was speced); that string doesn't
-// appear in Google's docs. Change here in one place if Google ships a flash-tier batch image model
-// under a different name later.
-const DEFAULT_MODEL = 'gemini-3-pro-image-preview';
+// Nano Banana 2 Flash — the cheap tier ($0.067/image standard) confirmed available and active even
+// though the Batch API docs page (ai.google.dev/gemini-api/docs/batch-api) doesn't explicitly list
+// it, likely a stale page rather than an actual restriction. NOT "gemini-3-pro-image-preview" (the
+// Pro tier, $0.134/image) — that was this file's original placeholder while only the Pro name
+// showed up in the fetched batch docs. If Gemini ever rejects this model with an error explicitly
+// saying it isn't supported by the Batch API, that exact message needs to be reported back before
+// falling back to the Pro model here.
+const DEFAULT_MODEL = 'gemini-3.1-flash-image-preview';
 
 // '0.5K' (this file's own default, matching src/lib/imageProviders.js's NANOBANANA_BATCH_PRICES
 // key) maps to the documented image_size enum value for a ~512px output. '1K'/'2K'/'4K' are passed
