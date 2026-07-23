@@ -82,11 +82,14 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   const [batchItems, setBatchItems] = useState([]); // [{id, prompt}] captured at submit time
   const [batchJobId, setBatchJobId] = useState('');
   const [batchSubmitting, setBatchSubmitting] = useState(false);
-  const [batchStatus, setBatchStatus] = useState(null); // { state, googleState, done, raw }
+  const [batchStatus, setBatchStatus] = useState(null); // { state, googleState, stateSource, done, raw }
   const [batchStatusLoading, setBatchStatusLoading] = useState(false);
   const [batchResults, setBatchResults] = useState(null); // [{id, imageBase64, mimeType, error}]
   const [batchResultsLoading, setBatchResultsLoading] = useState(false);
   const [batchError, setBatchError] = useState('');
+  // Raw status response viewer — collapsed by default, here so a status-mapping mismatch can be
+  // diagnosed straight from the browser instead of needing Vercel's server logs.
+  const [batchRawOpen, setBatchRawOpen] = useState(false);
 
   async function loadChannels() {
     const list = await listChannels();
@@ -747,10 +750,40 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
 
         {batchJobId && <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 10 }}>Job: {batchJobId}</div>}
         {batchStatus && (
-          <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
-            Status: {batchStatus.state}
-            {batchStatus.googleState ? ` (${batchStatus.googleState})` : ''}
-          </div>
+          <>
+            <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
+              Status: {batchStatus.state}
+              {batchStatus.googleState ? ` (${batchStatus.googleState})` : ''}
+            </div>
+            {batchStatus.stateSource && (
+              <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 2 }}>Source: {batchStatus.stateSource}</div>
+            )}
+            <button
+              onClick={() => setBatchRawOpen((v) => !v)}
+              style={{ background: 'none', border: 'none', padding: 0, marginTop: 6, fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase', cursor: 'pointer' }}
+            >
+              {batchRawOpen ? 'Hide raw response ▲' : 'Show raw response ▼'}
+            </button>
+            {batchRawOpen && (
+              <pre
+                style={{
+                  marginTop: 8,
+                  padding: 10,
+                  background: T.surfaceAlt,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 4,
+                  fontSize: 10,
+                  lineHeight: 1.5,
+                  maxHeight: 320,
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {JSON.stringify(batchStatus.raw, null, 2)}
+              </pre>
+            )}
+          </>
         )}
         {batchError && <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 10 }}>{batchError}</div>}
 

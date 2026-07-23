@@ -72,6 +72,27 @@ function mapGoogleState(googleState) {
   return `unknown: ${googleState}`;
 }
 
+// Recursively scans the whole parsed status response for any string value shaped like
+// "<PREFIX>_STATE_<NAME>", instead of trusting one or two hardcoded field paths (data.state,
+// data.metadata.state) — a job reported as BATCH_STATE_SUCCEEDED that this file still labeled
+// "failed" means at least one of those assumed paths is wrong, and guessing at a third path would
+// just repeat the same mistake. Returns { path, value } for the first match found (depth-first,
+// object key order), or null if nothing matches anywhere in the payload.
+function findStateAnywhere(obj, path = '') {
+  if (!obj || typeof obj !== 'object') return null;
+  for (const [k, v] of Object.entries(obj)) {
+    const currentPath = path ? `${path}.${k}` : k;
+    if (typeof v === 'string' && /^(BATCH_STATE_|JOB_STATE_)[A-Z_]+$/.test(v)) {
+      return { path: currentPath, value: v };
+    }
+    if (v && typeof v === 'object') {
+      const found = findStateAnywhere(v, currentPath);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -259,17 +280,35 @@ async function status(req, res, apiKey) {
       return res.status(502).json({ error: 'Gemini returned a non-JSON response', detail: rawText.slice(0, 500) });
     }
 
-    // The docs' own jq example reads .metadata.state as the primary path — checked first, with a
-    // bare top-level `state` and a done/error-derived fallback so this doesn't just guess wrong
-    // silently on a job that's actually finished.
-    const googleState =
-      data?.metadata?.state || data?.state || (data?.done ? (data?.error ? 'BATCH_STATE_FAILED' : 'BATCH_STATE_SUCCEEDED') : 'BATCH_STATE_PENDING');
+    // TEMPORARY — full, untruncated dump of exactly what Google returned, requested explicitly
+    // after a live job that was actually BATCH_STATE_SUCCEEDED still showed "failed": the previous
+    // fix guessed at data.state / data.metadata.state without confirming either path was real.
+    // Remove once the real path is confirmed and findStateAnywhere below is proven reliable.
+    console.log('[gemini-batch] phase=status-raw-dump', jobId, JSON.stringify(data));
 
-    console.log('[gemini-batch] phase=status', { jobId, done: !!data?.done, googleState, hasResponse: !!data?.response, hasError: !!data?.error });
+    // Scans the entire response for a BATCH_STATE_*/JOB_STATE_* string anywhere in it, rather than
+    // trusting one or two assumed paths — see findStateAnywhere's own comment for why.
+    const found = findStateAnywhere(data);
+    let googleState;
+    let stateSource;
+    if (found) {
+      googleState = found.value;
+      stateSource = found.path;
+    } else {
+      // No explicit state string anywhere in the payload at all — fall back to a done/error-based
+      // guess, but only as a last resort, and logged loudly as exactly that (a guess, not an
+      // observed value). data.error can be a present-but-empty object ({}) on a genuine success —
+      // that's truthy in JS, so it's checked for actual content, not just presence.
+      const hasRealError = data?.error && (typeof data.error !== 'object' || Object.keys(data.error).length > 0);
+      googleState = data?.done ? (hasRealError ? 'BATCH_STATE_FAILED' : 'BATCH_STATE_SUCCEEDED') : 'BATCH_STATE_PENDING';
+      stateSource = 'inferred from done/error (no explicit state field found)';
+    }
+
+    console.log('[gemini-batch] phase=status', { jobId, done: !!data?.done, googleState, stateSource, hasError: !!data?.error });
 
     const state = mapGoogleState(googleState);
 
-    return res.status(200).json({ state, googleState, done: !!data?.done, raw: data });
+    return res.status(200).json({ state, googleState, stateSource, done: !!data?.done, raw: data });
   } catch (err) {
     console.error('[gemini-batch] phase=status-unexpected', err?.message, err?.stack);
     return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
