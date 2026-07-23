@@ -4,17 +4,17 @@
 // CRITICAL: this is a Serverless Function: handler(req, res) + res.status().json().
 // Never convert to Edge (runtime: 'edge' / new Response()) — the two APIs are incompatible.
 //
-// Schema below is built from https://ai.google.dev/gemini-api/docs/batch-api and
-// https://ai.google.dev/gemini-api/docs/image-generation, fetched while writing this file — not
-// invented. Two honest caveats about that source, both defended against with logging/fallbacks
-// rather than silent guessing, since this is exactly what the isolated test panel exists to
-// surface before anything depends on it:
-//   1. Casing: the outer batch envelope (display_name/input_config/file_name/requests/request/
-//      metadata/key) and the image-generation config (response_format/image_size/mime_type) are
-//      both documented in snake_case, which is what this file sends. If the live API actually
-//      expects camelCase for some of these, Gemini's own 400 error body is returned verbatim to
-//      the caller (see the http-error branches below) — that error text is the fastest way to
-//      correct a wrong field name, faster than re-reading docs.
+// Schema below started from https://ai.google.dev/gemini-api/docs/batch-api and
+// https://ai.google.dev/gemini-api/docs/image-generation, then corrected against what Gemini
+// actually accepts once this was live-tested through the isolated test panel — exactly what that
+// panel exists for. Two things learned so far, not guessed:
+//   1. Casing is mixed, not uniform: the outer batch envelope really is snake_case
+//      (display_name/input_config/file_name/requests/request/metadata/key — this part matched the
+//      docs and has never errored), but the inner GenerateContentRequest's image-generation config
+//      is the standard camelCase used by the rest of the Gemini API — generationConfig /
+//      responseModalities / imageConfig / imageSize. An earlier version of this file sent a
+//      snake_case response_format/image_size/mime_type block there, which Gemini rejected outright
+//      with "Cannot find field" — that's what forced this correction.
 //   2. Per-item result mapping: the docs describe "metadata.key" round-tripping a request's custom
 //      key into its result, but no single worked example shows a populated result item. `results`
 //      below checks metadata.key, then a bare key, before falling back to array position — and
@@ -35,13 +35,14 @@ const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 // falling back to the Pro model here.
 const DEFAULT_MODEL = 'gemini-3.1-flash-image-preview';
 
-// '0.5K' (this file's own default, matching src/lib/imageProviders.js's NANOBANANA_BATCH_PRICES
-// key) maps to the documented image_size enum value for a ~512px output. '1K'/'2K'/'4K' are passed
-// through as-is — the docs show those as valid image_size values directly.
-const IMAGE_SIZE_BY_RESOLUTION = { '0.5K': '512px', '1K': '1K', '2K': '2K', '4K': '4K' };
+// Gemini's imageConfig.imageSize accepts these values literally (confirmed live — an earlier
+// version of this file mistranslated '0.5K' to '512px', which was never actually necessary).
+// Anything else falls back to '0.5K', matching src/lib/imageProviders.js's NANOBANANA_BATCH_PRICES
+// default tier.
+const VALID_IMAGE_SIZES = ['0.5K', '1K', '2K', '4K'];
 
 function resolveImageSize(resolution) {
-  return IMAGE_SIZE_BY_RESOLUTION[resolution] || IMAGE_SIZE_BY_RESOLUTION['0.5K'];
+  return VALID_IMAGE_SIZES.includes(resolution) ? resolution : '0.5K';
 }
 
 export default async function handler(req, res) {
@@ -112,9 +113,9 @@ async function submit(req, res, apiKey) {
       const requests = items.map((it) => ({
         request: {
           contents: [{ parts: [{ text: it.prompt }] }],
-          generation_config: {
-            response_modalities: ['TEXT', 'IMAGE'],
-            response_format: { type: 'image', image_size: imageSize, mime_type: 'image/jpeg' },
+          generationConfig: {
+            responseModalities: ['IMAGE'],
+            imageConfig: { imageSize },
           },
         },
         metadata: { key: it.id },
