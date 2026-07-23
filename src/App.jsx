@@ -18,6 +18,7 @@ import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
 import { supabase } from './lib/supabase';
 import { downloadMediaAsBlob } from './lib/mediaStorage';
+import { resumePendingBatches } from './lib/batchResumption';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -401,8 +402,7 @@ export default function App() {
 
     if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile
 
-    setSettings(record.settings || settings);
-    setProject({
+    let resumedProject = {
       titles: record.titles || [],
       selectedTitle: record.selectedTitle || 0,
       description: record.description || '',
@@ -422,7 +422,42 @@ export default function App() {
       // from ExportStep) — carried through resume so ExportStep can tell it's already live and
       // refuse to offer a full re-upload (see its project.youtubeVideoId branch).
       youtubeVideoId: record.youtubeVideoId || null,
-    });
+      pendingImageBatches: record.pendingImageBatches || [],
+      batchRecoveryCycles: record.batchRecoveryCycles || 0,
+    };
+
+    // Reopening a video with Gemini Batch jobs still in flight must never show whatever was true
+    // the moment the tab closed — check on every batch this video has outstanding (and fill any
+    // gap left by a job that failed, or never got submitted before an earlier close) before the
+    // user ever sees it. A video with no pending batches skips this entirely — it's not a recovery
+    // check for ordinary generation failures, only for the batch mechanism specifically.
+    if (resumedProject.pendingImageBatches.length > 0) {
+      try {
+        resumedProject = await resumePendingBatches(resumedProject, {
+          userId: session?.user?.id,
+          videoId: record.id,
+          settings: record.settings || settings,
+          persist: (proj) =>
+            saveVideo({
+              id: record.id,
+              channelId: record.channelId,
+              createdAt: record.createdAt,
+              updatedAt: Date.now(),
+              topic: record.topic,
+              settings: record.settings || settings,
+              ...proj,
+              displayTitle: record.displayTitle,
+            }),
+        });
+      } catch (err) {
+        console.error('[handleResume] resumePendingBatches failed', err);
+      }
+    }
+
+    if (generationRef.current !== generation) return; // resumePendingBatches can take a while — recheck
+
+    setSettings(record.settings || settings);
+    setProject(resumedProject);
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
     // Resume only ever happens from within a channel's dashboard, so currentChannelId is already

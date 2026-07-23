@@ -103,7 +103,9 @@ function blobToDataUri(blob) {
 // Pollinations gets the compact, telegraphic style (its model needs unambiguous fragments);
 // Nano Banana 2 / GPT Image 2 get full natural-language sentences, with the character's name
 // used as an explicit semantic anchor when one applies.
-function buildImagePrompt(beat, { project, settings }) {
+// Exported so src/lib/geminiBatchImageEngine.js can build the same prompt for a batch-submitted
+// beat instead of duplicating the character-bible/style logic.
+export function buildImagePrompt(beat, { project, settings }) {
   const hasReference = !!(beat.referenceId && (project.references || []).some((r) => r.id === beat.referenceId));
   let character = null;
   let traits = '';
