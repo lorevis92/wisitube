@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listChannels, saveChannel, listAutomationLog } from '../lib/db';
 import { runAutomationCycle } from '../lib/automationEngine';
-import { PROVIDER_LABELS } from '../lib/imageProviders';
+import { PROVIDER_LABELS, AUTOMATION_ONLY_PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
 import { STYLES } from '../lib/pollinations';
@@ -539,6 +539,11 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
                       {Object.entries(PROVIDER_LABELS).map(([id, lbl]) => (
+                        <option key={id} value={id}>
+                          {lbl}
+                        </option>
+                      ))}
+                      {Object.entries(AUTOMATION_ONLY_PROVIDER_LABELS).map(([id, lbl]) => (
                         <option key={id} value={id}>
                           {lbl}
                         </option>

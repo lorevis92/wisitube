@@ -11,6 +11,8 @@
 // removed from pendingImageBatches must not go unpersisted just because a *later* job in the same
 // call then fails to process.
 import { uploadMedia } from './mediaStorage';
+import { recordCost } from './db';
+import { NANOBANANA_BATCH_PRICES } from './imageProviders';
 import { parseBeatKey, collectPendingBeatItems, submitImageBatchChunk } from './geminiBatchImageEngine';
 
 // Safety ceiling on point 3's auto-regeneration loop — if a beat's prompt is systematically
@@ -73,9 +75,13 @@ async function fetchBatchResultsFor(jobId) {
 // to Storage on success, 'error' on a per-item failure (see api/gemini-batch.js's results action:
 // a job can succeed overall while individual items still failed). Storage upload failure doesn't
 // downgrade the beat from ready — same "never blocks on backup" convention as
-// mediaGenerationEngine.js's generateBeatImage/generateSceneAudio.
-async function applyBatchResults(project, results, { userId, videoId, onProgress }) {
+// mediaGenerationEngine.js's generateBeatImage/generateSceneAudio. Every successfully downloaded
+// image records its cost against the channel, same pattern (recordCost) every other image provider
+// already uses — resolution comes from the job's own pendingImageBatches entry, not a guess.
+async function applyBatchResults(project, results, { userId, videoId, channelId, resolution, onProgress }) {
   let current = project;
+  const costPerImage = NANOBANANA_BATCH_PRICES[resolution] ?? NANOBANANA_BATCH_PRICES['0.5K'];
+
   for (const r of results) {
     const parsed = parseBeatKey(r.id);
     if (!parsed) {
@@ -96,6 +102,14 @@ async function applyBatchResults(project, results, { userId, videoId, onProgress
         } catch (err) {
           console.error('[batchResumption] storage upload failed', sceneId, beatIndex, err);
           backupFailed = true;
+        }
+        if (costPerImage > 0 && channelId) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await recordCost({ channelId, videoId, provider: 'nanobanana-batch', type: 'image', amountUsd: costPerImage });
+          } catch (err) {
+            console.error('[batchResumption] recordCost failed', sceneId, beatIndex, err);
+          }
         }
         const patch = { status: 'ready', url, blob, storagePath, backupFailed };
         current = applyBeatPatch(current, sceneId, beatIndex, patch);
@@ -120,6 +134,8 @@ async function applyBatchResults(project, results, { userId, videoId, onProgress
  * project: the full project object (scenes, pendingImageBatches, characterBible, references…) —
  * same shape App.jsx/fullPipelineRecipe.js already pass around.
  * userId/videoId: needed for Supabase Storage paths (uploadMedia) — not part of `project` itself.
+ * channelId: needed for recordCost — every image downloaded from a succeeded batch records its
+ * cost against this channel, same pattern every other image provider already uses.
  * settings: needed only if a completeness-driven recovery batch has to be submitted (buildImagePrompt).
  * resolution: used for any recovery batch this call submits — defaults to '0.5K', same default as
  * the rest of the batch mechanism.
@@ -133,7 +149,7 @@ async function applyBatchResults(project, results, { userId, videoId, onProgress
  * Returns the final, fully-updated project. A project with no pendingImageBatches at all resolves
  * immediately as a no-op (still worth calling unconditionally on every video open — see App.jsx).
  */
-export async function resumePendingBatches(project, { userId, videoId, settings, resolution = '0.5K', onProgress, persist } = {}) {
+export async function resumePendingBatches(project, { userId, videoId, channelId, settings, resolution = '0.5K', onProgress, persist } = {}) {
   let current = project;
   const pending = Array.isArray(current.pendingImageBatches) ? current.pendingImageBatches : [];
 
@@ -160,7 +176,7 @@ export async function resumePendingBatches(project, { userId, videoId, settings,
       }
 
       // eslint-disable-next-line no-await-in-loop
-      current = await applyBatchResults(current, results, { userId, videoId, onProgress });
+      current = await applyBatchResults(current, results, { userId, videoId, channelId, resolution: entry.resolution || resolution, onProgress });
       current = { ...current, pendingImageBatches: current.pendingImageBatches.filter((e) => e.jobId !== entry.jobId) };
       // eslint-disable-next-line no-await-in-loop
       await persist?.(current);

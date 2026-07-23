@@ -49,6 +49,11 @@ export default function AutomationMirrorStep({ run, isMobile }) {
   const { channelName, phase, phaseDetail, project, log = [] } = run;
   const phaseLabel = PHASE_LABELS[phase] || phase || '—';
   const renderPct = phase === 'render' ? parseInt(phaseDetail, 10) || 0 : 0;
+  // Driven by observed state (project.pendingImageBatches), not channel config this view has no
+  // access to — as soon as the media phase has actually submitted a Gemini Batch job for this
+  // video, this is true; before that first submission (or for every other provider) it's false and
+  // the ordinary per-scene grid below renders instead.
+  const isBatchMode = phase === 'media' && (project?.pendingImageBatches || []).length > 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -81,7 +86,49 @@ export default function AutomationMirrorStep({ run, isMobile }) {
         </div>
       )}
 
-      {phase === 'media' && project?.scenes && (
+      {isBatchMode && project?.scenes && (() => {
+        const allBeats = project.scenes.flatMap((s, sceneIdx) => (s.images || []).map((im, beatIndex) => ({ ...im, sceneIdx, beatIndex })));
+        const readyBeats = allBeats.filter((b) => b.status === 'ready');
+        const pct = allBeats.length ? Math.round((readyBeats.length / allBeats.length) * 100) : 0;
+        return (
+          <div style={card}>
+            <div style={label}>Gemini Batch — images in progress</div>
+            <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.text, marginTop: 10 }}>
+              {readyBeats.length} of {allBeats.length} images ready — batch jobs in progress, may take up to a few hours
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+              <div style={{ flex: 1, height: 8, background: T.surfaceAlt, borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ width: `${pct}%`, height: '100%', background: T.primary, transition: 'width 0.3s' }} />
+              </div>
+              <span style={{ ...mono, fontSize: 12, color: T.textSecondary }}>{pct}%</span>
+            </div>
+            {readyBeats.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={label}>Ready so far</div>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: isMobile ? 'repeat(auto-fill, minmax(80px, 1fr))' : 'repeat(auto-fill, minmax(110px, 1fr))',
+                    gap: 8,
+                    marginTop: 8,
+                  }}
+                >
+                  {readyBeats.map((b) => (
+                    <img
+                      key={b.id}
+                      src={b.url}
+                      alt=""
+                      style={{ width: '100%', aspectRatio: '1/1', objectFit: 'cover', borderRadius: 4, border: `1px solid ${T.border}` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {phase === 'media' && project?.scenes && !isBatchMode && (
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16 }}>
           {project.scenes.map((scene, i) => (
             <div key={scene.id} style={{ ...card, padding: 16 }}>

@@ -261,7 +261,12 @@ export async function generateSceneAudio(scene, { settings, channelId, userId, v
  * Kokoro's single local worker), then images (concurrent pool for premium providers, serial with a
  * 1.5s stagger for Pollinations' free tier). Acquires/releases the wake lock for the duration.
  */
-export async function generateAllMedia(project, { settings, channelId, userId, videoId, onProgress } = {}) {
+// skipImages: true runs only the audio phase — used when images are being generated through a
+// separate, async path instead (Gemini Batch — see fullPipelineRecipe.js's media phase and
+// src/lib/geminiBatchImageEngine.js), since voice generation has nothing to do with which image
+// provider is configured and must still happen synchronously either way. Defaults to false
+// (unchanged behavior) for every existing caller.
+export async function generateAllMedia(project, { settings, channelId, userId, videoId, onProgress, skipImages = false } = {}) {
   await acquireWakeLock();
   const voiceEngine = settings.voiceEngine || 'kokoro';
   const imageProvider = settings.imageProvider || 'pollinations';
@@ -291,6 +296,8 @@ export async function generateAllMedia(project, { settings, channelId, userId, v
         await generateSceneAudio(pendingAudioScenes[i], { settings, channelId, userId, videoId, onProgress });
       }
     }
+
+    if (skipImages) return;
 
     // Phase 2: images for every beat that still needs one. Paid providers (nanobanana/gptimage)
     // go through the same pool; Pollinations keeps its exact prior behavior — strictly serial

@@ -2,15 +2,16 @@
 // story; src/lib/batchResumption.js is the "pick work back up" half. Framework-agnostic, same
 // "onProgress instead of touching state directly" shape as mediaGenerationEngine.js: this module
 // never calls saveVideo itself — the caller applies each onProgress event to its own project copy
-// and persists it, immediately, before moving on. That immediacy is the whole point: if the browser
-// closes after 3 of 10 chunks have been submitted, those 3 jobIds must already be saved so
-// batchResumption.js can pick them up later — the other 7 simply never got submitted yet.
+// and persists it, immediately, in response to each event. That immediacy is the whole point: if
+// the browser closes partway through submitting a video's chunks, whichever jobIds had already come
+// back must already be saved, so batchResumption.js can pick them up later — the rest simply never
+// got submitted yet.
 //
-// NOT wired into fullPipelineRecipe.js's active media phase yet — that phase still generates
-// images via mediaGenerationEngine.js's generateAllMedia (pollinations/nanobanana/gptimage/
-// minimax). This module exists as complete, correct, callable infrastructure for when the Gemini
-// Batch path is actually connected to a generation flow.
+// Wired into fullPipelineRecipe.js's media phase when channel.automation_image_provider is
+// 'nanobanana-batch' — see that file for how audio generation (unrelated to which image provider
+// is configured) still runs through the existing synchronous mediaGenerationEngine.js path.
 import { buildImagePrompt } from './mediaGenerationEngine';
+import { runWithConcurrency, MAX_PAID_CONCURRENCY } from './sceneOrchestrator';
 
 // Scenes per submitted batch job, not beats — matches pendingImageBatches' own `chunkSceneIds`
 // field (scene-level, not beat-level). Each scene contributes up to 2 items (its 2 image beats),
@@ -85,42 +86,45 @@ export async function submitImageBatchChunk(items, resolution) {
 }
 
 /**
- * Submits every pending image beat in `project` as a sequence of Gemini Batch jobs, chunked by
- * scene. Awaits each submission before starting the next chunk — so if this is interrupted
- * (browser closed, tab navigated away) after N chunks, only those N have actually gone out, and
- * only those N should exist in the caller's persisted pendingImageBatches.
+ * Submits every pending image beat in `project` as a set of Gemini Batch jobs, chunked by scene —
+ * submitted in PARALLEL (same bounded-concurrency pool sceneOrchestrator.js already uses for paid
+ * providers, MAX_PAID_CONCURRENCY workers) rather than one chunk waited on before the next starts.
+ * Submission itself is a single quick request per chunk (the job then runs on Google's side for up
+ * to hours) — there's no reason to serialize those requests, only the persistence reacting to them.
  *
  * onProgress({ kind: 'batch-submitted', pendingEntry }): fired the instant a chunk's submit call
- * returns a jobId — the caller MUST append pendingEntry to its own project.pendingImageBatches and
- * persist (saveVideo) synchronously in response to this event, before this function's loop moves
- * on to the next chunk, to get the "never lost" guarantee this module exists for.
- * onProgress({ kind: 'message', text }): coarse progress text (chunk X/Y).
+ * returns a jobId — possibly from several concurrent workers in close succession. The caller MUST
+ * append pendingEntry to its own project.pendingImageBatches and persist (saveVideo) in response —
+ * synchronously appending (safe: JS callbacks never interleave mid-execution) but the actual
+ * network persist call should be queued/serialized by the caller (e.g. a simple promise chain) so
+ * two concurrent saveVideo calls for the same video can't finish out of order and silently drop an
+ * already-appended entry. That's what gives the "never lost" guarantee this module exists for.
+ * onProgress({ kind: 'message', text }): coarse progress text (chunk X/Y submitted).
  *
  * Does not itself know whether persistence succeeded — that's the caller's responsibility, same as
  * every other engine module in this codebase.
  */
 export async function generateAllMediaViaBatch(project, { settings, resolution = '0.5K', onProgress } = {}) {
-  const chunks = chunkScenesNeedingImages(project.scenes, BATCH_CHUNK_SCENES);
-  for (let i = 0; i < chunks.length; i++) {
-    const chunkSceneIds = chunks[i];
-    const items = collectPendingBeatItems(project, chunkSceneIds, settings);
-    if (!items.length) continue; // every beat in this chunk was already ready by the time we got here
+  const chunks = chunkScenesNeedingImages(project.scenes, BATCH_CHUNK_SCENES)
+    .map((chunkSceneIds) => ({ chunkSceneIds, items: collectPendingBeatItems(project, chunkSceneIds, settings) }))
+    .filter((c) => c.items.length > 0); // every beat in an empty chunk was already ready by the time we got here
 
-    onProgress?.({ kind: 'message', text: `Submitting batch ${i + 1}/${chunks.length} (${items.length} image${items.length === 1 ? '' : 's'})…` });
-
+  let submitted = 0;
+  await runWithConcurrency(chunks, MAX_PAID_CONCURRENCY, async ({ chunkSceneIds, items }) => {
     let jobId;
     try {
-      // eslint-disable-next-line no-await-in-loop
       jobId = await submitImageBatchChunk(items, resolution);
     } catch (err) {
       console.error('[geminiBatchImageEngine] chunk submit failed', chunkSceneIds, err);
-      onProgress?.({ kind: 'message', text: `Batch ${i + 1}/${chunks.length} failed to submit: ${String(err.message || err)}` });
-      continue; // this chunk's beats stay non-ready; a later completeness check will retry them
+      onProgress?.({ kind: 'message', text: `A batch chunk failed to submit: ${String(err.message || err)}` });
+      return; // this chunk's beats stay non-ready; a later completeness check will retry them
     }
 
     onProgress?.({
       kind: 'batch-submitted',
       pendingEntry: { jobId, chunkSceneIds, resolution, submittedAt: Date.now(), status: 'pending' },
     });
-  }
+    submitted++;
+    onProgress?.({ kind: 'message', text: `Submitted ${submitted}/${chunks.length} batch chunks…` });
+  });
 }

@@ -8,7 +8,7 @@ import { priceForImage } from './imageProviders';
 import { priceForVoice } from './voiceProviders';
 import { runFullPipeline } from './recipes/fullPipelineRecipe';
 
-const PAID_IMAGE_PROVIDERS = ['nanobanana', 'gptimage'];
+const PAID_IMAGE_PROVIDERS = ['nanobanana', 'gptimage', 'nanobanana-batch'];
 const PAID_VOICE_ENGINES = ['minimax'];
 
 // 'YYYY-MM-DD' in the browser's local timezone — matches what a user means by "today" when they
@@ -180,6 +180,7 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
         // automation_daily_upload_count/automation_daily_spend_usd were just updated and the next
         // canRunChannelToday/budget check needs to see that, not the stale pre-run values.
         let videosCompleted = 0;
+        let videoInProgress = false;
         let exhaustionReason = null;
         while (true) {
           // Pre-flight budget check — the recipe itself only finds out the real cost as it spends
@@ -201,6 +202,25 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
             logStep,
             onProgress: (evt) => onProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
           });
+
+          if (result.inProgress) {
+            // Gemini Batch jobs are still running for this video (see fullPipelineRecipe.js's
+            // media phase) — nothing failed, there's just nothing left to do until Google
+            // finishes them. Spend so far is real and counted; the upload count is not, since no
+            // video was actually produced yet. Stops the exhaustion loop for this channel this
+            // cycle rather than starting ANOTHER new video on top of the one still in flight —
+            // it'll be picked up (resumed) automatically on a later cycle.
+            // eslint-disable-next-line no-await-in-loop
+            channel = await saveChannel({
+              ...channel,
+              automation_daily_spend_usd: (Number(channel.automation_daily_spend_usd) || 0) + (result.costUsd || 0),
+            });
+            videoInProgress = true;
+            // eslint-disable-next-line no-await-in-loop
+            await logStep(channel.id, result.videoId, 'cycle', 'pending', 'video still in progress (Gemini Batch jobs running) — will resume next cycle');
+            break;
+          }
+
           // A failed run never reaches here (the recipe throws, caught below) — so the upload
           // count only ever increments for a video that actually finished and published.
           // eslint-disable-next-line no-await-in-loop
@@ -231,8 +251,9 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
 
         // Zero videos produced this turn (e.g. the budget estimate failed on the very first
         // attempt) is still a genuine skip, not a "done" — same distinction the pre-existing
-        // single-run code made.
-        if (videosCompleted === 0) {
+        // single-run code made. A video left in progress counts as "done" for this turn even
+        // though videosCompleted is 0 — something real happened, it's just not finished yet.
+        if (videosCompleted === 0 && !videoInProgress) {
           report('skipped');
           continue;
         }

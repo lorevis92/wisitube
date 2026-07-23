@@ -12,11 +12,43 @@ import { createId, saveVideo, listVideosByChannel, getCostsByChannel } from '../
 import { uploadMedia } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
+import { generateAllMediaViaBatch } from '../geminiBatchImageEngine';
+import { resumePendingBatches } from '../batchResumption';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube, listChannelPlaylists } from '../youtubePublishEngine';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
+
+// A channel using the Gemini Batch image provider can have a video whose batch jobs are still
+// running (turnaround up to a few hours) — this is how long such a video stays eligible to be
+// resumed instead of the automation cycle starting yet another one from scratch. Past this window,
+// listVideosByChannel would no longer surface it as resumable (it's likely stuck/abandoned) — a
+// video that old is left for the completeness/recovery ceiling in batchResumption.js to eventually
+// give up on, not silently retried forever here too.
+const RESUMABLE_VIDEO_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+// Finds the most recent video on this channel that still has Gemini Batch jobs outstanding —
+// created within the resumable window. Only relevant for the 'nanobanana-batch' provider: every
+// other provider's media phase is fully synchronous (generateAllMedia either finishes or throws
+// within the same call), so a video from one of those never has anything left in
+// pendingImageBatches to resume in the first place.
+async function findResumableVideo(channelId) {
+  const videos = await listVideosByChannel(channelId);
+  const cutoff = Date.now() - RESUMABLE_VIDEO_WINDOW_MS;
+  return (
+    videos.find((v) => Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0 && (v.createdAt || 0) >= cutoff) || null
+  );
+}
+
+// Sums the cost-ledger entries (recordCost, written from mediaGenerationEngine.js/
+// thumbnailEngine.js/batchResumption.js) for one specific video — used both for the final return
+// and for the early "still in progress" return, since a batch-provider video can genuinely have
+// spent money (on whatever images a batch already resolved) before its images are all ready.
+async function totalCostForVideo(channelId, videoId) {
+  const { items: costItems } = await getCostsByChannel(channelId);
+  return costItems.filter((c) => c.videoId === videoId).reduce((sum, c) => sum + (c.amountUsd || 0), 0);
+}
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -169,222 +201,317 @@ function buildAutomationSettings(channel) {
  * automationEngine.js, since automationEngine.js is the one that imports this file — importing it
  * back would be circular.
  *
- * Returns { videoId, youtubeVideoId, costUsd } on full success. Throws on the first phase failure;
- * whatever was saved via saveVideo up to that point stays on the record for manual review in the
- * regular Storyboard/Editor/Export UI — nothing is rolled back or deleted.
+ * Returns { videoId, youtubeVideoId, costUsd, inProgress } — inProgress is true when this call
+ * ends with Gemini Batch jobs still outstanding for this video's images (nothing failed, there's
+ * just nothing left to do until Google finishes them — see automationEngine.js, which treats this
+ * as neither a completed video nor an error). inProgress is false (the pre-existing contract) once
+ * a video is genuinely done, whether that took one call or several resumed ones.
+ *
+ * Throws on the first phase failure that ISN'T "batch jobs still running"; whatever was saved via
+ * saveVideo up to that point stays on the record for manual review in the regular
+ * Storyboard/Editor/Export UI — nothing is rolled back or deleted.
  */
 export async function runFullPipeline(channel, { userId, onProgress, logStep }) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
-  // Declared here (rather than at their original spot further down) so report() can close over
-  // them from the very first call — both stay null until the phases that create them run, which
-  // is fine: the mirror view (AutomationMirrorStep.jsx) only reads project once phase === 'media'.
+  // Declared here (rather than at their original spot further down) so report()/persist() can
+  // close over them from the very first call — all populated either by the resume branch below or
+  // by the suggestion/video-record/outline/scenes phases for a brand-new video.
   let videoId = null;
   let project = null;
+  let plan = null;
+  let suggestion = null;
+  let createdAt = Date.now();
   const report = (step, message) => onProgress?.({ step, message, videoId, project });
 
-  // ---- Phase: suggestion ----
-  let suggestion;
-  try {
-    suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
-      const existingVideos = await listVideosByChannel(channelId);
-      // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
-      // and returns [] rather than throwing, so this never blocks the suggestion phase on its own.
-      const existingPlaylists = await listChannelPlaylists(channel);
-      const res = await fetch('/api/program-manager', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          channelName: channel.name,
-          niche: channel.niche || '',
-          editorialNotes: channel.editorialNotes || '',
-          existingVideos: existingVideos.map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
-          refinement: '',
-          creativeOverride: channel.prompt_overrides?.programManager || null,
-          activeDirective: channel.automation_directive || '',
-          existingPlaylists,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Content Program Manager request failed');
-      const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
-      if (!suggestions.length) throw new Error('Content Program Manager returned no suggestions');
-      return suggestions.find((s) => s.priority === 'high') || suggestions[0];
-    });
-    await logStep(
-      channelId,
-      null,
-      'suggestion',
-      'success',
-      `chose "${suggestion.title}"${suggestion.series ? ` (series: ${suggestion.series})` : ''}`
-    );
-    report('suggestion', `Chose "${suggestion.title}"`);
-  } catch (err) {
-    await logStep(channelId, null, 'suggestion', 'error', String(err?.message || err));
-    throw err;
-  }
-
-  // ---- Phase: video record ----
-  videoId = createId();
-  const createdAt = Date.now();
-  // Shared by every saveVideo call below — reads whatever `project`/`plan` are in scope at call
-  // time, so each phase just has to update those two variables before persisting.
-  project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null };
-  let plan = null;
+  // Shared by every persist() call in this function, whether resuming or starting fresh — reads
+  // whatever videoId/project/plan/suggestion/createdAt are in scope at call time.
   const persist = () =>
     saveVideo({
       id: videoId,
       channelId,
       createdAt,
       updatedAt: Date.now(),
-      topic: suggestion.title,
+      topic: suggestion?.title,
       settings,
       ...project,
-      displayTitle: plan?.title || suggestion.title,
+      displayTitle: plan?.title || suggestion?.title,
     });
 
-  try {
-    await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
-    await logStep(channelId, videoId, 'video-record', 'success', 'created video record');
-    report('video-record', 'Created video record');
-  } catch (err) {
-    await logStep(channelId, videoId, 'video-record', 'error', String(err?.message || err));
-    throw err;
-  }
+  // ---- Resume check ----
+  // Only ever finds something for the 'nanobanana-batch' provider — every other provider's media
+  // phase is fully synchronous, so a video made with one never has anything left in
+  // pendingImageBatches to resume. Skips suggestion/video-record/outline/scenes entirely: those
+  // already happened on whichever earlier cycle first created this video.
+  const resumable = await findResumableVideo(channelId);
 
-  // ---- Phase: outline ----
-  try {
-    await withPhaseNetworkResilience('outline', channelId, videoId, logStep, async () => {
-      const res = await fetch('/api/generate-outline', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic: suggestion.title,
+  if (resumable) {
+    videoId = resumable.id;
+    createdAt = resumable.createdAt || Date.now();
+    project = resumable;
+    plan = {
+      title: resumable.displayTitle || resumable.topic || '',
+      description: resumable.description || '',
+      tags: resumable.tags || [],
+      thumbnails: resumable.thumbnails || [],
+      characterBible: resumable.characterBible || [],
+    };
+    suggestion = { title: resumable.topic || plan.title, series: resumable.series || null };
+    await logStep(channelId, videoId, 'resume', 'success', `resuming incomplete video "${plan.title}"`);
+    report('resume', `Resuming "${plan.title}" — checking batch jobs`);
+  } else {
+    // ---- Phase: suggestion ----
+    try {
+      suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
+        const existingVideos = await listVideosByChannel(channelId);
+        // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
+        // and returns [] rather than throwing, so this never blocks the suggestion phase on its own.
+        const existingPlaylists = await listChannelPlaylists(channel);
+        const res = await fetch('/api/program-manager', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channelName: channel.name,
+            niche: channel.niche || '',
+            editorialNotes: channel.editorialNotes || '',
+            existingVideos: existingVideos.map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
+            refinement: '',
+            creativeOverride: channel.prompt_overrides?.programManager || null,
+            activeDirective: channel.automation_directive || '',
+            existingPlaylists,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Content Program Manager request failed');
+        const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+        if (!suggestions.length) throw new Error('Content Program Manager returned no suggestions');
+        return suggestions.find((s) => s.priority === 'high') || suggestions[0];
+      });
+      await logStep(
+        channelId,
+        null,
+        'suggestion',
+        'success',
+        `chose "${suggestion.title}"${suggestion.series ? ` (series: ${suggestion.series})` : ''}`
+      );
+      report('suggestion', `Chose "${suggestion.title}"`);
+    } catch (err) {
+      await logStep(channelId, null, 'suggestion', 'error', String(err?.message || err));
+      throw err;
+    }
+
+    // ---- Phase: video record ----
+    videoId = createId();
+    createdAt = Date.now();
+    project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null };
+
+    try {
+      await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
+      await logStep(channelId, videoId, 'video-record', 'success', 'created video record');
+      report('video-record', 'Created video record');
+    } catch (err) {
+      await logStep(channelId, videoId, 'video-record', 'error', String(err?.message || err));
+      throw err;
+    }
+
+    // ---- Phase: outline ----
+    try {
+      await withPhaseNetworkResilience('outline', channelId, videoId, logStep, async () => {
+        const res = await fetch('/api/generate-outline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: suggestion.title,
+            title: suggestion.title,
+            angle: suggestion.angle || '',
+            language: settings.language,
+            lengthMinutes: settings.lengthMinutes,
+            style: STYLES[settings.style].label,
+            imageProvider: settings.imageProvider,
+            characterHints: [],
+            generalNotes: '',
+            references: [],
+            creativeOverride: channel.prompt_overrides?.outline || null,
+          }),
+        });
+        const outlineData = await res.json();
+        if (!res.ok) throw new Error(outlineData.error || 'Outline generation failed');
+
+        const characterBible = (outlineData.character_bible || []).map((c) => ({
+          id: c.id || crypto.randomUUID(),
+          name: c.name || '',
+          baseDescription: c.base_description || '',
+          variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
+        }));
+
+        plan = {
           title: suggestion.title,
           angle: suggestion.angle || '',
-          language: settings.language,
-          lengthMinutes: settings.lengthMinutes,
-          style: STYLES[settings.style].label,
-          imageProvider: settings.imageProvider,
-          characterHints: [],
-          generalNotes: '',
+          description: outlineData.description || '',
+          tags: outlineData.tags || [],
+          thumbnails: outlineData.thumbnail_concepts || [],
+          characterBible,
           references: [],
-          creativeOverride: channel.prompt_overrides?.outline || null,
-        }),
+          outline: outlineData.outline || [],
+          totalScenes: outlineData.total_scenes || 0,
+        };
+
+        project = {
+          titles: [plan.title],
+          selectedTitle: 0,
+          description: plan.description,
+          tags: plan.tags,
+          thumbnails: plan.thumbnails,
+          subtitles: true,
+          references: plan.references,
+          characterBible: plan.characterBible,
+          scenes: [],
+          series: suggestion.series || null,
+        };
+
+        await persist();
       });
-      const outlineData = await res.json();
-      if (!res.ok) throw new Error(outlineData.error || 'Outline generation failed');
+      await logStep(channelId, videoId, 'outline', 'success', `${plan.outline.length} chapters, ${plan.totalScenes} scenes planned`);
+      report('outline', 'Outline ready');
+    } catch (err) {
+      await logStep(channelId, videoId, 'outline', 'error', String(err?.message || err));
+      throw err;
+    }
 
-      const characterBible = (outlineData.character_bible || []).map((c) => ({
-        id: c.id || crypto.randomUUID(),
-        name: c.name || '',
-        baseDescription: c.base_description || '',
-        variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
-      }));
+    // ---- Phase: scenes ----
+    try {
+      await withPhaseNetworkResilience('scenes', channelId, videoId, logStep, async () => {
+        const context = {
+          topic: suggestion.title,
+          title: plan.title,
+          language: settings.language,
+          style: STYLES[settings.style].label,
+          format: settings.format,
+          imageProvider: settings.imageProvider,
+          characterBible: plan.characterBible,
+          references: [],
+          creativeOverride: channel.prompt_overrides?.scenes || null,
+        };
 
-      plan = {
-        title: suggestion.title,
-        angle: suggestion.angle || '',
-        description: outlineData.description || '',
-        tags: outlineData.tags || [],
-        thumbnails: outlineData.thumbnail_concepts || [],
-        characterBible,
-        references: [],
-        outline: outlineData.outline || [],
-        totalScenes: outlineData.total_scenes || 0,
-      };
+        const rawScenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
+          report('scenes', `${soFar.length}/${total} scenes written`);
+          project = { ...project, scenes: buildScenesFromRaw(soFar) };
+          persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
+        });
 
-      project = {
-        titles: [plan.title],
-        selectedTitle: 0,
-        description: plan.description,
-        tags: plan.tags,
-        thumbnails: plan.thumbnails,
-        subtitles: true,
-        references: plan.references,
-        characterBible: plan.characterBible,
-        scenes: [],
-        series: suggestion.series || null,
-      };
-
-      await persist();
-    });
-    await logStep(channelId, videoId, 'outline', 'success', `${plan.outline.length} chapters, ${plan.totalScenes} scenes planned`);
-    report('outline', 'Outline ready');
-  } catch (err) {
-    await logStep(channelId, videoId, 'outline', 'error', String(err?.message || err));
-    throw err;
-  }
-
-  // ---- Phase: scenes ----
-  try {
-    await withPhaseNetworkResilience('scenes', channelId, videoId, logStep, async () => {
-      const context = {
-        topic: suggestion.title,
-        title: plan.title,
-        language: settings.language,
-        style: STYLES[settings.style].label,
-        format: settings.format,
-        imageProvider: settings.imageProvider,
-        characterBible: plan.characterBible,
-        references: [],
-        creativeOverride: channel.prompt_overrides?.scenes || null,
-      };
-
-      const rawScenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
-        report('scenes', `${soFar.length}/${total} scenes written`);
-        project = { ...project, scenes: buildScenesFromRaw(soFar) };
-        persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
+        project = { ...project, scenes: buildScenesFromRaw(rawScenes) };
+        await persist();
       });
-
-      project = { ...project, scenes: buildScenesFromRaw(rawScenes) };
-      await persist();
-    });
-    await logStep(channelId, videoId, 'scenes', 'success', `${project.scenes.length} scenes generated`);
-  } catch (err) {
-    await logStep(channelId, videoId, 'scenes', 'error', String(err?.message || err));
-    throw err;
+      await logStep(channelId, videoId, 'scenes', 'success', `${project.scenes.length} scenes generated`);
+    } catch (err) {
+      await logStep(channelId, videoId, 'scenes', 'error', String(err?.message || err));
+      throw err;
+    }
   }
 
   // ---- Phase: media (images + audio) ----
+  // Audio always goes through the existing synchronous path regardless of image provider — voice
+  // generation has nothing to do with which image provider is configured. Images either go through
+  // that same synchronous path (every provider except 'nanobanana-batch') or through Gemini Batch
+  // (submit now, resolve on a later cycle — see below).
+  const usesGeminiBatch = settings.imageProvider === 'nanobanana-batch';
+  let mediaStillInProgress = false;
+
   try {
     await withPhaseNetworkResilience('media', channelId, videoId, logStep, async () => {
-      await generateAllMedia(project, {
-        settings,
-        channelId,
-        userId,
-        videoId,
-        onProgress: (evt) => {
-          project = applyMediaProgress(project, evt);
-          if (evt.kind === 'message' && evt.text) report('media', evt.text);
-          // Per-item network retries from mediaGenerationEngine.js's own timeout+retry wrapper —
-          // surfaced here as a 'retrying' log row rather than left as suspicious silence. Fired
-          // before the item's own retry, so it never blocks or replaces the item's eventual
-          // 'beat'/'scene' status update.
-          if (evt.kind === 'retry') logStep(channelId, videoId, 'media', 'retrying', evt.message).catch(() => {});
-          // Persist the instant a single beat/audio reaches a terminal state (ready or error) —
-          // not just once at the end of the whole phase (see below). generateAllMedia never throws
-          // for an individual item failure, so without this, a mid-phase failure (a provider rate
-          // limit, say) would leave every already-succeeded item's Storage upload orphaned: the
-          // file exists, but the video record is never updated to reference it, since the phase's
-          // own persist() further down only runs once every item has succeeded. Fire-and-forget,
-          // same pattern as the scenes phase above.
-          const beatDone = evt.kind === 'beat' && (evt.patch?.status === 'ready' || evt.patch?.status === 'error');
-          const audioDone = evt.kind === 'scene' && (evt.patch?.audioStatus === 'ready' || evt.patch?.audioStatus === 'error');
-          if (beatDone || audioDone) persist().catch((err) => console.error('[fullPipelineRecipe] partial media save failed', err));
-        },
-      });
+      const mediaOnProgress = (evt) => {
+        project = applyMediaProgress(project, evt);
+        if (evt.kind === 'message' && evt.text) report('media', evt.text);
+        // Per-item network retries from mediaGenerationEngine.js's own timeout+retry wrapper —
+        // surfaced here as a 'retrying' log row rather than left as suspicious silence. Fired
+        // before the item's own retry, so it never blocks or replaces the item's eventual
+        // 'beat'/'scene' status update.
+        if (evt.kind === 'retry') logStep(channelId, videoId, 'media', 'retrying', evt.message).catch(() => {});
+        // Persist the instant a single beat/audio reaches a terminal state (ready or error) —
+        // not just once at the end of the whole phase (see below). generateAllMedia never throws
+        // for an individual item failure, so without this, a mid-phase failure (a provider rate
+        // limit, say) would leave every already-succeeded item's Storage upload orphaned: the
+        // file exists, but the video record is never updated to reference it, since the phase's
+        // own persist() further down only runs once every item has succeeded. Fire-and-forget,
+        // same pattern as the scenes phase above.
+        const beatDone = evt.kind === 'beat' && (evt.patch?.status === 'ready' || evt.patch?.status === 'error');
+        const audioDone = evt.kind === 'scene' && (evt.patch?.audioStatus === 'ready' || evt.patch?.audioStatus === 'error');
+        if (beatDone || audioDone) persist().catch((err) => console.error('[fullPipelineRecipe] partial media save failed', err));
+      };
 
-      const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
-      if (!allReady) throw new Error('Some scenes failed to generate media (image or audio)');
+      if (usesGeminiBatch) {
+        // Voice only here — skipImages so generateAllMedia's own image half (irrelevant on this
+        // path) never runs at all, let alone fights with the batch path below.
+        await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: mediaOnProgress, skipImages: true });
+
+        // Resume whatever this video already has outstanding first (a genuine cross-cycle resume,
+        // or this very call picking back up after an earlier phase in the SAME call failed
+        // partway — either way, resumePendingBatches is cheap/no-op when there's nothing pending).
+        if ((project.pendingImageBatches || []).length > 0) {
+          project = await resumePendingBatches(project, {
+            userId,
+            videoId,
+            channelId,
+            settings,
+            onProgress: mediaOnProgress,
+            persist: async (proj) => {
+              project = proj;
+              await persist();
+            },
+          });
+        }
+
+        const stillMissingImages = project.scenes.some((s) => s.images.some((im) => im.status !== 'ready'));
+        if (stillMissingImages && (project.pendingImageBatches || []).length === 0) {
+          // Nothing outstanding for this video yet at all — submit now. Chunks go out in
+          // parallel (see geminiBatchImageEngine.js); each one's pendingEntry is persisted as
+          // soon as it comes back, serialized here so concurrent submissions can't finish their
+          // saveVideo calls out of order and silently drop an already-appended entry.
+          let persistChain = Promise.resolve();
+          await generateAllMediaViaBatch(project, {
+            settings,
+            resolution: '0.5K',
+            onProgress: (evt) => {
+              if (evt.kind === 'message' && evt.text) report('media', evt.text);
+              if (evt.kind === 'batch-submitted') {
+                project = { ...project, pendingImageBatches: [...(project.pendingImageBatches || []), evt.pendingEntry] };
+                persistChain = persistChain.then(persist).catch((err) => console.error('[fullPipelineRecipe] pending batch save failed', err));
+              }
+            },
+          });
+          await persistChain;
+        }
+
+        const nowAllReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
+        if (!nowAllReady) mediaStillInProgress = true;
+      } else {
+        await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: mediaOnProgress });
+        const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
+        if (!allReady) throw new Error('Some scenes failed to generate media (image or audio)');
+      }
 
       await persist();
     });
-    await logStep(channelId, videoId, 'media', 'success', 'all images and audio generated');
-    report('media', 'Media complete');
+
+    if (mediaStillInProgress) {
+      const readyCount = project.scenes.reduce((n, s) => n + s.images.filter((im) => im.status === 'ready').length, 0);
+      const totalCount = project.scenes.reduce((n, s) => n + s.images.length, 0);
+      await logStep(channelId, videoId, 'media', 'pending', `${readyCount}/${totalCount} images ready — batch jobs still in progress`);
+      report('media', `${readyCount}/${totalCount} images ready — batch jobs in progress`);
+    } else {
+      await logStep(channelId, videoId, 'media', 'success', 'all images and audio generated');
+      report('media', 'Media complete');
+    }
   } catch (err) {
     await logStep(channelId, videoId, 'media', 'error', String(err?.message || err));
     throw err;
+  }
+
+  if (mediaStillInProgress) {
+    // Not a failure — this video will be picked up again by the resume check on a later cycle.
+    // automationEngine.js treats inProgress specially: no upload-count increment (nothing was
+    // actually produced yet) and no exhaustion-loop retry on this same channel this cycle.
+    return { videoId, youtubeVideoId: null, costUsd: await totalCostForVideo(channelId, videoId), inProgress: true };
   }
 
   // ---- Phase: render ----
@@ -503,10 +630,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   }
 
   // Total real spend for this video, from the cost-ledger entries recordCost wrote along the way
-  // (inside mediaGenerationEngine.js/thumbnailEngine.js) — not tracked incrementally here since
-  // those writes happen deep inside modules this recipe doesn't otherwise need to instrument.
-  const { items: costItems } = await getCostsByChannel(channelId);
-  const costUsd = costItems.filter((c) => c.videoId === videoId).reduce((sum, c) => sum + (c.amountUsd || 0), 0);
+  // (inside mediaGenerationEngine.js/thumbnailEngine.js/batchResumption.js) — not tracked
+  // incrementally here since those writes happen deep inside modules this recipe doesn't
+  // otherwise need to instrument.
+  const costUsd = await totalCostForVideo(channelId, videoId);
 
   return { videoId, youtubeVideoId, costUsd };
 }
