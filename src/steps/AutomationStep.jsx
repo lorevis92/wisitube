@@ -91,6 +91,14 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   // diagnosed straight from the browser instead of needing Vercel's server logs.
   const [batchRawOpen, setBatchRawOpen] = useState(false);
 
+  // TEMPORARY diagnostic — calls api/gemini-single-test.js (non-batch generateContent) with the
+  // first prompt, to isolate whether "Request contains an invalid argument" comes from the image
+  // request shape itself or from how api/gemini-batch.js wraps it inside a batch. Separate state
+  // from the batch flow above so the two never contend for the same status/error display.
+  const [singleTestLoading, setSingleTestLoading] = useState(false);
+  const [singleTestResult, setSingleTestResult] = useState(null); // { googleStatus, googleOk, sentPayload, googleResponse }
+  const [singleTestError, setSingleTestError] = useState('');
+
   async function loadChannels() {
     const list = await listChannels();
     setChannels(list);
@@ -300,6 +308,31 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
       setBatchError(String(err.message || err));
     } finally {
       setBatchResultsLoading(false);
+    }
+  }
+
+  // TEMPORARY diagnostic — see api/gemini-single-test.js's own header comment for what this
+  // isolates. Uses the first prompt currently in the textarea, whether or not a batch has been
+  // submitted yet.
+  async function runSingleTest() {
+    const items = parseBatchPrompts();
+    if (!items.length) return;
+    setSingleTestError('');
+    setSingleTestLoading(true);
+    setSingleTestResult(null);
+    try {
+      const res = await fetch('/api/gemini-single-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: items[0].prompt, resolution: '0.5K' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || 'Single test request failed');
+      setSingleTestResult(data);
+    } catch (err) {
+      setSingleTestError(String(err.message || err));
+    } finally {
+      setSingleTestLoading(false);
     }
   }
 
@@ -772,7 +805,49 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
               {batchResultsLoading ? 'Fetching…' : 'Fetch results'}
             </button>
           )}
+          <button
+            onClick={runSingleTest}
+            disabled={singleTestLoading || !batchPromptsText.trim()}
+            title="Diagnostic — calls Gemini's plain generateContent directly with the first prompt, bypassing the batch envelope entirely"
+            style={{ ...btnGhost, opacity: singleTestLoading || !batchPromptsText.trim() ? 0.6 : 1 }}
+          >
+            {singleTestLoading ? 'Testing…' : 'Test single (non-batch) request'}
+          </button>
         </div>
+
+        {(singleTestResult || singleTestError) && (
+          <div style={{ marginTop: 14, padding: 10, border: `1px solid ${T.border}`, borderRadius: 4 }}>
+            <div style={{ ...mono, fontSize: 10, color: T.textMuted, textTransform: 'uppercase', fontWeight: 700 }}>
+              Single (non-batch) test result
+            </div>
+            {singleTestError && <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 8 }}>{singleTestError}</div>}
+            {singleTestResult && (
+              <>
+                <div style={{ ...mono, fontSize: 11, color: singleTestResult.googleOk ? T.green : T.primary, marginTop: 8 }}>
+                  {singleTestResult.googleOk ? '✓ Succeeded' : '✗ Failed'} — HTTP {singleTestResult.googleStatus}
+                </div>
+                <pre
+                  style={{
+                    marginTop: 8,
+                    padding: 8,
+                    background: T.surfaceAlt,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 4,
+                    fontSize: 10,
+                    lineHeight: 1.5,
+                    maxHeight: 260,
+                    overflow: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {JSON.stringify({ sentPayload: singleTestResult.sentPayload, googleResponse: singleTestResult.googleResponse }, null, 2)}
+                </pre>
+              </>
+            )}
+          </div>
+        )}
+
         {batchStatus && (
           <>
             <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
