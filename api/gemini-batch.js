@@ -45,6 +45,33 @@ function resolveImageSize(resolution) {
   return VALID_IMAGE_SIZES.includes(resolution) ? resolution : '0.5K';
 }
 
+// Maps whichever "<PREFIX>_STATE_<NAME>" string Google actually sends to this file's own
+// pending/processing/succeeded/failed enum — BATCH_STATE_ is the confirmed-live prefix,
+// JOB_STATE_ is kept alongside it in case a different endpoint/version ever uses that one instead
+// (the Vertex AI docs this was originally written against suggested it). Anything that isn't one
+// of the explicitly recognized names comes back as 'unknown: <raw value>' rather than 'failed' —
+// an unrecognized state is not evidence of failure, just of a name this file hasn't been taught yet.
+const KNOWN_STATES = {
+  BATCH_STATE_PENDING: 'pending',
+  JOB_STATE_PENDING: 'pending',
+  BATCH_STATE_RUNNING: 'processing',
+  JOB_STATE_RUNNING: 'processing',
+  BATCH_STATE_SUCCEEDED: 'succeeded',
+  JOB_STATE_SUCCEEDED: 'succeeded',
+  BATCH_STATE_FAILED: 'failed',
+  JOB_STATE_FAILED: 'failed',
+  BATCH_STATE_CANCELLED: 'failed',
+  JOB_STATE_CANCELLED: 'failed',
+  BATCH_STATE_EXPIRED: 'failed',
+  JOB_STATE_EXPIRED: 'failed',
+};
+
+function mapGoogleState(googleState) {
+  if (KNOWN_STATES[googleState]) return KNOWN_STATES[googleState];
+  console.error('[gemini-batch] phase=status-unknown-state', googleState);
+  return `unknown: ${googleState}`;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -182,11 +209,13 @@ async function submit(req, res, apiKey) {
 
 // ---- action=status ----
 //
-// Reads a batch job's current state. Google's documented state strings (JOB_STATE_PENDING/
-// _RUNNING/_SUCCEEDED/_FAILED/_CANCELLED/_EXPIRED) are collapsed into the simpler
-// pending/processing/succeeded/failed shape the test panel (and later, any automation caller)
-// actually needs to branch on — the original googleState string rides along too so nothing
-// Google-specific is lost, and the full raw job resource is included for debugging.
+// Reads a batch job's current state. The Batch API docs (written for Vertex AI) suggested a
+// JOB_STATE_ prefix, but the real, live response for this endpoint uses BATCH_STATE_ instead
+// (confirmed: an in-progress job actually reports BATCH_STATE_RUNNING, not JOB_STATE_RUNNING) —
+// mapGoogleState below recognizes both prefixes explicitly rather than assuming one. Anything that
+// doesn't match a known state is surfaced as 'unknown: <raw value>', never silently downgraded to
+// 'failed' — a state name this file hasn't seen before is not the same thing as a failure, and
+// collapsing the two would hide a real success/still-running job behind a false error.
 //
 // Every phase has its own try/catch so a failure anywhere returns a clear JSON error with a phase
 // tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
@@ -234,15 +263,11 @@ async function status(req, res, apiKey) {
     // bare top-level `state` and a done/error-derived fallback so this doesn't just guess wrong
     // silently on a job that's actually finished.
     const googleState =
-      data?.metadata?.state || data?.state || (data?.done ? (data?.error ? 'JOB_STATE_FAILED' : 'JOB_STATE_SUCCEEDED') : 'JOB_STATE_PENDING');
+      data?.metadata?.state || data?.state || (data?.done ? (data?.error ? 'BATCH_STATE_FAILED' : 'BATCH_STATE_SUCCEEDED') : 'BATCH_STATE_PENDING');
 
     console.log('[gemini-batch] phase=status', { jobId, done: !!data?.done, googleState, hasResponse: !!data?.response, hasError: !!data?.error });
 
-    let state;
-    if (googleState === 'JOB_STATE_SUCCEEDED') state = 'succeeded';
-    else if (googleState === 'JOB_STATE_RUNNING') state = 'processing';
-    else if (googleState === 'JOB_STATE_PENDING') state = 'pending';
-    else state = 'failed'; // FAILED / CANCELLED / EXPIRED all collapse to 'failed' for the caller
+    const state = mapGoogleState(googleState);
 
     return res.status(200).json({ state, googleState, done: !!data?.done, raw: data });
   } catch (err) {
