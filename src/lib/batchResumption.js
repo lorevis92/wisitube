@@ -153,11 +153,18 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
   let current = project;
   const pending = Array.isArray(current.pendingImageBatches) ? current.pendingImageBatches : [];
 
+  // TEMPORARY diagnostic (remove once the "0 images ready after 24h" report is root-caused) — logs
+  // the exact pendingImageBatches content this call is about to process, so it can be read straight
+  // from the browser console instead of guessed at.
+  console.warn('[resume-batch] START', pending.length, JSON.parse(JSON.stringify(pending)));
+
   for (const entry of pending) {
     let status;
     try {
       // eslint-disable-next-line no-await-in-loop
       status = await fetchBatchStatus(entry.jobId);
+      // TEMPORARY diagnostic — the real state Google reports for this specific job, right now.
+      console.warn('[resume-batch] job status', entry.jobId, status.state, status.googleState);
     } catch (err) {
       console.error('[batchResumption] status check failed for', entry.jobId, err);
       onProgress?.({ kind: 'message', text: `Could not check batch ${entry.jobId}: ${String(err.message || err)}` });
@@ -247,6 +254,12 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
       }
     }
   }
+
+  // TEMPORARY diagnostic (remove once root-caused) — confirms this function actually reached its
+  // end (as opposed to the caller giving up/navigating away mid-run) and what it ended with.
+  const readyCount = (current.scenes || []).reduce((n, s) => n + (s.images || []).filter((im) => im.status === 'ready').length, 0);
+  const totalCount = (current.scenes || []).reduce((n, s) => n + (s.images || []).length, 0);
+  console.warn('[resume-batch] END', { readyCount, totalCount, stillPending: (current.pendingImageBatches || []).length });
 
   return current;
 }
