@@ -476,6 +476,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
           let persistChain = Promise.resolve();
           await generateAllMediaViaBatch(project, {
             settings,
+            channelId,
+            videoId,
+            logStep,
             resolution: '0.5K',
             onProgress: (evt) => {
               if (evt.kind === 'message' && evt.text) report('media', evt.text);

@@ -11,13 +11,41 @@
 // 'nanobanana-batch' — see that file for how audio generation (unrelated to which image provider
 // is configured) still runs through the existing synchronous mediaGenerationEngine.js path.
 import { buildImagePrompt } from './mediaGenerationEngine';
-import { runWithConcurrency, MAX_PAID_CONCURRENCY } from './sceneOrchestrator';
+import { runWithConcurrency } from './sceneOrchestrator';
 
 // Scenes per submitted batch job, not beats — matches pendingImageBatches' own `chunkSceneIds`
 // field (scene-level, not beat-level). Each scene contributes up to 2 items (its 2 image beats),
 // so a chunk of 10 scenes is up to 20 Gemini requests per job — comfortably small for a single
 // inline batchGenerateContent call.
 export const BATCH_CHUNK_SCENES = 10;
+
+// Deliberately its own (lower) constant, not sceneOrchestrator.js's MAX_PAID_CONCURRENCY — a
+// 120-scene video firing 6 concurrent submit requests within the same ~1s window is exactly the
+// burst that trips a per-second rate limit on Gemini's batch submission endpoint (confirmed live:
+// only the chunks caught in that first burst that happened to land inside the quota went through,
+// the rest failed silently — see the retry/backoff and stagger below, both new). Submission is a
+// single quick request per chunk (the job itself then runs on Google's side for hours), so a lower
+// concurrency here costs a few extra seconds of total submit time, not generation time.
+const MAX_BATCH_SUBMIT_CONCURRENCY = 2;
+// Spacing between one worker's successive submissions, on top of the lower concurrency above —
+// further smooths out bursts hitting the submission endpoint at the same instant.
+const SUBMIT_STAGGER_MIN_MS = 500;
+const SUBMIT_STAGGER_MAX_MS = 1000;
+// 2 retries, 5s then 15s — same backoff shape as mediaGenerationEngine.js's network-error retry,
+// but gated on looking like a rate limit specifically (see isRateLimitError below), not any error:
+// a real application error (bad prompt, invalid argument) won't resolve itself by retrying.
+const SUBMIT_RETRY_DELAYS_MS = [5000, 15000];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const staggerDelay = () => SUBMIT_STAGGER_MIN_MS + Math.random() * (SUBMIT_STAGGER_MAX_MS - SUBMIT_STAGGER_MIN_MS);
+
+// Recognizes a rate-limit/quota rejection from Gemini's submission endpoint — HTTP 429, or a
+// message mentioning rate/quota (Google's own wording for this varies; this catches both an exact
+// status and the common phrasing without assuming one specific error shape).
+function isRateLimitError(err) {
+  if (err?.status === 429) return true;
+  return /rate|quota/i.test(String(err?.message || ''));
+}
 
 // A beat's Gemini Batch item id/metadata.key — encodes both the scene and beat index so a result
 // can be routed back to the exact beat it belongs to, verified against the real API in
@@ -72,7 +100,9 @@ function chunkScenesNeedingImages(scenes, chunkSize) {
 }
 
 // Thin wrapper over api/gemini-batch.js's submit action — throws on failure so callers decide how
-// to handle a submission that never went out at all (nothing to persist in that case).
+// to handle a submission that never went out at all (nothing to persist in that case). The thrown
+// error carries `.status` (Gemini's own HTTP status when api/gemini-batch.js passed one through) so
+// callers can recognize a rate limit (429) specifically, not just "something failed".
 export async function submitImageBatchChunk(items, resolution) {
   const res = await fetch('/api/gemini-batch', {
     method: 'POST',
@@ -80,17 +110,44 @@ export async function submitImageBatchChunk(items, resolution) {
     body: JSON.stringify({ action: 'submit', items, resolution }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || data.error || 'Batch submit failed');
+  if (!res.ok) {
+    const err = new Error(data.detail || data.error || 'Batch submit failed');
+    err.status = data.status || res.status;
+    throw err;
+  }
   if (!data.jobId) throw new Error('Batch submit did not return a jobId');
   return data.jobId;
 }
 
+// Retries a chunk submission when the failure looks like a rate limit — 2 retries, 5s then 15s —
+// and gives up immediately (no retry) for anything else, since a real application error (an
+// invalid prompt, say) won't resolve itself by trying again. onRetry(attempt, totalAttempts, err)
+// fires before each wait, for the caller to surface it.
+async function submitImageBatchChunkWithRetry(items, resolution, onRetry) {
+  const totalAttempts = SUBMIT_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await submitImageBatchChunk(items, resolution);
+    } catch (err) {
+      if (attempt > SUBMIT_RETRY_DELAYS_MS.length || !isRateLimitError(err)) throw err;
+      const delay = SUBMIT_RETRY_DELAYS_MS[attempt - 1];
+      onRetry?.(attempt + 1, totalAttempts, err);
+      await sleep(delay);
+    }
+  }
+}
+
 /**
  * Submits every pending image beat in `project` as a set of Gemini Batch jobs, chunked by scene —
- * submitted in PARALLEL (same bounded-concurrency pool sceneOrchestrator.js already uses for paid
- * providers, MAX_PAID_CONCURRENCY workers) rather than one chunk waited on before the next starts.
- * Submission itself is a single quick request per chunk (the job then runs on Google's side for up
- * to hours) — there's no reason to serialize those requests, only the persistence reacting to them.
+ * submitted with bounded concurrency (MAX_BATCH_SUBMIT_CONCURRENCY workers, each pausing between
+ * its own successive submissions) rather than either fully sequential or fully parallel — both
+ * extremes either take unnecessarily long or burst the submission endpoint's rate limit. Submission
+ * itself is a single quick request per chunk (the job then runs on Google's side for up to hours).
+ *
+ * channelId/videoId/logStep: a chunk that exhausts its retries and fails to submit is logged via
+ * logStep with status 'error' — a submission that never went out is otherwise invisible anywhere
+ * except a browser console nobody may be watching, which is exactly the gap that caused 70 of 120
+ * scenes on one video to silently never be attempted.
  *
  * onProgress({ kind: 'batch-submitted', pendingEntry }): fired the instant a chunk's submit call
  * returns a jobId — possibly from several concurrent workers in close succession. The caller MUST
@@ -99,25 +156,35 @@ export async function submitImageBatchChunk(items, resolution) {
  * network persist call should be queued/serialized by the caller (e.g. a simple promise chain) so
  * two concurrent saveVideo calls for the same video can't finish out of order and silently drop an
  * already-appended entry. That's what gives the "never lost" guarantee this module exists for.
- * onProgress({ kind: 'message', text }): coarse progress text (chunk X/Y submitted).
+ * onProgress({ kind: 'message', text }): coarse progress text (chunk X/Y submitted, retry notices).
  *
  * Does not itself know whether persistence succeeded — that's the caller's responsibility, same as
  * every other engine module in this codebase.
  */
-export async function generateAllMediaViaBatch(project, { settings, resolution = '0.5K', onProgress } = {}) {
+export async function generateAllMediaViaBatch(project, { settings, channelId, videoId, resolution = '0.5K', onProgress, logStep } = {}) {
   const chunks = chunkScenesNeedingImages(project.scenes, BATCH_CHUNK_SCENES)
     .map((chunkSceneIds) => ({ chunkSceneIds, items: collectPendingBeatItems(project, chunkSceneIds, settings) }))
     .filter((c) => c.items.length > 0); // every beat in an empty chunk was already ready by the time we got here
 
   let submitted = 0;
-  await runWithConcurrency(chunks, MAX_PAID_CONCURRENCY, async ({ chunkSceneIds, items }) => {
+  await runWithConcurrency(chunks, MAX_BATCH_SUBMIT_CONCURRENCY, async ({ chunkSceneIds, items }) => {
     let jobId;
     try {
-      jobId = await submitImageBatchChunk(items, resolution);
+      jobId = await submitImageBatchChunkWithRetry(items, resolution, (attempt, total, err) =>
+        onProgress?.({ kind: 'message', text: `Batch submit retry ${attempt}/${total} after rate limit: ${String(err.message || err)}` })
+      );
     } catch (err) {
+      const message = `Batch chunk failed to submit (scenes: ${chunkSceneIds.join(', ')}): ${String(err.message || err)}`;
       console.error('[geminiBatchImageEngine] chunk submit failed', chunkSceneIds, err);
-      onProgress?.({ kind: 'message', text: `A batch chunk failed to submit: ${String(err.message || err)}` });
-      return; // this chunk's beats stay non-ready; a later completeness check will retry them
+      onProgress?.({ kind: 'message', text: message });
+      // This is the one place a failed submission used to vanish without a persisted trace — the
+      // scenes in this chunk stay non-ready with nothing on the record showing they were ever
+      // attempted. logStep makes the failure show up in the automation log even if nobody was
+      // watching the live view at the time; batchResumption.js's completeness check (independent of
+      // whether other jobs are still pending — see that file) is what actually retries it later.
+      await logStep?.(channelId, videoId, 'media', 'error', message)?.catch(() => {});
+      await sleep(staggerDelay());
+      return;
     }
 
     onProgress?.({
@@ -126,5 +193,6 @@ export async function generateAllMediaViaBatch(project, { settings, resolution =
     });
     submitted++;
     onProgress?.({ kind: 'message', text: `Submitted ${submitted}/${chunks.length} batch chunks…` });
+    await sleep(staggerDelay());
   });
 }

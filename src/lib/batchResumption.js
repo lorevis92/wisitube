@@ -21,11 +21,37 @@ import { parseBeatKey, collectPendingBeatItems, submitImageBatchChunk } from './
 // so the count survives across separate resumePendingBatches calls (e.g. across app reopens).
 const MAX_RECOVERY_CYCLES = 5;
 
+// Same timeout values mediaGenerationEngine.js uses for the equivalent kinds of calls — a status
+// check is small/quick, a results fetch can carry several images' worth of base64 data (bigger,
+// gets the longer budget), an upload is a single image going to Storage.
+const STATUS_TIMEOUT_MS = 20000;
+const RESULTS_TIMEOUT_MS = 45000;
+const UPLOAD_TIMEOUT_MS = 20000;
+
 function base64ToBlob(base64, mimeType) {
   const byteChars = atob(base64);
   const byteNumbers = new Array(byteChars.length);
   for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
   return new Blob([new Uint8Array(byteNumbers)], { type: mimeType || 'image/jpeg' });
+}
+
+// A genuine Promise.race against a timer — not just a signal the callee has to check — so this
+// caps the wait even for calls with no real cancellation support (uploadMedia/Supabase Storage has
+// no abort-signal param). For fetch-based calls, the same AbortController is also handed to `fn`,
+// so those get real cancellation (the underlying HTTP request actually stops) on top of the race.
+// This is what stops one slow/stuck job from blocking every job after it in the sequential loop
+// below — the previous version of this file had no timeout here at all.
+function withTimeout(fn, timeoutMs, label) {
+  const controller = new AbortController();
+  const timeoutPromise = new Promise((_, reject) => {
+    controller.signal.addEventListener('abort', () => {
+      const err = new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
+      err.name = 'AbortError';
+      reject(err);
+    });
+  });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return Promise.race([fn(controller.signal), timeoutPromise]).finally(() => clearTimeout(timer));
 }
 
 // Same per-beat patch shape mediaGenerationEngine.js's onProgress events use, applied immutably —
@@ -39,9 +65,21 @@ function applyBeatPatch(project, sceneId, beatIndex, patch) {
   };
 }
 
-function collectMissingBeats(project) {
+// Beats that are neither ready NOR the responsibility of any job still actually in flight — i.e.
+// genuinely never attempted (or whose job already failed and was already removed from
+// pendingImageBatches above), as opposed to "still waiting on a slow job that might yet succeed".
+// A scene claimed by a still-pending job is skipped even if its beats aren't ready yet: preempting
+// it with a duplicate recovery submission while the original might still come through would just
+// waste a batch job and a recovery-cycle count for nothing. This is what lets gap-filling run
+// without waiting for every pending job to finish — only for the ones that are still each
+// individually accounted for by an in-flight job.
+function collectTrulyMissingBeats(project) {
+  const claimedSceneIds = new Set();
+  (project.pendingImageBatches || []).forEach((entry) => (entry.chunkSceneIds || []).forEach((id) => claimedSceneIds.add(id)));
+
   const missing = [];
   (project.scenes || []).forEach((s) => {
+    if (claimedSceneIds.has(s.id)) return;
     (s.images || []).forEach((im, beatIndex) => {
       if (im.status !== 'ready') missing.push({ sceneId: s.id, beatIndex });
     });
@@ -50,25 +88,31 @@ function collectMissingBeats(project) {
 }
 
 async function fetchBatchStatus(jobId) {
-  const res = await fetch('/api/gemini-batch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'status', jobId }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || data.error || 'Batch status check failed');
-  return data;
+  return withTimeout(async (signal) => {
+    const res = await fetch('/api/gemini-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'status', jobId }),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.error || 'Batch status check failed');
+    return data;
+  }, STATUS_TIMEOUT_MS, 'Batch status check');
 }
 
 async function fetchBatchResultsFor(jobId) {
-  const res = await fetch('/api/gemini-batch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'results', jobId }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || data.error || 'Batch results fetch failed');
-  return Array.isArray(data.results) ? data.results : [];
+  return withTimeout(async (signal) => {
+    const res = await fetch('/api/gemini-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'results', jobId }),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.error || 'Batch results fetch failed');
+    return Array.isArray(data.results) ? data.results : [];
+  }, RESULTS_TIMEOUT_MS, 'Batch results fetch');
 }
 
 // Downloads one succeeded job's results and applies each one to the given beat — ready + uploaded
@@ -98,7 +142,11 @@ async function applyBatchResults(project, results, { userId, videoId, channelId,
         let backupFailed = false;
         try {
           // eslint-disable-next-line no-await-in-loop
-          storagePath = await uploadMedia(userId, videoId, 'scene-image', `${sceneId}-${beatIndex}`, blob);
+          storagePath = await withTimeout(
+            () => uploadMedia(userId, videoId, 'scene-image', `${sceneId}-${beatIndex}`, blob),
+            UPLOAD_TIMEOUT_MS,
+            'Storage upload'
+          );
         } catch (err) {
           console.error('[batchResumption] storage upload failed', sceneId, beatIndex, err);
           backupFailed = true;
@@ -214,12 +262,15 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
   // which would otherwise fire for every ordinary video generated through the regular
   // pollinations/nanobanana/gptimage pipeline (StoryboardStep already has its own regeneration UI
   // for those; this recovery loop is only for beats a batch job was actually responsible for).
-  // Also only runs once every currently known job has been accounted for (no point submitting a
-  // recovery batch for a beat whose job might still succeed a moment from now).
-  const stillPending = (current.pendingImageBatches || []).length > 0;
+  //
+  // Deliberately NOT gated on every pending job having been accounted for — a video with, say, one
+  // slow/stuck job left in pendingImageBatches must not block noticing and resubmitting scenes that
+  // were never claimed by ANY job at all (a chunk that failed to submit — see
+  // geminiBatchImageEngine.js — or was simply never included). collectTrulyMissingBeats already
+  // excludes anything still claimed by an in-flight job, so this is safe to run every time.
   const wasBatchInvolved = pending.length > 0 || (Number(current.batchRecoveryCycles) || 0) > 0;
-  if (!stillPending && wasBatchInvolved) {
-    const missing = collectMissingBeats(current);
+  if (wasBatchInvolved) {
+    const missing = collectTrulyMissingBeats(current);
     if (missing.length > 0) {
       const cycles = Number(current.batchRecoveryCycles) || 0;
       if (cycles >= MAX_RECOVERY_CYCLES) {
