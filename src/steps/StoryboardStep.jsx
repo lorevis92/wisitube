@@ -6,6 +6,8 @@ import { ANIMATION_LIST } from '../lib/engine';
 import { priceForImage } from '../lib/imageProviders';
 import { priceForVoice } from '../lib/voiceProviders';
 import { generateBeatImage, generateSceneAudio, generateAllMedia } from '../lib/mediaGenerationEngine';
+import { generateAllMediaViaBatch } from '../lib/geminiBatchImageEngine';
+import { resumePendingBatches } from '../lib/batchResumption';
 import ImageLightbox from '../components/ImageLightbox';
 
 // Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
@@ -19,6 +21,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const [showSeo, setShowSeo] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [costConfirm, setCostConfirm] = useState(null); // { imageCount, imageTotal, charCount, voiceTotal, total } | null
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
 
@@ -61,10 +64,16 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   // Translates mediaGenerationEngine.js's onProgress events into this component's own state
   // updates — same shapes as the update functions above (updateImage(sceneId, beatIndex, patch),
   // updateScene(sceneId, patch)), so this is a direct passthrough, not a transform.
+  // 'batch-submitted' (geminiBatchImageEngine.js) is the one event kind not native to this
+  // component — appends the newly-submitted job to project.pendingImageBatches, same shape
+  // fullPipelineRecipe.js's media phase already relies on for the automation path.
   function handleProgress(evt) {
     if (evt.kind === 'beat') updateImage(evt.sceneId, evt.beatIndex, evt.patch);
     else if (evt.kind === 'scene') updateScene(evt.sceneId, evt.patch);
     else if (evt.kind === 'message') setProgressMsg(evt.text);
+    else if (evt.kind === 'batch-submitted') {
+      setProject((p) => ({ ...p, pendingImageBatches: [...(p.pendingImageBatches || []), evt.pendingEntry] }));
+    }
   }
 
   async function genImage(sceneId, beatIndex, newSeed = false) {
@@ -79,8 +88,48 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
   async function generateAll() {
     setRunning(true);
-    await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: handleProgress });
-    setRunning(false);
+    try {
+      if (settings.imageProvider === 'nanobanana-batch') {
+        // Audio still generates synchronously and immediately — voice has nothing to do with
+        // which image provider is configured. skipImages so generateAllMedia's own image half
+        // (irrelevant on this path) never runs.
+        await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: handleProgress, skipImages: true });
+
+        // Only submits when nothing is currently outstanding — the same guard
+        // fullPipelineRecipe.js's media phase uses, so this button can't fire a second, duplicate
+        // batch for scenes a still-pending job already claimed. Checking for a status update on an
+        // outstanding batch is "🔄 Check for updates" below, not this button.
+        if (!(project.pendingImageBatches || []).length) {
+          await generateAllMediaViaBatch(project, { settings, channelId, videoId, logStep: null, resolution: '0.5K', onProgress: handleProgress });
+        }
+      } else {
+        await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: handleProgress });
+      }
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  // On-demand resume for the manual flow — same resumePendingBatches the automation path uses, no
+  // new logic. persist just calls setProject: App.jsx's own autosave effect (watching the lifted
+  // `project` state) is what actually writes to Supabase, same as every other mutation in this file.
+  async function checkForUpdates() {
+    setCheckingUpdates(true);
+    try {
+      const updated = await resumePendingBatches(project, {
+        userId,
+        videoId,
+        channelId,
+        settings,
+        onProgress: handleProgress,
+        persist: async (proj) => setProject(proj),
+      });
+      setProject(updated);
+    } catch (err) {
+      console.error('[StoryboardStep] checkForUpdates failed', err);
+    } finally {
+      setCheckingUpdates(false);
+    }
   }
 
   // Paid providers require an explicit confirmation before any billable call goes out — computed
@@ -222,8 +271,62 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         </div>
       )}
 
-      {/* Generation control */}
-      <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+      {/* Gemini Batch jobs in flight for this video replace the normal generation control + grid
+          entirely — same card design as AutomationMirrorStep.jsx's mirror of the same state, so a
+          batch-provider video looks the same whether it's being watched from automation or here.
+          Nothing here can accidentally re-submit a duplicate batch: the button that would is gone
+          while this card is showing; "🔄 Check for updates" only ever checks/resumes. */}
+      {(project.pendingImageBatches || []).length > 0 ? (() => {
+        const allBatchBeats = project.scenes.flatMap((s) => s.images || []);
+        const readyBatchBeats = allBatchBeats.filter((b) => b.status === 'ready');
+        const batchPct = allBatchBeats.length ? Math.round((readyBatchBeats.length / allBatchBeats.length) * 100) : 0;
+        return (
+          <div style={card}>
+            <div style={label}>Gemini Batch — images in progress</div>
+            <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.text, marginTop: 10 }}>
+              {readyBatchBeats.length} of {allBatchBeats.length} images ready — batch jobs in progress, may take up to a few hours
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+              <div style={{ flex: 1, height: 8, background: T.surfaceAlt, borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ width: `${batchPct}%`, height: '100%', background: T.primary, transition: 'width 0.3s' }} />
+              </div>
+              <span style={{ ...mono, fontSize: 12, color: T.textSecondary }}>{batchPct}%</span>
+            </div>
+            <button
+              onClick={checkForUpdates}
+              disabled={checkingUpdates}
+              style={{ ...btnPrimary, marginTop: 14, opacity: checkingUpdates ? 0.6 : 1 }}
+            >
+              {checkingUpdates ? 'Checking…' : '🔄 Check for updates'}
+            </button>
+            {readyBatchBeats.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={label}>Ready so far</div>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: isMobile ? 'repeat(auto-fill, minmax(80px, 1fr))' : 'repeat(auto-fill, minmax(110px, 1fr))',
+                    gap: 8,
+                    marginTop: 8,
+                  }}
+                >
+                  {readyBatchBeats.map((b) => (
+                    <img
+                      key={b.id}
+                      src={b.url}
+                      alt=""
+                      style={{ width: '100%', aspectRatio: '1/1', objectFit: 'cover', borderRadius: 4, border: `1px solid ${T.border}` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })() : (
+        <>
+          {/* Generation control */}
+          <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <div style={label}>3 · Generate images & voiceover</div>
           <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>
@@ -410,7 +513,9 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             </div>
           </div>
         ))}
-      </div>
+          </div>
+        </>
+      )}
 
       {lightbox && <ImageLightbox src={lightbox.url} alt={lightbox.alt} onClose={() => setLightbox(null)} />}
 

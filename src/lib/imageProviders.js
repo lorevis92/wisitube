@@ -7,14 +7,11 @@ export const PROVIDER_LABELS = {
   pollinations: 'Pollinations (Free)',
   nanobanana: 'Nano Banana 2 (~$0.08/image)',
   gptimage: 'GPT Image 2 (~$0.05-0.21/image)',
-};
-
-// Separate from PROVIDER_LABELS above — this option is only meaningful for automation (channel
-// automation_image_provider), not the manual per-video imageProvider picker (CreateStep.jsx), since
-// a batch job can take hours to resolve and the manual flow expects a generation to finish in the
-// same session. AutomationStep.jsx merges this into its own select alongside PROVIDER_LABELS.
-export const AUTOMATION_ONLY_PROVIDER_LABELS = {
-  'nanobanana-batch': 'Nano Banana 2 (Batch, ~$0.011-0.022/image, may take hours)',
+  // Selectable in both the manual flow (CreateStep.jsx/StoryboardStep.jsx) and automation
+  // (AutomationStep.jsx) — same provider id, same label, everywhere. Generation itself is async
+  // (submit now, resolve later — see geminiBatchImageEngine.js/batchResumption.js), which is why the
+  // label says so upfront rather than surprising the user with a stalled-looking "Generate" button.
+  'nanobanana-batch': 'Nano Banana 2 (Batch, ~$0.0225/image, may take hours)',
 };
 
 export const NANOBANANA_PRICES = { '0.5K': 0.06, '1K': 0.08, '2K': 0.12, '4K': 0.16 };
