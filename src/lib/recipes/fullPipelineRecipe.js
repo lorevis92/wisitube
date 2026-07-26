@@ -140,23 +140,32 @@ function buildScenesFromRaw(rawScenes) {
   });
 }
 
-// Applies one mediaGenerationEngine.js onProgress event to a local project copy — the same
-// per-beat/per-scene patch shape StoryboardStep.jsx's updateImage/updateScene apply to React state.
-// Needed here because generateAllMedia only reports through onProgress (there's no React state to
-// read back from in a headless caller), and this recipe has to know the final per-beat/per-scene
-// status afterward to detect partial failures generateAllMedia doesn't throw for on its own (a
-// single failed beat just stays 'error', silently).
+// Applies one mediaGenerationEngine.js/batchResumption.js onProgress event to a local project copy
+// — the same per-beat/per-scene patch shape StoryboardStep.jsx's updateImage/updateScene apply to
+// React state. Needed here because generateAllMedia/resumePendingBatches only report through
+// onProgress (there's no React state to read back from in a headless caller), and this recipe has
+// to know the final per-beat/per-scene status afterward to detect partial failures those don't
+// throw for on their own (a single failed beat just stays 'error', silently).
+//
+// Number(evt.sceneId) here is defense-in-depth, not the primary fix: project.scenes[].id is always
+// a number, and geminiBatchImageEngine.js's parseBeatKey now converts to a number at its own
+// source, so evt.sceneId should already be numeric by the time it gets here. But this function has
+// no way to know which emitter a given event came from, and the exact same silent-no-match failure
+// (a string sceneId compared with === against a numeric scene.id) would recur here even if some
+// future onProgress source ever forgot that conversion — so it's coerced again on the way in.
 function applyMediaProgress(project, evt) {
   if (evt.kind === 'beat') {
+    const sceneId = Number(evt.sceneId);
     return {
       ...project,
       scenes: project.scenes.map((s) =>
-        s.id === evt.sceneId ? { ...s, images: s.images.map((im, i) => (i === evt.beatIndex ? { ...im, ...evt.patch } : im)) } : s
+        s.id === sceneId ? { ...s, images: s.images.map((im, i) => (i === evt.beatIndex ? { ...im, ...evt.patch } : im)) } : s
       ),
     };
   }
   if (evt.kind === 'scene') {
-    return { ...project, scenes: project.scenes.map((s) => (s.id === evt.sceneId ? { ...s, ...evt.patch } : s)) };
+    const sceneId = Number(evt.sceneId);
+    return { ...project, scenes: project.scenes.map((s) => (s.id === sceneId ? { ...s, ...evt.patch } : s)) };
   }
   return project;
 }

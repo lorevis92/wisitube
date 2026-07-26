@@ -54,13 +54,26 @@ export function beatKey(sceneId, beatIndex) {
   return `${sceneId}:${beatIndex}`;
 }
 
+// Converts sceneId to a number HERE, once, rather than leaving it as the string every caller would
+// otherwise get from key.slice() — project.scenes[].id is always a plain number (see
+// fullPipelineRecipe.js's sceneIdCounter), and comparing that with a string sceneId via === always
+// fails silently (no match, no error): every consumer of a beat key looked like it worked while
+// never actually writing anything back to a scene. Converting at the source means a future new
+// consumer can't reintroduce the same bug by forgetting to convert at its own call site.
 export function parseBeatKey(key) {
   if (typeof key !== 'string') return null;
   const sep = key.lastIndexOf(':');
-  if (sep === -1) return null;
-  const sceneId = key.slice(0, sep);
+  if (sep === -1) {
+    console.error('[geminiBatchImageEngine] parseBeatKey: no ":" separator found', key);
+    return null;
+  }
+  const rawSceneId = key.slice(0, sep);
+  const sceneId = Number(rawSceneId);
   const beatIndex = Number(key.slice(sep + 1));
-  if (!sceneId || Number.isNaN(beatIndex)) return null;
+  if (!rawSceneId || Number.isNaN(sceneId) || Number.isNaN(beatIndex)) {
+    console.error('[geminiBatchImageEngine] parseBeatKey: sceneId or beatIndex not numeric', key);
+    return null;
+  }
   return { sceneId, beatIndex };
 }
 
