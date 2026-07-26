@@ -90,6 +90,12 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   // Raw status response viewer — collapsed by default, here so a status-mapping mismatch can be
   // diagnosed straight from the browser instead of needing Vercel's server logs.
   const [batchRawOpen, setBatchRawOpen] = useState(false);
+  // Same idea for results — unconditional, since the structured grid below is keyed off batchItems
+  // (this session's own textarea prompts) and shows nothing useful for a job pasted in via Job ID
+  // that was submitted from a different context (e.g. the real automation pipeline, with
+  // sceneId:beatIndex keys instead of test-N ones) — the raw response is the only view that always
+  // shows something for those.
+  const [batchResultsRawOpen, setBatchResultsRawOpen] = useState(false);
 
   // TEMPORARY diagnostic — calls api/gemini-single-test.js (non-batch generateContent) with the
   // first prompt, to isolate whether "Request contains an invalid argument" comes from the image
@@ -892,61 +898,109 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
         {batchError && <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 10 }}>{batchError}</div>}
 
         {batchResults && (
-          <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
-            {batchItems.map((item) => {
-              const result = batchResults.find((r) => r.id === item.id);
-              return (
-                <div key={item.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
-                  <div style={{ ...mono, fontSize: 9, color: T.textMuted, marginBottom: 6 }}>{item.id}</div>
-                  <div
-                    style={{
-                      borderRadius: 4,
-                      overflow: 'hidden',
-                      border: `1px solid ${T.border}`,
-                      background: T.surfaceAlt,
-                      aspectRatio: '1/1',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {result?.imageBase64 ? (
-                      <img
-                        src={`data:${result.mimeType || 'image/jpeg'};base64,${result.imageBase64}`}
-                        alt={item.prompt}
-                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                      />
-                    ) : (
-                      <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textAlign: 'center', padding: 8 }}>
-                        {result?.error ? `Error: ${result.error}` : 'No image'}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.4 }}>{item.prompt}</div>
-                  {result?.errorDetail && (
-                    <pre
+          <>
+            {/* Unconditional — the structured grid below is keyed off this session's own
+                batchItems, which is empty for a job pasted into Job ID that was submitted
+                elsewhere (e.g. the real automation pipeline). This always shows something. */}
+            <button
+              onClick={() => setBatchResultsRawOpen((v) => !v)}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                marginTop: 16,
+                fontSize: 10,
+                color: T.textMuted,
+                fontFamily: FONT.ui,
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                cursor: 'pointer',
+              }}
+            >
+              {batchResultsRawOpen ? 'Hide raw results ▲' : `Show raw results ▼ (${batchResults.length})`}
+            </button>
+            {batchResultsRawOpen && (
+              <pre
+                style={{
+                  marginTop: 8,
+                  padding: 10,
+                  background: T.surfaceAlt,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 4,
+                  fontSize: 10,
+                  lineHeight: 1.5,
+                  maxHeight: 320,
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {JSON.stringify(batchResults, null, 2)}
+              </pre>
+            )}
+
+            {/* Iterates the results themselves, not batchItems — a result with no matching local
+                prompt (this session never submitted it, e.g. a real-pipeline job id pasted into
+                Job ID) still renders, labeled with its own raw id/key, instead of being silently
+                omitted because nothing in the textarea happened to match it. */}
+            <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+              {batchResults.map((result) => {
+                const item = batchItems.find((it) => it.id === result.id);
+                return (
+                  <div key={result.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
+                    <div style={{ ...mono, fontSize: 9, color: T.textMuted, marginBottom: 6 }}>{result.id}</div>
+                    <div
                       style={{
-                        marginTop: 8,
-                        padding: 8,
-                        background: T.primaryLight,
-                        border: `1px solid ${T.primaryBorder}`,
                         borderRadius: 4,
-                        fontSize: 10,
-                        lineHeight: 1.5,
-                        color: T.primary,
-                        maxHeight: 200,
-                        overflow: 'auto',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
+                        overflow: 'hidden',
+                        border: `1px solid ${T.border}`,
+                        background: T.surfaceAlt,
+                        aspectRatio: '1/1',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
                       }}
                     >
-                      {JSON.stringify(result.errorDetail, null, 2)}
-                    </pre>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                      {result?.imageBase64 ? (
+                        <img
+                          src={`data:${result.mimeType || 'image/jpeg'};base64,${result.imageBase64}`}
+                          alt={item?.prompt || result.id}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                      ) : (
+                        <span style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textAlign: 'center', padding: 8 }}>
+                          {result?.error ? `Error: ${result.error}` : 'No image'}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.4 }}>
+                      {item ? item.prompt : <em style={{ color: T.textMuted }}>(no matching prompt in this session — raw id above)</em>}
+                    </div>
+                    {result?.errorDetail && (
+                      <pre
+                        style={{
+                          marginTop: 8,
+                          padding: 8,
+                          background: T.primaryLight,
+                          border: `1px solid ${T.primaryBorder}`,
+                          borderRadius: 4,
+                          fontSize: 10,
+                          lineHeight: 1.5,
+                          color: T.primary,
+                          maxHeight: 200,
+                          overflow: 'auto',
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                        }}
+                      >
+                        {JSON.stringify(result.errorDetail, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
     </div>
