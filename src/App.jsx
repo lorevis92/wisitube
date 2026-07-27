@@ -100,6 +100,16 @@ export default function App() {
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
   const [createdAt, setCreatedAt] = useState(null);
+  // The channel the OPEN video actually belongs to — distinct from currentChannelId (which just
+  // means "which channel dashboard is on screen right now"). Set exactly once, at the moment a
+  // video is created (handleOutlineReady) or resumed (handleResume), and never touched by mere
+  // channel-dashboard navigation. Before this existed, the autosave effect and persistPartial both
+  // read currentChannelId directly — so leaving a video open (project/projectId not reset) and
+  // then browsing to a different channel via the "Channels" breadcrumb silently reassigned that
+  // video to whatever channel was on screen when the debounced save next fired. null whenever no
+  // video is known to be safely attributable to a channel — the autosave guard below refuses to
+  // save in that state rather than writing a wrong or null channel_id.
+  const [openVideoChannelId, setOpenVideoChannelId] = useState(null);
   // True while handleResume is re-downloading scene/audio/reference Blobs from Supabase Storage
   // for a video whose media survives only there (Phase 3) — the rest of the app assumes
   // project.scenes already has usable Blob/object-URLs, so nothing renders until that's true.
@@ -186,9 +196,17 @@ export default function App() {
     const generation = generationRef.current;
     const timer = setTimeout(() => {
       if (generationRef.current !== generation) return; // a different video took over — discard
+      if (!openVideoChannelId) {
+        // Never seen a valid creation/resume point for this video (or it was cleared by
+        // backToChannels/startNewProjectWithTopic) — writing null (or, before this guard existed,
+        // whatever currentChannelId happened to be) would either corrupt or silently reassign the
+        // video. Refuse and wait for the next debounce instead.
+        console.warn('[autosave] refusing to save — no openVideoChannelId for the open video', projectId);
+        return;
+      }
       saveVideo({
         id: projectId,
-        channelId: currentChannelId,
+        channelId: openVideoChannelId,
         createdAt: createdAt || Date.now(),
         updatedAt: Date.now(),
         topic: settings.topic,
@@ -202,7 +220,7 @@ export default function App() {
       }).catch((err) => console.error('[autosave] saveVideo failed', err));
     }, 800);
     return () => clearTimeout(timer);
-  }, [project, settings, projectId, createdAt, currentChannelId]);
+  }, [project, settings, projectId, createdAt, openVideoChannelId]);
 
   // Phase 1: CreateStep only asks for title options — nothing is saved yet.
   function handleTitles(titles) {
@@ -216,10 +234,21 @@ export default function App() {
   // Persists whatever scenes have been generated so far under the in-progress video's id, so a
   // crash or refresh mid-generation never loses completed chunks — the video shows up in the
   // channel dashboard (incomplete but resumable) even if generation never finishes.
-  function persistPartial(plan, rawScenesSoFar, id, createdAtVal) {
+  //
+  // channelIdVal is passed explicitly rather than read from openVideoChannelId state directly:
+  // handleOutlineReady calls setOpenVideoChannelId(...) and then, in the same synchronous
+  // invocation, kicks off runSceneGeneration → this function — React hasn't re-rendered yet at
+  // that point, so persistPartial's own closure would still see the PREVIOUS render's (possibly
+  // null) openVideoChannelId if it read the state directly instead. Passing the value down avoids
+  // that staleness entirely.
+  function persistPartial(plan, rawScenesSoFar, id, createdAtVal, channelIdVal) {
+    if (!channelIdVal) {
+      console.warn('[persistPartial] refusing to save — no channelId for the in-progress video', id);
+      return;
+    }
     saveVideo({
       id,
-      channelId: currentChannelId,
+      channelId: channelIdVal,
       createdAt: createdAtVal,
       updatedAt: Date.now(),
       topic: settings.topic,
@@ -238,7 +267,7 @@ export default function App() {
     });
   }
 
-  async function runSceneGeneration(plan, id, createdAtVal, generation) {
+  async function runSceneGeneration(plan, id, createdAtVal, generation, channelIdVal) {
     const context = {
       topic: settings.topic,
       title: plan.title,
@@ -255,7 +284,7 @@ export default function App() {
       const scenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
         if (generationRef.current !== generation) return; // abandoned — a different video took over
         setSceneProgress({ current: soFar.length, total });
-        persistPartial(plan, soFar, id, createdAtVal);
+        persistPartial(plan, soFar, id, createdAtVal, channelIdVal);
       });
       if (generationRef.current !== generation) return;
       setProject({
@@ -286,6 +315,12 @@ export default function App() {
     const newCreatedAt = Date.now();
     setProjectId(newProjectId);
     setCreatedAt(newCreatedAt);
+    // Captured once, here, at video-creation time — currentChannelId is safe to read directly in
+    // this same synchronous call (it isn't being changed by this function), but the state setter
+    // below won't be visible to this same invocation's own closures until the next render, so
+    // runSceneGeneration/persistPartial are handed the local currentChannelId value explicitly
+    // rather than reading openVideoChannelId back out of state.
+    setOpenVideoChannelId(currentChannelId);
     setGenerationError('');
 
     // Reference files must survive reloads (IndexedDB) and later regenerations, so convert each
@@ -319,7 +354,7 @@ export default function App() {
     setSceneProgress({ current: 0, total: plan.totalScenes });
     setTab('generating-scenes');
 
-    await runSceneGeneration(plan, newProjectId, newCreatedAt, generation);
+    await runSceneGeneration(plan, newProjectId, newCreatedAt, generation, currentChannelId);
   }
 
   function retryScenes() {
@@ -327,7 +362,10 @@ export default function App() {
     generationRef.current += 1;
     const generation = generationRef.current;
     setGenerationError('');
-    runSceneGeneration(pendingPlan, projectId, createdAt, generation);
+    // Unlike handleOutlineReady above, this fires from a later, separate render (a user click),
+    // so openVideoChannelId state has already settled to whatever handleOutlineReady set it to —
+    // safe to read directly here.
+    runSceneGeneration(pendingPlan, projectId, createdAt, generation, openVideoChannelId);
   }
 
   function backToTitlesFromFailure() {
@@ -416,6 +454,10 @@ export default function App() {
     setProject(resumedProject);
     setProjectId(record.id);
     setCreatedAt(record.createdAt || Date.now());
+    // The video's own recorded channelId, not whatever currentChannelId happens to be — this is
+    // the one value the autosave effect will use for every future save of this video, regardless
+    // of which channel dashboard the user later browses to.
+    setOpenVideoChannelId(record.channelId || null);
     // Resume only ever happens from within a channel's dashboard, so currentChannelId is already
     // set — this just guards against staleness (e.g. a video record whose channelId differs).
     if (record.channelId) setCurrentChannelId(record.channelId);
@@ -433,6 +475,7 @@ export default function App() {
     setProject(null);
     setProjectId(null);
     setCreatedAt(null);
+    setOpenVideoChannelId(null);
     setTitleOptions(null);
     setPendingPlan(null);
     setGenerationError('');
@@ -450,11 +493,19 @@ export default function App() {
     setCurrentChannelName(channel.name || '');
   }
 
-  // Fully exits the current channel — used by the top-level "Channels" breadcrumb segment.
+  // Fully exits the current channel — used by the top-level "Channels" breadcrumb segment. Note:
+  // this does NOT reset project/projectId (pre-existing behavior — a video can still technically
+  // be "open" in memory after this call, e.g. if the user comes back via the same breadcrumb).
+  // Clearing openVideoChannelId here regardless is what actually closes the bug this was written
+  // to fix: if the autosave effect fires again after this (project/projectId still set) — whether
+  // because the user reopens ChannelsListStep and picks a *different* channel, or for any other
+  // reason — it now finds openVideoChannelId null and refuses to save instead of picking up
+  // whatever channel is on screen next.
   function backToChannels() {
     setCurrentChannelId(null);
     setCurrentChannelName('');
     setCurrentChannel(null);
+    setOpenVideoChannelId(null);
     setTab('channels');
   }
 
