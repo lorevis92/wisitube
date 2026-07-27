@@ -493,19 +493,22 @@ export default function App() {
     setCurrentChannelName(channel.name || '');
   }
 
-  // Fully exits the current channel — used by the top-level "Channels" breadcrumb segment. Note:
-  // this does NOT reset project/projectId (pre-existing behavior — a video can still technically
-  // be "open" in memory after this call, e.g. if the user comes back via the same breadcrumb).
-  // Clearing openVideoChannelId here regardless is what actually closes the bug this was written
-  // to fix: if the autosave effect fires again after this (project/projectId still set) — whether
-  // because the user reopens ChannelsListStep and picks a *different* channel, or for any other
-  // reason — it now finds openVideoChannelId null and refuses to save instead of picking up
-  // whatever channel is on screen next.
+  // Fully exits the current channel — used by the top-level "Channels" breadcrumb segment. Closes
+  // whatever video was open (same reset shape as startNewProjectWithTopic) rather than leaving it
+  // dangling in memory for the autosave guard to merely refuse to save — returning to the channel
+  // list means there is no longer an open video, full stop. generationRef is bumped for the same
+  // reason startNewProjectWithTopic bumps it: a handleResume (or scene-generation) call already in
+  // flight when this fires must recognize it's now stale and abort instead of resurrecting
+  // project/projectId after this reset.
   function backToChannels() {
+    generationRef.current += 1;
     setCurrentChannelId(null);
     setCurrentChannelName('');
     setCurrentChannel(null);
     setOpenVideoChannelId(null);
+    setProject(null);
+    setProjectId(null);
+    setCreatedAt(null);
     setTab('channels');
   }
 
