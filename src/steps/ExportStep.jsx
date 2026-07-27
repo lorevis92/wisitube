@@ -4,7 +4,6 @@ import { loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
 import { WebCodecsUnsupportedError } from '../lib/exporter';
 import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
-import { listChannels } from '../lib/db';
 import { generateThumbnail } from '../lib/thumbnailEngine';
 import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
 import { renderVideoForExport } from '../lib/videoRenderEngine';
@@ -40,24 +39,12 @@ function minScheduleLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export default function ExportStep({ project, setProject, settings, channel, channelId, videoId, userId, isMobile, onMoveToChannel }) {
+export default function ExportStep({ project, setProject, settings, channel, channelId, videoId, userId, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const abortRef = useRef(null);
   const [rendering, setRendering] = useState(false);
   const [pct, setPct] = useState(0);
-
-  // "Move to another channel" — a reassignment of ownership, not a routine edit, so it's gated
-  // behind loading the full channel list on demand (not on mount) and an explicit confirm naming
-  // both channels. otherChannels is fetched fresh every time the selector opens rather than cached,
-  // same reasoning as ChannelDashboardStep's playlist panel (a channel created moments ago should
-  // show up immediately).
-  const [moveOpen, setMoveOpen] = useState(false);
-  const [otherChannels, setOtherChannels] = useState([]);
-  const [channelsLoading, setChannelsLoading] = useState(false);
-  const [selectedMoveChannelId, setSelectedMoveChannelId] = useState('');
-  const [moveBusy, setMoveBusy] = useState(false);
-  const [moveError, setMoveError] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
   // The raw Blob behind videoUrl — kept separately so the YouTube upload can hand it straight to
   // uploadVideoToYoutube instead of re-fetching the blob: URL, which is known to go invalid across
@@ -235,42 +222,6 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     });
   }
 
-  async function openMoveSelector() {
-    setMoveOpen(true);
-    setMoveError('');
-    setChannelsLoading(true);
-    try {
-      const all = await listChannels();
-      const others = all.filter((c) => c.id !== channelId);
-      setOtherChannels(others);
-      setSelectedMoveChannelId(others[0]?.id || '');
-    } catch (err) {
-      setMoveError('Could not load channels: ' + String(err.message || err));
-    } finally {
-      setChannelsLoading(false);
-    }
-  }
-
-  async function confirmMove() {
-    const target = otherChannels.find((c) => c.id === selectedMoveChannelId);
-    if (!target) return;
-    const fromName = channel?.name || 'this channel';
-    const toName = target.name || 'Untitled channel';
-    const ok = window.confirm(
-      `Move "${title}" from "${fromName}" to "${toName}"?\n\nIt will disappear from ${fromName}'s dashboard and appear under ${toName} instead.`
-    );
-    if (!ok) return;
-    setMoveBusy(true);
-    setMoveError('');
-    try {
-      await onMoveToChannel?.(target.id, target.name || '');
-      // On success the parent navigates away (this component unmounts) — nothing left to reset here.
-    } catch (err) {
-      setMoveError('Move failed: ' + String(err.message || err));
-      setMoveBusy(false);
-    }
-  }
-
   async function makeThumbnail() {
     setThumbBusy(true);
     setThumbReady(false);
@@ -431,51 +382,6 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Move to a different channel — not part of the numbered export pipeline below, kept at the
-          top so it's visible without scrolling for any open video. Changing which channel a video
-          belongs to is an ownership change, not a routine edit — gated behind an explicit confirm
-          naming both channels (see confirmMove above), never a single accidental click. */}
-      <div style={card}>
-        <div style={label}>Channel</div>
-        <div style={{ fontSize: 13, color: T.textSecondary, marginTop: 8, fontFamily: FONT.ui }}>
-          This video belongs to <strong>{channel?.name || 'this channel'}</strong>.
-        </div>
-        {!moveOpen ? (
-          <button onClick={openMoveSelector} style={{ ...btnGhost, marginTop: 12 }}>
-            Move to another channel
-          </button>
-        ) : (
-          <div style={{ marginTop: 12 }}>
-            {channelsLoading ? (
-              <div style={{ fontSize: 12, color: T.textMuted, fontFamily: FONT.ui }}>Loading channels…</div>
-            ) : otherChannels.length === 0 ? (
-              <div style={{ fontSize: 12, color: T.textMuted, fontFamily: FONT.ui }}>No other channels to move this video to.</div>
-            ) : (
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                <select
-                  value={selectedMoveChannelId}
-                  onChange={(e) => setSelectedMoveChannelId(e.target.value)}
-                  style={{ ...inputStyle, minWidth: 200, width: 'auto' }}
-                >
-                  {otherChannels.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name || 'Untitled channel'}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={confirmMove} disabled={moveBusy} style={{ ...btnPrimary, opacity: moveBusy ? 0.6 : 1 }}>
-                  {moveBusy ? 'Moving…' : 'Move'}
-                </button>
-                <button onClick={() => setMoveOpen(false)} disabled={moveBusy} style={btnGhost}>
-                  Cancel
-                </button>
-              </div>
-            )}
-            {moveError && <div style={{ marginTop: 10, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{moveError}</div>}
-          </div>
-        )}
-      </div>
-
       {/* Video export */}
       <div style={card}>
         <div style={label}>5 · Export video</div>

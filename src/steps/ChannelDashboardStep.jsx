@@ -3,7 +3,9 @@ import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '..
 import {
   listVideosByChannel,
   deleteVideo,
+  saveVideo,
   loadChannel,
+  listChannels,
   saveChannel,
   deleteChannel,
   clearYoutubeConnection,
@@ -71,6 +73,16 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [playlistsOpen, setPlaylistsOpen] = useState(false);
   const [playlistsLoading, setPlaylistsLoading] = useState(false);
   const [playlists, setPlaylists] = useState(null);
+  // "Move to another channel" — id of the video card whose inline selector is open (null = none),
+  // only one at a time. Operates directly on the saved record from `videos` (already the full
+  // saveVideo-shaped object — see fromVideoRow, src/lib/db.js), not on App.jsx's project/projectId
+  // state, so a video can be moved without ever opening it.
+  const [moveOpenForId, setMoveOpenForId] = useState(null);
+  const [moveChannels, setMoveChannels] = useState([]);
+  const [moveChannelsLoading, setMoveChannelsLoading] = useState(false);
+  const [selectedMoveChannelId, setSelectedMoveChannelId] = useState('');
+  const [movingId, setMovingId] = useState(null);
+  const [moveError, setMoveError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -247,6 +259,58 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     if (!window.confirm('Delete this video? This cannot be undone.')) return;
     await deleteVideo(id);
     setVideos((list) => list.filter((v) => v.id !== id));
+  }
+
+  async function openMoveFor(v) {
+    setMoveOpenForId(v.id);
+    setMoveError('');
+    setMoveChannelsLoading(true);
+    try {
+      const all = await listChannels();
+      const others = all.filter((c) => c.id !== channelId);
+      setMoveChannels(others);
+      setSelectedMoveChannelId(others[0]?.id || '');
+    } catch (err) {
+      setMoveError('Could not load channels: ' + String(err.message || err));
+    } finally {
+      setMoveChannelsLoading(false);
+    }
+  }
+
+  function closeMove() {
+    setMoveOpenForId(null);
+    setMoveError('');
+  }
+
+  // v is the full record from `videos` (id, channelId, createdAt, topic, settings, displayTitle,
+  // plus every project field — see fromVideoRow, src/lib/db.js), so saveVideo({ ...v, channelId })
+  // is a faithful re-save of exactly what's already on the row, just under a different channel —
+  // no in-memory project/projectId state needed, unlike the version of this that used to live in
+  // ExportStep.jsx and required the video to already be open.
+  async function confirmMoveVideo(v) {
+    const target = moveChannels.find((c) => c.id === selectedMoveChannelId);
+    if (!target) return;
+    const fromName = channel?.name || 'this channel';
+    const toName = target.name || 'Untitled channel';
+    const title = v.displayTitle || 'Untitled video';
+    const ok = window.confirm(
+      `Move "${title}" from "${fromName}" to "${toName}"?\n\nIt will disappear from ${fromName}'s dashboard and appear under ${toName} instead.`
+    );
+    if (!ok) return;
+    setMovingId(v.id);
+    setMoveError('');
+    try {
+      await saveVideo({ ...v, channelId: target.id });
+      // The moved video no longer belongs here — reload from the server rather than just filtering
+      // it out locally, so the grid reflects exactly what's actually saved.
+      const fresh = await listVideosByChannel(channelId);
+      setVideos(fresh);
+      setMoveOpenForId(null);
+    } catch (err) {
+      setMoveError('Move failed: ' + String(err.message || err));
+    } finally {
+      setMovingId(null);
+    }
   }
 
   if (videos === null) {
@@ -696,10 +760,52 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                   <button onClick={() => onResume(v)} style={{ ...btnPrimary, flex: 1 }}>
                     Resume
                   </button>
+                  <button
+                    onClick={() => (moveOpenForId === v.id ? closeMove() : openMoveFor(v))}
+                    title="Move to another channel"
+                    style={btnGhost}
+                  >
+                    ⇄
+                  </button>
                   <button onClick={() => handleDeleteVideo(v.id)} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
                     Delete
                   </button>
                 </div>
+
+                {moveOpenForId === v.id && (
+                  <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>
+                    {moveChannelsLoading ? (
+                      <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>Loading channels…</div>
+                    ) : moveChannels.length === 0 ? (
+                      <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>No other channels to move this video to.</div>
+                    ) : (
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <select
+                          value={selectedMoveChannelId}
+                          onChange={(e) => setSelectedMoveChannelId(e.target.value)}
+                          style={{ ...inputStyle, flex: 1, minWidth: 110, fontSize: 11, padding: '6px 8px' }}
+                        >
+                          {moveChannels.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name || 'Untitled channel'}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => confirmMoveVideo(v)}
+                          disabled={movingId === v.id}
+                          style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, opacity: movingId === v.id ? 0.6 : 1 }}
+                        >
+                          {movingId === v.id ? '…' : 'Move'}
+                        </button>
+                        <button onClick={closeMove} disabled={movingId === v.id} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                    {moveError && <div style={{ marginTop: 6, fontSize: 10, color: T.primary, fontFamily: FONT.ui }}>{moveError}</div>}
+                  </div>
+                )}
               </div>
             );
           })}

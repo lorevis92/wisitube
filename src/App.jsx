@@ -512,32 +512,6 @@ export default function App() {
     setTab('channels');
   }
 
-  // Moves the open video to a different channel — an explicit ownership change, triggered from
-  // ExportStep.jsx's "Move to another channel" selector (already confirmed there before this is
-  // called). Writes channel_id via the exact same saveVideo payload shape the debounced autosave
-  // uses, then updates openVideoChannelId to match: the very next autosave tick must already agree
-  // with what was just written, not reassign the video right back to the channel it left. Finally
-  // hands the user off to the new channel's dashboard — ChannelDashboardStep re-fetches on its own
-  // whenever its channelId prop changes, so currentChannel/currentChannelName end up correct even
-  // without waiting on the newChannelName argument (passed only to avoid a blank-name flash).
-  async function moveVideoToChannel(newChannelId, newChannelName) {
-    if (!projectId || !project || !newChannelId) return;
-    await saveVideo({
-      id: projectId,
-      channelId: newChannelId,
-      createdAt: createdAt || Date.now(),
-      updatedAt: Date.now(),
-      topic: settings.topic,
-      settings,
-      ...project,
-      displayTitle: project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video',
-    });
-    setOpenVideoChannelId(newChannelId);
-    setCurrentChannelId(newChannelId);
-    setCurrentChannelName(newChannelName || '');
-    setTab('channels');
-  }
-
   const hasPlan = !!project;
   const hasMedia = hasPlan && project.scenes.every(isSceneMediaReady);
   const currentVideoTitle = hasPlan
@@ -717,11 +691,10 @@ export default function App() {
             setProject={setProject}
             settings={settings}
             channel={currentChannel}
-            channelId={openVideoChannelId}
+            channelId={currentChannelId}
             videoId={projectId}
             userId={session.user?.id}
             isMobile={isMobile}
-            onMoveToChannel={moveVideoToChannel}
           />
         )}
       </main>
