@@ -182,7 +182,10 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const readyCount = project.scenes.filter(isSceneReady).length;
   const allReady = readyCount === project.scenes.length;
   const totalSec = project.scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
-  const remainingSeconds = useMemo(() => estimateRemainingSeconds(project.scenes, isModelWarm()), [project.scenes]);
+  const { syncSeconds: remainingSeconds, imageEta } = useMemo(
+    () => estimateRemainingSeconds(project.scenes, isModelWarm(), settings.imageProvider),
+    [project.scenes, settings.imageProvider]
+  );
 
   const statusDot = (st, title) => (
     <span
@@ -335,7 +338,11 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             {progressMsg && ` · ${progressMsg}`}
           </div>
           <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 4 }}>
-            ⏱ Estimated time remaining: {allReady ? 'Done' : formatDuration(remainingSeconds)}
+            {allReady
+              ? '⏱ Estimated time remaining: Done'
+              : imageEta
+                ? '⏱ Images will be generated via Gemini Batch — submitting shortly'
+                : `⏱ Estimated time remaining: ${formatDuration(remainingSeconds)}`}
           </div>
           {running && (
             <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>

@@ -78,31 +78,53 @@ export function estimateScenesChunkSeconds(lengthMinutes) {
   return chunkCount * SCENES_PER_CHUNK_S;
 }
 
-export function estimateTotalSeconds({ lengthMinutes, modelWarm }) {
+// Both functions below return { syncSeconds, imageEta } rather than a plain number of seconds.
+// Image generation time is only ever learned from the synchronous providers (recordImageTime is
+// called from mediaGenerationEngine.js's generateBeatImage, which nanobanana-batch videos skip
+// entirely via skipImages) — summing that learned average into a single second-scale total for a
+// provider that actually submits jobs Google can take minutes to hours to resolve produced a
+// number that looked precise but was fiction. syncSeconds is everything this module can actually
+// estimate on a seconds/minutes scale (script writing, audio, and — for every non-batch provider —
+// images too); imageEta is null unless the image provider is 'nanobanana-batch', in which case it's
+// the qualitative string 'minutes-to-hours' and the image time is deliberately left OUT of
+// syncSeconds — callers must show the two separately, never add them together.
+function batchImageEta(imageProvider, hasImagesToGenerate) {
+  return imageProvider === 'nanobanana-batch' && hasImagesToGenerate ? 'minutes-to-hours' : null;
+}
+
+export function estimateTotalSeconds({ lengthMinutes, modelWarm, imageProvider }) {
   const sceneCount = estimateSceneCount(lengthMinutes);
   const avgImage = getAvgImageTime();
   const avgAudio = getAvgAudioTime();
   const scriptPhasesS = TITLES_PHASE_S + OUTLINE_PHASE_S + estimateScenesChunkSeconds(lengthMinutes);
-  return scriptPhasesS + sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5) + sceneCount * avgAudio + (modelWarm ? 0 : 90);
+  const isBatch = imageProvider === 'nanobanana-batch';
+  const imageSeconds = isBatch ? 0 : sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5);
+  const syncSeconds = scriptPhasesS + imageSeconds + sceneCount * avgAudio + (modelWarm ? 0 : 90);
+  return { syncSeconds, imageEta: batchImageEta(imageProvider, sceneCount > 0) };
 }
 
-export function estimateRemainingSeconds(scenes, modelWarm) {
+export function estimateRemainingSeconds(scenes, modelWarm, imageProvider) {
   const avgImage = getAvgImageTime();
   const avgAudio = getAvgAudioTime();
-  let total = 0;
+  const isBatch = imageProvider === 'nanobanana-batch';
+  let syncSeconds = 0;
   let hasAudioToGenerate = false;
+  let hasImagesToGenerate = false;
   for (const s of scenes || []) {
     const images = Array.isArray(s.images) ? s.images : [];
     for (const im of images) {
-      if (im.status !== 'ready') total += avgImage + 1.5;
+      if (im.status !== 'ready') {
+        hasImagesToGenerate = true;
+        if (!isBatch) syncSeconds += avgImage + 1.5;
+      }
     }
     if (s.audioStatus !== 'ready') {
-      total += avgAudio;
+      syncSeconds += avgAudio;
       hasAudioToGenerate = true;
     }
   }
-  if (!modelWarm && hasAudioToGenerate) total += 90;
-  return total;
+  if (!modelWarm && hasAudioToGenerate) syncSeconds += 90;
+  return { syncSeconds, imageEta: batchImageEta(imageProvider, hasImagesToGenerate) };
 }
 
 export function formatDuration(seconds) {

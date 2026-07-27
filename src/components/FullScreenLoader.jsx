@@ -6,6 +6,10 @@ export default function FullScreenLoader({
   title = 'Setting up your storyboard…',
   subtitle = 'Claude is writing your script, titles and thumbnail ideas',
   estimatedSeconds,
+  // Set only when the chosen image provider is 'nanobanana-batch' (see TitleSelectStep.jsx) —
+  // estimatedSeconds in that case already excludes image time entirely (see estimator.js), so the
+  // two are shown as separate, differently-scaled facts instead of one misleading combined number.
+  imageEta,
   note,
   progress,
 }) {
@@ -65,7 +69,14 @@ export default function FullScreenLoader({
         {Number.isFinite(estimatedSeconds) && (
           <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${T.border}` }}>
             <div style={{ ...mono, fontSize: 13, color: T.text, fontWeight: 700 }}>
-              Estimated total time to finish this video: ~{formatDuration(estimatedSeconds)}
+              {imageEta ? (
+                <>
+                  Script and audio: ~{formatDuration(estimatedSeconds)} · Images: submitted in batches, typically minutes to a
+                  few hours (you can close this tab and check back later)
+                </>
+              ) : (
+                <>Estimated total time to finish this video: ~{formatDuration(estimatedSeconds)}</>
+              )}
             </div>
           </div>
         )}

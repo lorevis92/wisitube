@@ -6,7 +6,13 @@
 export const PROVIDER_LABELS = {
   pollinations: 'Pollinations (Free)',
   nanobanana: 'Nano Banana 2 (~$0.08/image)',
-  gptimage: 'GPT Image 2 (~$0.05-0.21/image)',
+  // quality is hardcoded 'medium' at every real call site (mediaGenerationEngine.js,
+  // thumbnailEngine.js, StoryboardStep.jsx, automationEngine.js) — there's no UI control to select
+  // 'low'/'high' yet, so the low ($0.006) and high ($0.211) GPTIMAGE_PRICES tiers below are never
+  // actually charged. The label reflects what's really billed today (medium, plus the reference
+  // surcharge) rather than the full range the price table could theoretically produce — if quality
+  // ever becomes user-selectable, this label needs revisiting alongside that UI addition.
+  gptimage: 'GPT Image 2 (~$0.05/image, +50% with reference photos)',
   // Selectable in both the manual flow (CreateStep.jsx/StoryboardStep.jsx) and automation
   // (AutomationStep.jsx) — same provider id, same label, everywhere. Generation itself is async
   // (submit now, resolve later — see geminiBatchImageEngine.js/batchResumption.js), which is why the
@@ -45,8 +51,17 @@ export function priceForImage(provider, { width = 1280, height = 720, quality = 
     return NANOBANANA_PRICES[tier] ?? NANOBANANA_PRICES['1K'];
   }
   if (provider === 'nanobanana-batch') {
-    const tier = resolutionTier(width, height);
-    return NANOBANANA_BATCH_PRICES[tier] ?? NANOBANANA_BATCH_PRICES['0.5K'];
+    // Deliberately ignores the width/height passed in — every real caller (geminiBatchImageEngine.js,
+    // fullPipelineRecipe.js, StoryboardStep.jsx, AutomationStep.jsx) hardcodes resolution: '0.5K' for
+    // the actual batch submission, but callers computing a cost *estimate* (StoryboardStep.jsx's
+    // estimateCost, automationEngine.js's estimateFullPipelineCost) pass the video's display dims
+    // (1280x720 or 720x1280), which resolutionTier() maps to '1K' — a tier NANOBANANA_BATCH_PRICES
+    // doesn't define. That silently worked only because the `??` fallback below happened to land on
+    // the one tier that does exist; deriving the tier from dims here was never actually correct, just
+    // unobservably so. Hardcode '0.5K' explicitly instead — if another batch resolution tier is ever
+    // added, whoever adds it will find this line and needs to decide how estimates should pick a
+    // tier, rather than the estimate silently going stale.
+    return NANOBANANA_BATCH_PRICES['0.5K'];
   }
   if (provider === 'gptimage') {
     const base = GPTIMAGE_PRICES[quality] ?? GPTIMAGE_PRICES.medium;

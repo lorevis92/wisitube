@@ -46,11 +46,12 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
 
   // Scene-writing hasn't started yet at this point — that portion of the estimate is shown again,
   // more accurately (with a real progress bar), once it actually begins.
-  const estimate = Math.max(
-    0,
-    estimateTotalSeconds({ lengthMinutes: settings.lengthMinutes, modelWarm: isModelWarm() }) -
-      estimateScenesChunkSeconds(settings.lengthMinutes)
-  );
+  const { syncSeconds, imageEta } = estimateTotalSeconds({
+    lengthMinutes: settings.lengthMinutes,
+    modelWarm: isModelWarm(),
+    imageProvider: settings.imageProvider,
+  });
+  const estimate = Math.max(0, syncSeconds - estimateScenesChunkSeconds(settings.lengthMinutes));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -99,6 +100,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           title="Planning your video's structure…"
           subtitle="Claude is researching your topic and building the chapter outline"
           estimatedSeconds={estimate}
+          imageEta={imageEta}
         />
       )}
     </div>
