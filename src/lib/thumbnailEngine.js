@@ -34,11 +34,14 @@ function canvasToBlob(c) {
 // Same telegraphic-vs-natural-language branching StoryboardStep.jsx's prompt builder uses for
 // scene beats — Pollinations wants compact fragments, Nano Banana 2 / GPT Image 2 want full
 // sentences. No character/reference anchoring here since thumbnails have no such selector.
-function thumbnailPrompt(concept, overlayText, settings) {
+//
+// Takes the effective provider (already translated from 'nanobanana-batch' to 'nanobanana' by the
+// caller — see generateThumbnail below) rather than reading settings.imageProvider itself, so
+// there's exactly one place that translation happens, not two.
+function thumbnailPrompt(concept, overlayText, settings, effectiveProvider) {
   const flavoredPrompt = `${concept.image_prompt}, YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
   const style = STYLES[settings.style];
-  const provider = settings.imageProvider || 'pollinations';
-  if (provider === 'pollinations') {
+  if (effectiveProvider === 'pollinations') {
     return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
   }
   // Premium providers bake the overlay text directly into the generated image instead of the
@@ -63,18 +66,27 @@ function thumbnailPrompt(concept, overlayText, settings) {
 export async function generateThumbnail(project, { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed } = {}) {
   const concept = project.thumbnails[thumbIdx];
   const provider = settings.imageProvider || 'pollinations';
+  // A thumbnail is a single image — never worth submitting to Gemini Batch and waiting up to
+  // hours for it. 'nanobanana-batch' videos still get a real premium thumbnail, just via Nano
+  // Banana 2's ordinary synchronous endpoint instead of the batch one. effectiveThumbnailProvider
+  // is what actually drives generation (prompt branch, overlay decision, and the value sent to
+  // generateImage/api/generate-image) — `provider` itself is kept around only in case it's ever
+  // useful to log/trace which engine "family" this video's settings actually selected; it must
+  // never reach the generation endpoint directly, which has no 'nanobanana-batch' case and — after
+  // the api/generate-image.js fix — would now reject it outright instead of silently downgrading.
+  const effectiveThumbnailProvider = provider === 'nanobanana-batch' ? 'nanobanana' : provider;
 
   // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already uses
   // for every scene beat — routes nanobanana/gptimage through fal.ai instead of always hitting
   // Pollinations regardless of the provider chosen for the rest of the video.
-  const { imageUrl, costUsd } = await generateImage(thumbnailPrompt(concept, overlayText, settings), provider, [], {
+  const { imageUrl, costUsd } = await generateImage(thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider), effectiveThumbnailProvider, [], {
     width: 1280,
     height: 720,
     seed,
     quality: 'medium',
   });
   // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
-  if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
+  if (costUsd > 0) await recordCost({ channelId, videoId, provider: effectiveThumbnailProvider, type: 'image', amountUsd: costUsd });
 
   const img = await loadImage(imageUrl);
   const c = makeCanvas(1280, 720);
@@ -94,7 +106,7 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   ctx.fillRect(0, 0, 1280, 720);
   ctx.drawImage(img, (1280 - dw) / 2, (720 - dh) / 2, dw, dh);
 
-  if (provider === 'pollinations') {
+  if (effectiveThumbnailProvider === 'pollinations') {
     await document.fonts.ready;
     // bottom gradient for legibility
     const g = ctx.createLinearGradient(0, 380, 0, 720);

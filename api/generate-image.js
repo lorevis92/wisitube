@@ -50,7 +50,17 @@ export default async function handler(req, res) {
     let provider, prompt, referenceImages, width, height, seed, quality;
     try {
       const body = req.body || {};
-      provider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.provider) ? body.provider : 'pollinations';
+      // Every provider actually handled below, by name — no silent fallback. This endpoint used to
+      // coerce anything unrecognized to 'pollinations' (e.g. 'nanobanana-batch', which has no case
+      // here — scene-image generation for that provider goes through api/gemini-batch.js instead,
+      // never this file), so a caller passing the wrong provider string got real, billed images
+      // from the wrong engine with no error and no way to tell from the response alone. A request
+      // for a provider this endpoint doesn't implement (yet, or ever) must fail loudly instead.
+      const KNOWN_PROVIDERS = ['pollinations', 'nanobanana', 'gptimage'];
+      if (!KNOWN_PROVIDERS.includes(body.provider)) {
+        return res.status(400).json({ error: `Unknown image provider: ${body.provider}` });
+      }
+      provider = body.provider;
       prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
       if (!prompt) return res.status(400).json({ error: 'Invalid prompt' });
 
