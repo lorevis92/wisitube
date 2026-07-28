@@ -49,6 +49,8 @@ function priorityColor(p) {
 
 export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
   const [channel, setChannel] = useState(null);
+  const [name, setName] = useState('');
+  const [nameFocused, setNameFocused] = useState(false);
   const [niche, setNiche] = useState('');
   const [notes, setNotes] = useState('');
   const [videos, setVideos] = useState(null); // null = still loading
@@ -92,6 +94,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       const [ch, list, costs] = await Promise.all([loadChannel(channelId), listVideosByChannel(channelId), getCostsByChannel(channelId)]);
       if (cancelled) return;
       setChannel(ch || null);
+      setName(ch?.name || '');
       setNiche(ch?.niche || '');
       setNotes(ch?.editorialNotes || '');
       // App.jsx holds the single source of truth for "the currently open channel" — every load and
@@ -122,6 +125,22 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId]);
+
+  async function saveName() {
+    if (!channel) return;
+    const trimmed = name.trim();
+    // A channel must always have a name — silently revert to the last saved one rather than
+    // persisting a blank, same as leaving the "Channel name" field empty in the creation form.
+    if (!trimmed) {
+      setName(channel.name || '');
+      return;
+    }
+    if (trimmed === (channel.name || '')) return;
+    const updated = await saveChannel({ ...channel, name: trimmed });
+    setChannel(updated);
+    setName(updated.name || '');
+    onChannelChange?.(updated);
+  }
 
   async function saveNiche() {
     if (!channel || niche === (channel.niche || '')) return;
@@ -332,7 +351,27 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       <div style={card}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
           <div>
-            <div style={{ fontFamily: FONT.display, fontSize: 24, color: T.text }}>{channel?.name || 'Channel'}</div>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={() => {
+                setNameFocused(false);
+                saveName();
+              }}
+              onFocus={() => setNameFocused(true)}
+              placeholder="Channel name"
+              style={{
+                fontFamily: FONT.display,
+                fontSize: 24,
+                color: T.text,
+                border: 'none',
+                borderBottom: `1px solid ${nameFocused ? T.border : 'transparent'}`,
+                padding: 0,
+                background: 'transparent',
+                outline: 'none',
+                width: '100%',
+              }}
+            />
             {channel?.niche && <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 4 }}>{channel.niche}</div>}
             <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>💰 ${totalSpent.toFixed(2)} spent on this channel</div>
           </div>
