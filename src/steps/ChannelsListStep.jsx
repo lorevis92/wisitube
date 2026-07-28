@@ -114,11 +114,12 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
               style={inputStyle}
               autoFocus
             />
-            <input
+            <ExpandableTextarea
               value={form.niche}
               onChange={(e) => setForm((f) => ({ ...f, niche: e.target.value }))}
               placeholder="Niche (optional)"
-              style={inputStyle}
+              rows={2}
+              style={{ ...inputStyle, resize: 'vertical' }}
             />
             <ExpandableTextarea
               value={form.editorialNotes}

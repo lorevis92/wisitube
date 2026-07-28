@@ -49,6 +49,7 @@ function priorityColor(p) {
 
 export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
   const [channel, setChannel] = useState(null);
+  const [niche, setNiche] = useState('');
   const [notes, setNotes] = useState('');
   const [videos, setVideos] = useState(null); // null = still loading
   const [thumbUrls, setThumbUrls] = useState({});
@@ -91,6 +92,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       const [ch, list, costs] = await Promise.all([loadChannel(channelId), listVideosByChannel(channelId), getCostsByChannel(channelId)]);
       if (cancelled) return;
       setChannel(ch || null);
+      setNiche(ch?.niche || '');
       setNotes(ch?.editorialNotes || '');
       // App.jsx holds the single source of truth for "the currently open channel" — every load and
       // every local mutation below reports here, so components that never do their own fetch (like
@@ -120,6 +122,13 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId]);
+
+  async function saveNiche() {
+    if (!channel || niche === (channel.niche || '')) return;
+    const updated = await saveChannel({ ...channel, niche });
+    setChannel(updated);
+    onChannelChange?.(updated);
+  }
 
   async function saveNotes() {
     if (!channel || notes === (channel.editorialNotes || '')) return;
@@ -335,6 +344,17 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
               Delete channel
             </button>
           </div>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <div style={label}>Niche</div>
+          <ExpandableTextarea
+            value={niche}
+            onChange={(e) => setNiche(e.target.value)}
+            onBlur={saveNiche}
+            placeholder="Niche (optional)"
+            rows={2}
+            style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
+          />
         </div>
         <div style={{ marginTop: 16 }}>
           <div style={label}>Editorial notes</div>
