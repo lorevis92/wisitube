@@ -374,3 +374,89 @@ export async function listAutomationLog({ channelId, limit = 50 } = {}) {
   const data = unwrap(await query);
   return (data || []).map(fromAutomationLogRow);
 }
+
+// ---- Unattended scheduler settings — see src/lib/automationScheduler.js and AutomationStep.jsx's
+// "Automatic scheduling" panel. One row per user (user_id is the primary key itself, defaulting to
+// auth.uid() — there's nothing to key on except the user, unlike channels/videos which have their
+// own client-generated id), holding whether the background heartbeat is enabled, how often it
+// should check, and the currently_running/current_run_started_at lock the scheduler and a manual
+// "Run real cycle" click share so the two can never run a cycle concurrently (see
+// automationScheduler.js's runManagedCycle). ----
+// wisitube_scheduler_settings columns: user_id, enabled, interval_value, interval_unit
+// ('minutes'|'hours'|'days'), last_run_started_at, last_run_finished_at, currently_running,
+// current_run_started_at, updated_at.
+//
+// Required one-time setup in Supabase (no migration tooling in this repo — run manually in the SQL
+// editor once):
+//
+//   create table if not exists wisitube_scheduler_settings (
+//     user_id uuid primary key references auth.users(id) default auth.uid(),
+//     enabled boolean not null default false,
+//     interval_value integer not null default 6,
+//     interval_unit text not null default 'hours' check (interval_unit in ('minutes', 'hours', 'days')),
+//     last_run_started_at timestamptz,
+//     last_run_finished_at timestamptz,
+//     currently_running boolean not null default false,
+//     current_run_started_at timestamptz,
+//     updated_at timestamptz not null default now()
+//   );
+//   alter table wisitube_scheduler_settings enable row level security;
+//   create policy "scheduler settings are per-user" on wisitube_scheduler_settings
+//     for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+//   -- The scheduler's "blocked" diagnostic (see automationScheduler.js) is a global event, not tied
+//   -- to any one channel, so wisitube_automation_log.channel_id must accept null:
+//   alter table wisitube_automation_log alter column channel_id drop not null;
+
+const SCHEDULER_DEFAULTS = {
+  enabled: false,
+  intervalValue: 6,
+  intervalUnit: 'hours',
+  lastRunStartedAt: null,
+  lastRunFinishedAt: null,
+  currentlyRunning: false,
+  currentRunStartedAt: null,
+};
+
+function fromSchedulerRow(row) {
+  if (!row) return null;
+  return {
+    enabled: !!row.enabled,
+    intervalValue: row.interval_value ?? SCHEDULER_DEFAULTS.intervalValue,
+    intervalUnit: row.interval_unit || SCHEDULER_DEFAULTS.intervalUnit,
+    lastRunStartedAt: row.last_run_started_at ? new Date(row.last_run_started_at).getTime() : null,
+    lastRunFinishedAt: row.last_run_finished_at ? new Date(row.last_run_finished_at).getTime() : null,
+    currentlyRunning: !!row.currently_running,
+    currentRunStartedAt: row.current_run_started_at ? new Date(row.current_run_started_at).getTime() : null,
+  };
+}
+
+// No row yet (a user who's never touched the scheduling panel or run a real cycle) resolves to the
+// same defaults the SQL columns themselves default to — never null, so every caller can read
+// settings.enabled/intervalValue/etc. unconditionally.
+export async function getSchedulerSettings() {
+  const data = unwrap(await supabase.from('wisitube_scheduler_settings').select('*').maybeSingle());
+  return fromSchedulerRow(data) || { ...SCHEDULER_DEFAULTS };
+}
+
+// Genuinely partial — only the keys present in `patch` are written (and thus only those are
+// touched by the upsert's ON CONFLICT DO UPDATE), so e.g. runManagedCycle setting just
+// { currentlyRunning: true, currentRunStartedAt } can never clobber the user's enabled/interval
+// choice, and the settings panel saving { enabled } can never stomp the running-lock fields.
+// user_id is deliberately never part of the row sent here — same convention as every other table in
+// this file ("no explicit user_id filter is added here, the database enforces it"): the column's
+// own default (auth.uid()) populates it on first insert, and that same generated value is what the
+// upsert's ON CONFLICT (user_id) target matches against on every later call, so this never needs to
+// read the current user's id at all.
+export async function saveSchedulerSettings(patch) {
+  const row = { updated_at: new Date().toISOString() };
+  if ('enabled' in patch) row.enabled = !!patch.enabled;
+  if ('intervalValue' in patch) row.interval_value = patch.intervalValue;
+  if ('intervalUnit' in patch) row.interval_unit = patch.intervalUnit;
+  if ('lastRunStartedAt' in patch) row.last_run_started_at = patch.lastRunStartedAt ? new Date(patch.lastRunStartedAt).toISOString() : null;
+  if ('lastRunFinishedAt' in patch) row.last_run_finished_at = patch.lastRunFinishedAt ? new Date(patch.lastRunFinishedAt).toISOString() : null;
+  if ('currentlyRunning' in patch) row.currently_running = !!patch.currentlyRunning;
+  if ('currentRunStartedAt' in patch)
+    row.current_run_started_at = patch.currentRunStartedAt ? new Date(patch.currentRunStartedAt).toISOString() : null;
+  const data = unwrap(await supabase.from('wisitube_scheduler_settings').upsert(row, { onConflict: 'user_id' }).select().single());
+  return fromSchedulerRow(data);
+}

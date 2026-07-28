@@ -1,12 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { listChannels, saveChannel, listAutomationLog } from '../lib/db';
+import { listChannels, saveChannel, listAutomationLog, getSchedulerSettings, saveSchedulerSettings } from '../lib/db';
 import { runAutomationCycle } from '../lib/automationEngine';
+import { runManagedCycle, requestStop, applyProgressToRun } from '../lib/automationScheduler';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
 import { STYLES } from '../lib/pollinations';
 import ExpandableTextarea from '../components/ExpandableTextarea';
+
+const SCHEDULER_POLL_MS = 15000;
+const INTERVAL_UNITS = [
+  { value: 'minutes', label: 'minutes' },
+  { value: 'hours', label: 'hours' },
+  { value: 'days', label: 'days' },
+];
 
 // Same fallback CreateStep.jsx uses when switching engines — keeps automation_voice pointing at a
 // voice that's actually valid for whichever automation_voice_engine ends up selected.
@@ -57,6 +65,25 @@ function timeAgo(ts) {
   return `${day}d ago`;
 }
 
+// Same buckets as timeAgo, forward-looking — used for the scheduling panel's "Next check" line.
+function timeUntil(ts) {
+  const sec = Math.floor((ts - Date.now()) / 1000);
+  if (sec <= 0) return 'any moment now';
+  const min = Math.floor(sec / 60);
+  if (min < 1) return `in ${sec}s`;
+  if (min < 60) return `in ${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `in ${hr}h ${min % 60}m`;
+  const day = Math.floor(hr / 24);
+  return `in ${day}d ${hr % 24}h`;
+}
+
+// Same mapping as automationScheduler.js's own UNIT_MS — duplicated rather than imported since this
+// is only needed here to compute a display estimate ("Next check: ..."), not to drive the actual
+// timer, same small-stable-constant duplication already used elsewhere in this codebase (e.g.
+// YOUTUBE_LANGUAGE_CODES in ExportStep.jsx/fullPipelineRecipe.js).
+const UNIT_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
+
 function statusColor(status) {
   if (status === 'error') return T.primary;
   if (status === 'dry_run') return T.yellow;
@@ -65,7 +92,7 @@ function statusColor(status) {
   return T.green;
 }
 
-export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
+export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedulerEnabledChange }) {
   const [channels, setChannels] = useState(null); // null = still loading
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null); // { channelId, channelName, index, total, status }
@@ -76,6 +103,15 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   // would be stale inside that closure, so the kill switch has to be a ref.
   const stopRequestedRef = useRef(false);
   const pollRef = useRef(null);
+
+  // "Automatic scheduling" panel — see src/lib/automationScheduler.js. null while still loading.
+  const [schedulerSettings, setSchedulerSettings] = useState(null);
+  // Detected via a lightweight, always-on poll (independent of whether THIS component instance
+  // started a run) — a real cycle can be in flight because the scheduler's own timer started it
+  // while the user was on a completely different tab, and the "Stop" button below still needs to
+  // work for that case (see stopCycle), so `running` alone (only true for a run THIS instance
+  // started) isn't enough to drive the Run/Stop buttons.
+  const [schedulerCycleRunning, setSchedulerCycleRunning] = useState(false);
 
   // Gemini Batch API isolated test panel (api/gemini-batch.js) — entirely separate from the
   // channels/cycle state above; not read by runAutomationCycle or fullPipelineRecipe.js in any way.
@@ -133,6 +169,43 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    getSchedulerSettings()
+      .then(setSchedulerSettings)
+      .catch((err) => console.error('[AutomationStep] failed to load scheduler settings', err));
+  }, []);
+
+  // Independent of `running` — polls whether ANY real cycle is currently in flight, including one
+  // the scheduler started while this component wasn't even mounted, so the Run/Stop buttons below
+  // (and the message explaining why Run is disabled) stay accurate regardless of who's driving it.
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const s = await getSchedulerSettings();
+        if (!cancelled) setSchedulerCycleRunning(s.currentlyRunning);
+      } catch (err) {
+        console.error('[AutomationStep] failed to poll scheduler running state', err);
+      }
+    }
+    poll();
+    const id = setInterval(poll, SCHEDULER_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  function saveSchedulerPatch(patch) {
+    setSchedulerSettings((s) => ({ ...s, ...patch }));
+    saveSchedulerSettings(patch)
+      .then((updated) => {
+        setSchedulerSettings(updated);
+        if ('enabled' in patch) onSchedulerEnabledChange?.(updated.enabled);
+      })
+      .catch((err) => console.error('[AutomationStep] failed to save scheduler settings', err));
+  }
+
   function onHistoryFilterChange(value) {
     setHistoryFilter(value);
     if (!running) loadLog(value);
@@ -166,39 +239,43 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   }
 
   // Turns automationEngine.js's { channelId, channelName, step, message, videoId, project } events
-  // into the shape App.jsx's currentAutomationRun / AutomationMirrorStep.jsx expect — kept as a
-  // functional update (reads prev) so a channel switch mid-cycle resets the rolling log instead of
-  // mixing lines from two different channels together.
+  // into the shape App.jsx's currentAutomationRun / AutomationMirrorStep.jsx expect — delegates to
+  // the shared helper (src/lib/automationScheduler.js) so App.jsx's scheduler wiring feeds the exact
+  // same mirror shape from its own, separate trigger path. Kept as a functional update (reads prev)
+  // so a channel switch mid-cycle resets the rolling log instead of mixing lines from two different
+  // channels together.
   function applyProgressToGlobalRun(evt) {
-    onRunUpdate?.((prev) => {
-      const sameChannel = prev && prev.channelId === evt.channelId;
-      const log = [...(sameChannel ? prev.log || [] : []), { ts: Date.now(), phase: evt.step, message: evt.message }].slice(-40);
-      return {
-        channelId: evt.channelId,
-        channelName: evt.channelName,
-        videoId: evt.videoId ?? (sameChannel ? prev.videoId : null),
-        phase: evt.step,
-        phaseDetail: evt.message,
-        project: evt.project ?? (sameChannel ? prev.project : null),
-        log,
-      };
-    });
+    onRunUpdate?.((prev) => applyProgressToRun(prev, evt));
   }
 
   async function runCycle(dryRun) {
     if (running || !channels || channels.length === 0) return;
+    if (!dryRun && schedulerCycleRunning) return; // Run button below is disabled for this too — belt and suspenders
     stopRequestedRef.current = false;
     setRunning(true);
     setProgress(null);
     pollRef.current = setInterval(() => loadLog(historyFilter), LOG_POLL_MS);
+    // Only a real cycle goes through the shared lock (runManagedCycle) — dry runs never touch
+    // currently_running, so they always "start" trivially and this stays true for them.
+    let didStart = true;
     try {
-      await runAutomationCycle({
-        userId,
-        dryRun,
-        onUpdate: (p) => setProgress(p),
-        onProgress: applyProgressToGlobalRun,
-        shouldStop: () => stopRequestedRef.current,
-      });
+      if (dryRun) {
+        await runAutomationCycle({
+          userId,
+          dryRun: true,
+          onUpdate: (p) => setProgress(p),
+          onProgress: applyProgressToGlobalRun,
+          shouldStop: () => stopRequestedRef.current,
+        });
+      } else {
+        const result = await runManagedCycle({
+          userId,
+          onUpdate: (p) => setProgress(p),
+          onProgress: applyProgressToGlobalRun,
+        });
+        didStart = result.started;
+        if (!result.started) window.alert(`Could not start a real cycle right now: ${result.reason}`);
+      }
     } catch (err) {
       console.error(`[AutomationStep] ${dryRun ? 'dry-run' : 'real'} cycle failed`, err);
     } finally {
@@ -209,7 +286,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
       setRunning(false);
       loadLog(historyFilter);
       loadChannels(); // pick up automation_daily_upload_count/spend touched by the cycle
-      onRunUpdate?.(null); // the whole cycle ended (or was stopped) — no run left to mirror
+      // Only clear the mirror for a run that actually started under THIS click — a blocked attempt
+      // (didStart === false) never touched onProgress, so clearing here would wipe out whatever
+      // genuinely still-in-progress run (e.g. the scheduler's own) blocked this one in the first place.
+      if (didStart) onRunUpdate?.(null);
     }
   }
 
@@ -224,7 +304,12 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
   }
 
   function stopCycle() {
+    // Sets both, since either could be the one actually running: stopRequestedRef covers a dry run
+    // (dry runs never touch the shared lock/flag below); requestStop() covers a real cycle running
+    // under the shared lock, whether the scheduler's own timer or a manual "Run real cycle" click
+    // started it — a single "Stop" click always works regardless of which one is in flight.
     stopRequestedRef.current = true;
+    requestStop();
   }
 
   function channelName(id) {
@@ -354,14 +439,73 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
         <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 6, lineHeight: 1.6, maxWidth: 640 }}>
           Configure per-channel automation below. Dry-run shows exactly what a cycle would do for every enabled channel with no generation,
           spend, or publishing. Real cycle actually does it — generates a real video and publishes it to YouTube for every eligible channel.
-          Both are started manually here; nothing runs on its own yet.
+          Run it manually below, or turn on unattended background mode so it runs on its own while this tab stays open.
         </div>
+      </div>
+
+      <div style={card}>
+        <div style={label}>Automatic scheduling</div>
+        <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 8, lineHeight: 1.6, maxWidth: 620 }}>
+          Runs a real (non-dry-run) cycle on its own, on the interval below — only while this browser tab stays open, same as every other
+          background process in this app. Off by default.
+        </div>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, fontSize: 13, fontFamily: FONT.ui, color: T.text }}>
+          <input
+            type="checkbox"
+            checked={!!schedulerSettings?.enabled}
+            onChange={(e) => saveSchedulerPatch({ enabled: e.target.checked })}
+          />
+          🔴 Enable unattended background mode
+        </label>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, fontFamily: FONT.ui, color: T.text }}>Check every</span>
+          <input
+            type="number"
+            min="1"
+            value={schedulerSettings?.intervalValue ?? 6}
+            onChange={(e) => saveSchedulerPatch({ intervalValue: Math.max(1, Math.round(Number(e.target.value)) || 1) })}
+            style={{ ...inputStyle, width: 80 }}
+          />
+          <select
+            value={schedulerSettings?.intervalUnit || 'hours'}
+            onChange={(e) => saveSchedulerPatch({ intervalUnit: e.target.value })}
+            style={{ ...inputStyle, width: 140 }}
+          >
+            {INTERVAL_UNITS.map((u) => (
+              <option key={u.value} value={u.value}>
+                {u.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {schedulerSettings && (
+          <div style={{ marginTop: 12, ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span>Last run: {schedulerSettings.lastRunStartedAt ? timeAgo(schedulerSettings.lastRunStartedAt) : 'never'}</span>
+            {schedulerSettings.enabled && (
+              <span>
+                Next check:{' '}
+                {schedulerSettings.lastRunStartedAt
+                  ? timeUntil(
+                      schedulerSettings.lastRunStartedAt +
+                        Math.max(1, Number(schedulerSettings.intervalValue) || 1) * (UNIT_MS[schedulerSettings.intervalUnit] || UNIT_MS.hours)
+                    )
+                  : 'any moment now'}
+              </span>
+            )}
+            {schedulerCycleRunning && !running && (
+              <span style={{ color: T.yellow }}>⏳ A cycle is currently running in the background (started by the scheduler).</span>
+            )}
+          </div>
+        )}
       </div>
 
       <div style={card}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <div style={label}>Channels</div>
-          {running ? (
+          {running || schedulerCycleRunning ? (
             <button onClick={stopCycle} style={{ ...btnGhost, padding: '12px 22px', fontSize: 13, color: T.primary, borderColor: T.primaryBorder }}>
               🛑 Stop
             </button>

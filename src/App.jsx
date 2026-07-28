@@ -13,7 +13,8 @@ import AutomationMirrorStep from './steps/AutomationMirrorStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost } from './theme';
-import { createId, saveVideo, saveYoutubeConnection } from './lib/db';
+import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings } from './lib/db';
+import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
 import { supabase } from './lib/supabase';
@@ -72,6 +73,13 @@ export default function App() {
   // real (non-dry-run) automation cycle is currently running. Shape: { channelId, channelName,
   // videoId, phase, phaseDetail, project, log }.
   const [currentAutomationRun, setCurrentAutomationRun] = useState(null);
+  // Whether the unattended background scheduler (src/lib/automationScheduler.js) should be
+  // ticking right now — read once from Supabase on mount/sign-in, then kept in sync by
+  // AutomationStep.jsx's "Automatic scheduling" panel via onSchedulerEnabledChange below every time
+  // the user toggles it. The actual setInterval lives in automationScheduler.js, started/stopped by
+  // the effect below whenever this changes — deliberately App-level (not inside AutomationStep.jsx
+  // itself) so the heartbeat keeps ticking while the user is on any other tab, not just Automation.
+  const [schedulerEnabled, setSchedulerEnabled] = useState(false);
   const [currentChannelId, setCurrentChannelId] = useState(null);
   const [currentChannelName, setCurrentChannelName] = useState('');
   // Single source of truth for the currently open channel's full record (including youtube.*) —
@@ -149,6 +157,35 @@ export default function App() {
     });
     return () => subscription.unsubscribe();
   }, []);
+
+  // Read the scheduler's enabled flag once a session exists — AutomationStep.jsx's panel is the
+  // only thing that changes it afterward (via onSchedulerEnabledChange below), so this never needs
+  // to re-poll on its own.
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    getSchedulerSettings()
+      .then((s) => setSchedulerEnabled(!!s.enabled))
+      .catch((err) => console.error('[App] failed to load scheduler settings', err));
+  }, [session?.user?.id]);
+
+  // Starts/stops the scheduler's 60s heartbeat whenever enabled changes (or a session appears) —
+  // onProgress feeds the exact same currentAutomationRun mirror AutomationStep.jsx's own manual
+  // runs use (see applyProgressToRun, src/lib/automationScheduler.js), so "Return to automation"
+  // works identically regardless of which one is actually driving a given cycle. onUpdate is
+  // omitted: it only feeds AutomationStep.jsx's own local per-channel progress line, which doesn't
+  // exist at this level and isn't needed here — the mirror only cares about phase-level onProgress.
+  useEffect(() => {
+    if (!session?.user?.id || !schedulerEnabled) {
+      stopSchedulerTimer();
+      return;
+    }
+    startScheduler({
+      userId: session.user.id,
+      onProgress: (evt) => setCurrentAutomationRun((prev) => applyProgressToRun(prev, evt)),
+      onCycleEnd: () => setCurrentAutomationRun(null),
+    });
+    return () => stopSchedulerTimer();
+  }, [schedulerEnabled, session?.user?.id]);
 
   // Ask the browser to exempt this origin from automatic eviction under storage pressure — WisiTube
   // keeps rendered video/image/audio Blobs in IndexedDB (see src/lib/db.js) with no server-side
@@ -603,7 +640,12 @@ export default function App() {
           ))}
 
         {tab === 'automation' && (
-          <AutomationStep userId={session.user?.id} isMobile={isMobile} onRunUpdate={setCurrentAutomationRun} />
+          <AutomationStep
+            userId={session.user?.id}
+            isMobile={isMobile}
+            onRunUpdate={setCurrentAutomationRun}
+            onSchedulerEnabledChange={setSchedulerEnabled}
+          />
         )}
 
         {tab === 'automation-mirror' && <AutomationMirrorStep run={currentAutomationRun} isMobile={isMobile} />}
