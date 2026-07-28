@@ -9,6 +9,7 @@ import { generateBeatImage, generateSceneAudio, generateAllMedia } from '../lib/
 import { generateAllMediaViaBatch } from '../lib/geminiBatchImageEngine';
 import { resumePendingBatches } from '../lib/batchResumption';
 import ImageLightbox from '../components/ImageLightbox';
+import ExpandableTextarea from '../components/ExpandableTextarea';
 
 // Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
 // entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
@@ -240,7 +241,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
             {project.characterBible.map((c) => (
               <div key={c.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 12 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: FONT.ui, marginBottom: 8 }}>{c.name}</div>
-                <textarea
+                <ExpandableTextarea
                   value={c.baseDescription}
                   onChange={(e) => updateCharacter(c.id, { baseDescription: e.target.value })}
                   rows={2}
@@ -472,7 +473,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                       )}
                     </div>
 
-                    <textarea
+                    <ExpandableTextarea
                       value={beat.prompt}
                       onChange={(e) => updateImage(scene.id, b, { prompt: e.target.value, status: 'idle' })}
                       rows={3}
@@ -501,7 +502,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               })}
             </div>
 
-            <textarea
+            <ExpandableTextarea
               value={scene.narration}
               onChange={(e) => updateScene(scene.id, { narration: e.target.value, audioStatus: 'idle', audioDuration: 0 })}
               rows={3}

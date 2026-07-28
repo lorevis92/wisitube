@@ -16,6 +16,7 @@ import {
 import { getMediaUrl } from '../lib/mediaStorage';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
 import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
+import ExpandableTextarea from '../components/ExpandableTextarea';
 
 const PROMPT_STAGES = [
   { key: 'titles', stageLabel: 'Titles & Angles' },
@@ -337,7 +338,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
         </div>
         <div style={{ marginTop: 16 }}>
           <div style={label}>Editorial notes</div>
-          <textarea
+          <ExpandableTextarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             onBlur={saveNotes}
@@ -555,7 +556,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                     {SCHEMA_INSTRUCTIONS_DISPLAY[key]}
                   </div>
 
-                  <textarea
+                  <ExpandableTextarea
                     value={draftValue}
                     onChange={(e) => setPromptDrafts((d) => ({ ...d, [key]: e.target.value }))}
                     onBlur={() => savePromptOverride(key, draftValue)}

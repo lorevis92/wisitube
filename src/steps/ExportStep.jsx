@@ -7,6 +7,7 @@ import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
 import { generateThumbnail } from '../lib/thumbnailEngine';
 import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
 import { renderVideoForExport } from '../lib/videoRenderEngine';
+import ExpandableTextarea from '../components/ExpandableTextarea';
 
 // Official YouTube video category IDs (googleapis.com/youtube/v3/videoCategories) — the ones
 // realistically relevant to faceless explainer-style channels, skipping deprecated categories
@@ -535,7 +536,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
           </div>
           <div style={{ marginTop: 14 }}>
             <div style={label}>Description</div>
-            <textarea
+            <ExpandableTextarea
               value={ytDescription}
               onChange={(e) => setYtDescription(e.target.value)}
               rows={4}

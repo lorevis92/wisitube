@@ -7,6 +7,7 @@ import { KOKORO_VOICES, generateSpeech } from '../lib/tts';
 import { generateAudio } from '../lib/sceneOrchestrator';
 import { TITLES_PHASE_S } from '../lib/estimator';
 import FullScreenLoader from '../components/FullScreenLoader';
+import ExpandableTextarea from '../components/ExpandableTextarea';
 
 const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
 
@@ -137,7 +138,7 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div style={card}>
         <div style={label}>1 · What is your video about?</div>
-        <textarea
+        <ExpandableTextarea
           value={settings.topic}
           onChange={(e) => set('topic', e.target.value)}
           placeholder='e.g. "Why the Roman Empire never really fell" or "5 psychology tricks stores use on you"'
@@ -279,7 +280,7 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
               placeholder="Name, e.g. Napoleon Bonaparte"
               style={{ ...inputStyle, marginBottom: 6 }}
             />
-            <textarea
+            <ExpandableTextarea
               value={mainCharacter.details}
               onChange={(e) => updateMainCharacter({ details: e.target.value })}
               placeholder="Physical details (optional — leave blank and Claude will infer them for well-known figures)"
@@ -306,7 +307,7 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
                       ✕
                     </button>
                   </div>
-                  <textarea
+                  <ExpandableTextarea
                     value={c.details}
                     onChange={(e) => updateOtherCharacter(idx, { details: e.target.value })}
                     placeholder="Physical details (optional — leave blank and Claude will infer them for well-known figures)"
@@ -325,7 +326,7 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>
               General notes
             </div>
-            <textarea
+            <ExpandableTextarea
               value={settings.generalNotes || ''}
               onChange={(e) => set('generalNotes', e.target.value)}
               placeholder="Tone, setting, recurring objects or motifs…"

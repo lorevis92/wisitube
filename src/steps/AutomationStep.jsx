@@ -6,6 +6,7 @@ import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
 import { STYLES } from '../lib/pollinations';
+import ExpandableTextarea from '../components/ExpandableTextarea';
 
 // Same fallback CreateStep.jsx uses when switching engines — keeps automation_voice pointing at a
 // voice that's actually valid for whichever automation_voice_engine ends up selected.
@@ -674,7 +675,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate }) {
 
                 <div style={{ marginTop: 12 }}>
                   <div style={label}>Current initiative (optional)</div>
-                  <textarea
+                  <ExpandableTextarea
                     value={c.automation_directive || ''}
                     disabled={running}
                     onChange={(e) => updateLocalField(c.id, { automation_directive: e.target.value })}

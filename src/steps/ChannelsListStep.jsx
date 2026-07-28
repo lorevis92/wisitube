@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listChannels, listVideosByChannel, saveChannel, createId, getTotalCostAllChannels } from '../lib/db';
 import { getMediaUrl } from '../lib/mediaStorage';
+import ExpandableTextarea from '../components/ExpandableTextarea';
 
 export default function ChannelsListStep({ onOpenChannel, isMobile }) {
   const [channels, setChannels] = useState(null); // null = still loading
@@ -119,7 +120,7 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
               placeholder="Niche (optional)"
               style={inputStyle}
             />
-            <textarea
+            <ExpandableTextarea
               value={form.editorialNotes}
               onChange={(e) => setForm((f) => ({ ...f, editorialNotes: e.target.value }))}
               placeholder="Editorial notes (optional)"
