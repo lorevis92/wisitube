@@ -218,23 +218,41 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
               <div style={label}>Video length</div>
-              <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>
-                {settings.lengthMinutes || 5} minute{(settings.lengthMinutes || 5) === 1 ? '' : 's'}
-              </span>
+              {!settings.aiDecidesLength && (
+                <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>
+                  {settings.lengthMinutes || 5} minute{(settings.lengthMinutes || 5) === 1 ? '' : 's'}
+                </span>
+              )}
             </div>
-            <input
-              type="range"
-              min="1"
-              max="25"
-              step="1"
-              value={settings.lengthMinutes || 5}
-              onChange={(e) => set('lengthMinutes', Number(e.target.value))}
-              style={{ width: '100%', marginTop: 10 }}
-            />
-            <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
-              This sets the content density, not an exact runtime — actual video length varies based on how the script naturally
-              unfolds (typically 1.5-2.5× the target).
-            </div>
+            {settings.aiDecidesLength ? (
+              <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.5 }}>
+                The AI will choose a length that fits the topic naturally, avoiding padding or rushed cuts.
+              </div>
+            ) : (
+              <>
+                <input
+                  type="range"
+                  min="1"
+                  max="25"
+                  step="1"
+                  value={settings.lengthMinutes || 5}
+                  onChange={(e) => set('lengthMinutes', Number(e.target.value))}
+                  style={{ width: '100%', marginTop: 10 }}
+                />
+                <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+                  This sets the content density, not an exact runtime — actual video length varies based on how the script naturally
+                  unfolds (typically 1.5-2.5× the target).
+                </div>
+              </>
+            )}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+              <input
+                type="checkbox"
+                checked={!!settings.aiDecidesLength}
+                onChange={(e) => set('aiDecidesLength', e.target.checked)}
+              />
+              Let AI decide the ideal length
+            </label>
           </div>
           <div>
             <div style={label}>Format</div>

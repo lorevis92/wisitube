@@ -110,6 +110,15 @@ export async function deleteVideo(id) {
 // automation_last_reset_date/automation_daily_upload_count/automation_daily_spend_usd are the
 // engine's own running state (reset once per day by resetDailyCountersIfNeeded), not something the
 // user edits directly, but they live on the same row since they're per-channel like everything else here.
+//
+// Required one-time setup in Supabase for "Let AI decide the ideal length" (no migration tooling in
+// this repo — run manually in the SQL editor once):
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_ai_decides_length boolean not null default false,
+//     add column if not exists automation_length_cap_enabled boolean not null default true,
+//     add column if not exists automation_length_cap_min integer not null default 2,
+//     add column if not exists automation_length_cap_max integer not null default 45;
 
 function fromChannelRow(row) {
   return {
@@ -144,6 +153,18 @@ function fromChannelRow(row) {
     // Manager suggestions (see api/program-manager.js's activeDirective handling).
     automation_directive: row.automation_directive || '',
     automation_length_minutes: row.automation_length_minutes ?? 5,
+    // "Let AI decide the ideal length" for this channel's videos (see AutomationStep.jsx and
+    // fullPipelineRecipe.js) — when true, automation_length_minutes is ignored entirely.
+    automation_ai_decides_length: !!row.automation_ai_decides_length,
+    // Optional, removable safety cap on that AI-decided length — only actually applied (passed to
+    // api/generate-outline.js) when automation_ai_decides_length is also true AND this is enabled;
+    // disabling it means no cap is ever sent, full freedom, exactly as requested. Defaults to
+    // enabled (true) and a wide 2-45 minute range: this cap exists specifically to protect a
+    // channel's daily budget from an unpredictably long video, so a channel that's never touched
+    // these fields gets that protection automatically rather than needing to opt in.
+    automation_length_cap_enabled: row.automation_length_cap_enabled ?? true,
+    automation_length_cap_min: row.automation_length_cap_min ?? 2,
+    automation_length_cap_max: row.automation_length_cap_max ?? 45,
     automation_last_reset_date: row.automation_last_reset_date || null,
     automation_daily_upload_count: row.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: row.automation_daily_spend_usd ?? 0,
@@ -187,6 +208,10 @@ export async function saveChannel(channel) {
     automation_made_for_kids: !!channel.automation_made_for_kids,
     automation_directive: channel.automation_directive || '',
     automation_length_minutes: channel.automation_length_minutes ?? 5,
+    automation_ai_decides_length: !!channel.automation_ai_decides_length,
+    automation_length_cap_enabled: channel.automation_length_cap_enabled ?? true,
+    automation_length_cap_min: channel.automation_length_cap_min ?? 2,
+    automation_length_cap_max: channel.automation_length_cap_max ?? 45,
     automation_last_reset_date: channel.automation_last_reset_date || todayDateString(),
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,

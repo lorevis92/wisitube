@@ -658,12 +658,76 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       type="number"
                       min="1"
                       value={c.automation_length_minutes}
-                      disabled={running}
+                      disabled={running || c.automation_ai_decides_length}
                       onChange={(e) => updateLocalField(c.id, { automation_length_minutes: Number(e.target.value) })}
                       onBlur={() => persistChannel(c.id)}
-                      style={{ ...inputStyle, marginTop: 6 }}
+                      style={{ ...inputStyle, marginTop: 6, opacity: c.automation_ai_decides_length ? 0.5 : 1 }}
                     />
+                    <label
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        marginTop: 6,
+                        fontSize: 11,
+                        fontFamily: FONT.ui,
+                        color: T.textSecondary,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!c.automation_ai_decides_length}
+                        disabled={running}
+                        onChange={(e) => updateAndSaveImmediately(c.id, { automation_ai_decides_length: e.target.checked })}
+                      />
+                      Let AI decide the ideal length
+                    </label>
                   </div>
+
+                  {c.automation_ai_decides_length && (
+                    <div style={{ gridColumn: '1 / -1', border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                        <input
+                          type="checkbox"
+                          checked={c.automation_length_cap_enabled ?? true}
+                          disabled={running}
+                          onChange={(e) => updateAndSaveImmediately(c.id, { automation_length_cap_enabled: e.target.checked })}
+                        />
+                        Enable safety cap
+                      </label>
+                      <div style={{ display: 'flex', gap: 12, marginTop: 8, flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ ...label, fontSize: 10 }}>Min minutes</div>
+                          <input
+                            type="number"
+                            min="1"
+                            value={c.automation_length_cap_min ?? 2}
+                            disabled={running || !c.automation_length_cap_enabled}
+                            onChange={(e) => updateLocalField(c.id, { automation_length_cap_min: Number(e.target.value) })}
+                            onBlur={() => persistChannel(c.id)}
+                            style={{ ...inputStyle, marginTop: 4, width: 90, opacity: c.automation_length_cap_enabled ? 1 : 0.5 }}
+                          />
+                        </div>
+                        <div>
+                          <div style={{ ...label, fontSize: 10 }}>Max minutes</div>
+                          <input
+                            type="number"
+                            min="1"
+                            value={c.automation_length_cap_max ?? 45}
+                            disabled={running || !c.automation_length_cap_enabled}
+                            onChange={(e) => updateLocalField(c.id, { automation_length_cap_max: Number(e.target.value) })}
+                            onBlur={() => persistChannel(c.id)}
+                            style={{ ...inputStyle, marginTop: 4, width: 90, opacity: c.automation_length_cap_enabled ? 1 : 0.5 }}
+                          />
+                        </div>
+                      </div>
+                      {!c.automation_length_cap_enabled && (
+                        <div style={{ fontSize: 10, color: T.yellow, fontFamily: FONT.ui, marginTop: 8 }}>
+                          No cap — the AI has full freedom, video length (and cost) could vary widely.
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div>
                     <div style={label}>Visual style</div>

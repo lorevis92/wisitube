@@ -332,6 +332,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     // ---- Phase: outline ----
     try {
       await withPhaseNetworkResilience('outline', channelId, videoId, logStep, async () => {
+        const aiDecidesLength = channel.automation_ai_decides_length === true;
         const res = await fetch('/api/generate-outline', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -341,6 +342,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
             angle: suggestion.angle || '',
             language: settings.language,
             lengthMinutes: settings.lengthMinutes,
+            aiDecidesLength,
+            // Only actually sent (and only meaningful server-side) when both AI-decides-length AND
+            // the channel's own safety-cap toggle are on — disabling the cap means these are simply
+            // never included, full freedom, exactly as AutomationStep.jsx's toggle promises.
+            ...(aiDecidesLength && channel.automation_length_cap_enabled
+              ? { capMinMinutes: channel.automation_length_cap_min, capMaxMinutes: channel.automation_length_cap_max }
+              : {}),
             style: STYLES[settings.style].label,
             imageProvider: settings.imageProvider,
             characterHints: [],

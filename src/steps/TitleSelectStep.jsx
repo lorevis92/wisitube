@@ -27,6 +27,10 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           angle: option.angle,
           language: settings.language,
           lengthMinutes: settings.lengthMinutes,
+          // No cap here — the manual flow always shows a cost/time estimate before generation
+          // actually starts (StoryboardStep.jsx's confirm dialog), so there's no unattended-spend
+          // risk a cap would need to guard against.
+          aiDecidesLength: settings.aiDecidesLength === true,
           style: STYLES[settings.style].label,
           imageProvider: settings.imageProvider,
           characterHints,

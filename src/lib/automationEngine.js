@@ -84,7 +84,20 @@ export function getRecipeForContentType(contentType) {
 const ESTIMATED_CHARS_PER_SCENE = 120; // generate-scenes.js caps each scene at 200 chars; this is a realistic average, not the worst case.
 
 function estimateFullPipelineCost(channel) {
-  const lengthMinutes = Number(channel.automation_length_minutes) || 5;
+  // "Let AI decide the ideal length" has no fixed target to estimate from — this pre-flight check
+  // exists purely to catch "this channel's budget can't possibly cover a video like this" before
+  // any real spend happens, so it deliberately reasons about the worst case rather than a realistic
+  // guess. With a safety cap configured, capMaxMinutes IS the worst case the model is allowed to
+  // reach (see api/generate-outline.js's clampToSafetyCap). Without one, there's no ceiling at all —
+  // 30 minutes is a prudently high stand-in so an unexpectedly long video can't slip past this
+  // budget check unnoticed just because there was nothing concrete to estimate from.
+  let lengthMinutes;
+  if (channel.automation_ai_decides_length === true) {
+    const capEnabled = channel.automation_length_cap_enabled !== false;
+    lengthMinutes = capEnabled ? Number(channel.automation_length_cap_max) || 45 : 30;
+  } else {
+    lengthMinutes = Number(channel.automation_length_minutes) || 5;
+  }
   const totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
   const beats = totalScenes * 2;
   const provider = channel.automation_image_provider || 'pollinations';

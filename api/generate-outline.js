@@ -27,6 +27,33 @@ For the character bible: identify every character that appears in more than one 
 
 For every real, named, identifiable person in the character_bible (historical figures, celebrities, public figures) — search the web to verify their actual physical appearance before writing descriptions. Identify which traits are constant identity anchors that persist across their entire life (bone structure, ear shape, distinctive permanent marks, eye shape/color, general build proportions) versus which traits change by era (hair length/color/style, facial hair, weight, clothing, age-related features). The base_description must contain only the constant anchors. Each variant's description must contain only the era-specific changes — never repeat the constant anchors in variants, they're inherited automatically. For fictional characters or figures the search doesn't surface reliable information about, fall back on your own knowledge or reasonable invention guided by any user-provided character hints. Keep base_description and every variant description short and telegraphic — max 12-15 words each, comma-separated traits, never a full discursive sentence — since these get concatenated directly into image-generation prompts and must stay lean.`;
 
+// "Let AI decide the ideal length" mode (CreateStep.jsx/AutomationStep.jsx) — replaces the fixed
+// lengthMinutes-driven scene count with purely content-driven pacing. Deliberately says nothing
+// about topic "category" (history vs. science vs. whatever) — that's exactly the kind of shortcut
+// that leads to padding a thin topic or rushing a rich one just to hit an assumed norm.
+const AI_DECIDES_LENGTH_INSTRUCTION = `Determine the ideal length for this video based purely on how much genuinely interesting, non-redundant, useful content exists for this specific topic — not on any assumption about what 'category' of topic this is. Mentally list the distinct facts, angles, or story beats truly worth including; if that list is short, the video should be short; if it's rich, it should be longer. Never pad with repetition or filler to reach any particular length, and never omit worthwhile content just to shorten it. Optimize purely for narrative completeness and density of value to the viewer.`;
+
+// Adjusts ONLY the last chapter's scene_count to bring the outline's actual total back inside
+// [capMinScenes, capMaxScenes] — never a proportional trim/stretch across every chapter, which
+// would disturb the pacing/balance of chapters that were already fine. A model that ignored the
+// cap instruction in the prompt (it can happen) gets corrected here, at the closing chapter only —
+// shortening or lengthening the ending is far less disruptive to the narrative than reshaping the
+// hook or the middle chapters. Mutates plan.outline in place and refreshes plan.total_scenes to
+// match the (possibly adjusted) real sum.
+function clampToSafetyCap(plan, capMinScenes, capMaxScenes) {
+  const outline = plan.outline;
+  const currentTotal = outline.reduce((sum, ch) => sum + (Number(ch.scene_count) || 0), 0);
+  let target = currentTotal;
+  if (currentTotal > capMaxScenes) target = capMaxScenes;
+  else if (currentTotal < capMinScenes) target = capMinScenes;
+  if (target !== currentTotal) {
+    const delta = target - currentTotal; // negative to shrink, positive to grow
+    const last = outline[outline.length - 1];
+    last.scene_count = Math.max(1, (Number(last.scene_count) || 0) + delta);
+  }
+  plan.total_scenes = outline.reduce((sum, ch) => sum + (Number(ch.scene_count) || 0), 0);
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -46,6 +73,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
+    let aiDecidesLength, capMinMinutes, capMaxMinutes;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -58,10 +86,25 @@ export default async function handler(req, res) {
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
       imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
 
-      lengthMinutes = Number(body.lengthMinutes);
-      if (!Number.isFinite(lengthMinutes) || lengthMinutes <= 0) lengthMinutes = 1;
-      lengthMinutes = Math.min(25, Math.max(1, lengthMinutes));
-      totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
+      aiDecidesLength = body.aiDecidesLength === true;
+      if (aiDecidesLength) {
+        // Both bounds required together — a lone min or max isn't a coherent boundary, so treat it
+        // as "no cap" rather than guessing what the missing side should be.
+        const min = Number(body.capMinMinutes);
+        const max = Number(body.capMaxMinutes);
+        const hasCap = Number.isFinite(min) && Number.isFinite(max) && min > 0 && max > 0 && max >= min;
+        capMinMinutes = hasCap ? min : null;
+        capMaxMinutes = hasCap ? max : null;
+        lengthMinutes = null; // no fixed target in this mode — see AI_DECIDES_LENGTH_INSTRUCTION
+        totalScenes = null;
+      } else {
+        capMinMinutes = null;
+        capMaxMinutes = null;
+        lengthMinutes = Number(body.lengthMinutes);
+        if (!Number.isFinite(lengthMinutes) || lengthMinutes <= 0) lengthMinutes = 1;
+        lengthMinutes = Math.min(25, Math.max(1, lengthMinutes));
+        totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
+      }
 
       hints = Array.isArray(body.characterHints)
         ? body.characterHints
@@ -101,14 +144,35 @@ ${refs.map((r) => `- label: "${r.label}"`).join('\n')}
 Keep the character_bible consistent with these — if a reference photo's label describes a character, that character's name and variants in character_bible should align with it.`
       : '';
 
+    // Length guidance — either a fixed target (lengthMinutes) or the content-driven instruction,
+    // optionally bounded by a safety cap (see AutomationStep.jsx's "Enable safety cap"). The cap
+    // sentence is appended to the AI-decides instruction itself, not treated as a separate rule, so
+    // it reads as a boundary on the same judgment call rather than a competing directive.
+    const lengthInstruction = aiDecidesLength
+      ? `${AI_DECIDES_LENGTH_INSTRUCTION}${
+          capMinMinutes != null
+            ? ` The total scene count across all chapters must correspond to between ${capMinMinutes} and ${capMaxMinutes} minutes (using ~12 scenes/minute as reference), regardless of the above — work within this boundary.`
+            : ''
+        }`
+      : `Video length: ~${lengthMinutes} minutes — split into a sensible number of chapters, roughly one chapter every 1.5-2 minutes.`;
+
     // Facts about THIS specific video (title, angle, length, visual style) — always injected
     // regardless of which creative direction is active (default or a channel's override), since an
     // override changes HOW to write, never WHAT video this is.
     const context = `Video title: "${title}"
 Narrative angle: ${angle || '(none specified — infer a coherent angle from the title itself)'}
-Video length: ~${lengthMinutes} minutes — split into a sensible number of chapters, roughly one chapter every 1.5-2 minutes.
+${lengthInstruction}
 
 CRITICAL: character descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.`;
+
+    // total_scenes is either the fixed target (forced onto the response later regardless of what
+    // the model returns) or, in AI-decides mode, whatever the model itself determines — the schema
+    // documentation and rule below reflect that difference explicitly rather than showing a number
+    // that doesn't apply.
+    const totalScenesSchemaValue = aiDecidesLength ? 'number (however many scenes you determine this video genuinely needs)' : totalScenes;
+    const totalScenesRule = aiDecidesLength
+      ? `The sum of every chapter's scene_count MUST equal exactly the total_scenes value you provide.`
+      : `The sum of every chapter's scene_count MUST equal exactly ${totalScenes}.`;
 
     // The output-format half — field names, types, and hard correctness rules that downstream
     // parsing (client) and the next pipeline stage (api/generate-scenes.js, which references these
@@ -122,19 +186,25 @@ JSON schema:
   "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator, one strong focal subject, exaggerated emotion, no text in image" }],
   "character_bible": [array of objects, one per recurring character: { "id": string, "name": string, "base_description": "distinctive traits that NEVER change: face shape, build, defining features — max 12-15 words, telegraphic comma-separated fragments, NOT a full sentence", "variants": [{ "label": "e.g. Young Napoleon, 1790s", "description": "traits specific to this era/stage: hair, clothing, age markers — max 12-15 words, telegraphic comma-separated fragments, NOT a full sentence" }] }],
   "outline": [array of chapter objects: { "id": string, "title": "chapter name", "summary": "2-3 sentences on what happens in this chapter and how it connects to the previous/next one", "scene_count": number }],
-  "total_scenes": ${totalScenes}
+  "total_scenes": ${totalScenesSchemaValue}
 }
 
 Rules:
-- The sum of every chapter's scene_count MUST equal exactly ${totalScenes}.
+- ${totalScenesRule}
 - Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).
 - Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}`;
 
     const systemPrompt = `${context}\n\n${creativeOverride || DEFAULT_CREATIVE_DIRECTION}\n\n${SCHEMA_INSTRUCTIONS}`;
 
+    const userLengthLine = aiDecidesLength
+      ? `Video length: let it emerge naturally from how much content this topic genuinely supports — do not target a fixed number of scenes.${
+          capMinMinutes != null ? ` Stay within ${capMinMinutes}-${capMaxMinutes} minutes (~${capMinMinutes * 12}-${capMaxMinutes * 12} scenes).` : ''
+        }`
+      : `Video length: ~${lengthMinutes} minutes (${totalScenes} scenes total)`;
+
     const userLines = [
       `Topic: "${topic}"`,
-      `Video length: ~${lengthMinutes} minutes (${totalScenes} scenes total)`,
+      userLengthLine,
       `Visual style of the channel: ${style}`,
       hints.length
         ? `Known characters (use these details, prioritize them over your own assumptions):\n${hints
@@ -228,7 +298,19 @@ Rules:
       return res.status(502).json({ error: 'AI response missing outline' });
     }
 
-    plan.total_scenes = totalScenes;
+    if (aiDecidesLength) {
+      // Derived from what the model actually returned (the chapters are the real driver for
+      // api/generate-scenes.js downstream) rather than trusted from the model's own top-level
+      // total_scenes field, which could drift from the chapter sum.
+      plan.total_scenes = plan.outline.reduce((sum, ch) => sum + (Number(ch.scene_count) || 0), 0);
+      if (capMinMinutes != null && capMaxMinutes != null) {
+        const capMinScenes = Math.max(1, Math.round(capMinMinutes * 12));
+        const capMaxScenes = Math.max(capMinScenes, Math.round(capMaxMinutes * 12));
+        clampToSafetyCap(plan, capMinScenes, capMaxScenes);
+      }
+    } else {
+      plan.total_scenes = totalScenes;
+    }
     return res.status(200).json(plan);
   } catch (err) {
     console.error('[generate-outline] phase=unexpected', err?.message, err?.stack);

@@ -95,6 +95,12 @@ export default function App() {
     voiceEngine: 'kokoro',
     imageProvider: 'pollinations',
     lengthMinutes: 5,
+    // When true, lengthMinutes is ignored — api/generate-outline.js lets Claude size the video off
+    // how much content the topic genuinely supports instead of a fixed target (see CreateStep.jsx's
+    // "Let AI decide the ideal length" toggle). No safety cap in the manual flow — the user already
+    // sees a cost/time estimate before committing to generation, so there's no unattended-spend risk
+    // that a cap would need to guard against (unlike automation's per-channel version of this).
+    aiDecidesLength: false,
     format: '16:9',
     language: 'English',
     references: [],
