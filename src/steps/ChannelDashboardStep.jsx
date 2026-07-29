@@ -47,6 +47,22 @@ function priorityColor(p) {
   return T.textMuted;
 }
 
+// Accepts a bare YouTube video id, a full youtube.com/watch?v=... URL, a youtu.be/... short link,
+// or a youtube.com/shorts/... URL, and returns just the id — used by the "Edit YouTube status"
+// popover so pasting the address bar URL works exactly like pasting the id itself. Falls back to
+// returning the trimmed input unchanged when none of the URL shapes match, on the assumption it's
+// already a bare id (rather than rejecting it outright).
+function extractYoutubeId(input) {
+  const trimmed = (input || '').trim();
+  if (!trimmed) return '';
+  const patterns = [/youtu\.be\/([\w-]{6,})/, /[?&]v=([\w-]{6,})/, /youtube\.com\/shorts\/([\w-]{6,})/];
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m) return m[1];
+  }
+  return trimmed;
+}
+
 export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
   const [channel, setChannel] = useState(null);
   const [name, setName] = useState('');
@@ -87,6 +103,13 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [selectedMoveChannelId, setSelectedMoveChannelId] = useState('');
   const [movingId, setMovingId] = useState(null);
   const [moveError, setMoveError] = useState('');
+  // "Edit YouTube status" — id of the video card whose popover is open (null = none), mutually
+  // exclusive with the "move" popover above (opening one closes the other, see openYtEdit/
+  // openMoveFor) so a single card never shows two overlapping inline panels at once.
+  const [ytEditOpenForId, setYtEditOpenForId] = useState(null);
+  const [ytIdInput, setYtIdInput] = useState('');
+  const [ytEditBusy, setYtEditBusy] = useState(null); // videoId currently being saved, or null
+  const [ytEditError, setYtEditError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -291,6 +314,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   }
 
   async function openMoveFor(v) {
+    setYtEditOpenForId(null);
     setMoveOpenForId(v.id);
     setMoveError('');
     setMoveChannelsLoading(true);
@@ -339,6 +363,60 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       setMoveError('Move failed: ' + String(err.message || err));
     } finally {
       setMovingId(null);
+    }
+  }
+
+  function openYtEdit(v) {
+    setMoveOpenForId(null);
+    setYtEditOpenForId(v.id);
+    setYtIdInput('');
+    setYtEditError('');
+  }
+
+  function closeYtEdit() {
+    setYtEditOpenForId(null);
+    setYtEditError('');
+  }
+
+  // v is the full record from `videos` (same shape confirmMoveVideo above already relies on) —
+  // saveVideo({ ...v, youtubeVideoId }) is a faithful re-save of exactly what's on the row with
+  // only that one field changed, no need to open the video first.
+  async function markAsPublished(v) {
+    const id = extractYoutubeId(ytIdInput);
+    if (!id) {
+      setYtEditError('Enter a YouTube video ID or URL.');
+      return;
+    }
+    setYtEditBusy(v.id);
+    setYtEditError('');
+    try {
+      await saveVideo({ ...v, youtubeVideoId: id });
+      const fresh = await listVideosByChannel(channelId);
+      setVideos(fresh);
+      setYtEditOpenForId(null);
+    } catch (err) {
+      setYtEditError('Failed to save: ' + String(err.message || err));
+    } finally {
+      setYtEditBusy(null);
+    }
+  }
+
+  async function markAsNotPublished(v) {
+    const ok = window.confirm(
+      'Mark this video as NOT published on YouTube?\n\nThis re-enables a full upload for this video — only do this if it was actually removed from YouTube, otherwise using it by mistake could result in a duplicate upload.'
+    );
+    if (!ok) return;
+    setYtEditBusy(v.id);
+    setYtEditError('');
+    try {
+      await saveVideo({ ...v, youtubeVideoId: null });
+      const fresh = await listVideosByChannel(channelId);
+      setVideos(fresh);
+      setYtEditOpenForId(null);
+    } catch (err) {
+      setYtEditError('Failed to save: ' + String(err.message || err));
+    } finally {
+      setYtEditBusy(null);
     }
   }
 
@@ -789,8 +867,19 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             const sceneCount = v.scenes?.length || 0;
             const readyCount = v.scenes?.filter((s) => s.images?.every((im) => im.status === 'ready') && s.audioStatus === 'ready').length || 0;
             const title = v.displayTitle || 'Untitled video';
+            const isPublished = !!v.youtubeVideoId;
             return (
-              <div key={v.id} style={{ ...card, padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div
+                key={v.id}
+                style={{
+                  ...card,
+                  padding: 12,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 10,
+                  ...(isPublished ? { borderLeft: `4px solid ${T.green}` } : {}),
+                }}
+              >
                 <div
                   style={{
                     borderRadius: 4,
@@ -809,6 +898,25 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                     <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase' }}>No preview</span>
                   )}
                 </div>
+                {isPublished && (
+                  <a
+                    href={`https://youtube.com/watch?v=${v.youtubeVideoId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      alignSelf: 'flex-start',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      fontFamily: FONT.ui,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                      color: T.green,
+                      textDecoration: 'none',
+                    }}
+                  >
+                    ▶ Published
+                  </a>
+                )}
                 <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{title}</div>
                 <div style={{ ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                   <span>
@@ -827,10 +935,74 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                   >
                     ⇄
                   </button>
+                  <button
+                    onClick={() => (ytEditOpenForId === v.id ? closeYtEdit() : openYtEdit(v))}
+                    title="Edit YouTube status"
+                    style={btnGhost}
+                  >
+                    ⚙
+                  </button>
                   <button onClick={() => handleDeleteVideo(v.id)} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
                     Delete
                   </button>
                 </div>
+
+                {ytEditOpenForId === v.id && (
+                  <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {isPublished ? (
+                      <>
+                        <a
+                          href={`https://youtube.com/watch?v=${v.youtubeVideoId}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ fontSize: 11, fontFamily: FONT.ui, color: T.primary, wordBreak: 'break-all' }}
+                        >
+                          youtube.com/watch?v={v.youtubeVideoId}
+                        </a>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button
+                            onClick={() => markAsNotPublished(v)}
+                            disabled={ytEditBusy === v.id}
+                            style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '6px 10px', fontSize: 10, flex: 1 }}
+                          >
+                            {ytEditBusy === v.id ? '…' : 'Mark as NOT published'}
+                          </button>
+                          <button onClick={closeYtEdit} disabled={ytEditBusy === v.id} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                            Cancel
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, lineHeight: 1.5 }}>
+                          Use this only if the video was removed from YouTube — this re-enables full upload for this video.
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          value={ytIdInput}
+                          onChange={(e) => setYtIdInput(e.target.value)}
+                          placeholder="YouTube video ID or URL"
+                          style={{ ...inputStyle, fontSize: 11, padding: '6px 8px' }}
+                        />
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button
+                            onClick={() => markAsPublished(v)}
+                            disabled={ytEditBusy === v.id}
+                            style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, flex: 1, opacity: ytEditBusy === v.id ? 0.6 : 1 }}
+                          >
+                            {ytEditBusy === v.id ? '…' : 'Mark as published'}
+                          </button>
+                          <button onClick={closeYtEdit} disabled={ytEditBusy === v.id} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                            Cancel
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, lineHeight: 1.5 }}>
+                          Use this if the video was uploaded to YouTube outside of WisiTube.
+                        </div>
+                      </>
+                    )}
+                    {ytEditError && <div style={{ fontSize: 10, color: T.primary, fontFamily: FONT.ui }}>{ytEditError}</div>}
+                  </div>
+                )}
 
                 {moveOpenForId === v.id && (
                   <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>
