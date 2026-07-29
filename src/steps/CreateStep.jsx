@@ -231,6 +231,10 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
               onChange={(e) => set('lengthMinutes', Number(e.target.value))}
               style={{ width: '100%', marginTop: 10 }}
             />
+            <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+              This sets the content density, not an exact runtime — actual video length varies based on how the script naturally
+              unfolds (typically 1.5-2.5× the target).
+            </div>
           </div>
           <div>
             <div style={label}>Format</div>
