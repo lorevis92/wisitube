@@ -924,25 +924,28 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                   </span>
                   <span>{timeAgo(v.updatedAt)}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 'auto' }}>
-                  <button onClick={() => onResume(v)} style={{ ...btnPrimary, flex: 1 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 'auto' }}>
+                  <button onClick={() => onResume(v)} style={{ ...btnPrimary, flex: '1 1 80px' }}>
                     Resume
                   </button>
                   <button
                     onClick={() => (moveOpenForId === v.id ? closeMove() : openMoveFor(v))}
                     title="Move to another channel"
-                    style={btnGhost}
+                    style={{ ...btnGhost, padding: '10px 12px', flexShrink: 0 }}
                   >
                     ⇄
                   </button>
                   <button
                     onClick={() => (ytEditOpenForId === v.id ? closeYtEdit() : openYtEdit(v))}
                     title="Edit YouTube status"
-                    style={btnGhost}
+                    style={{ ...btnGhost, padding: '10px 12px', flexShrink: 0 }}
                   >
                     ⚙
                   </button>
-                  <button onClick={() => handleDeleteVideo(v.id)} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
+                  <button
+                    onClick={() => handleDeleteVideo(v.id)}
+                    style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '10px 14px', flexShrink: 0 }}
+                  >
                     Delete
                   </button>
                 </div>
