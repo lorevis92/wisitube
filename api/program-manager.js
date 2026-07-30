@@ -18,8 +18,11 @@ const DEFAULT_CREATIVE_DIRECTION = `You are an expert YouTube content strategist
 
 // The output-format half — field names, types, "JSON only", and the refinement-bias contract.
 // NEVER influenced by creativeOverride: the client's JSON parsing depends on this exact shape
-// regardless of what creative direction is in play.
-const SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [6-8 objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
+// regardless of what creative direction is in play. Takes the suggestion count as a parameter
+// (default the original 6-8 spread) since a per-suggestion replacement (see ChannelDashboardStep.jsx
+// "Start this video"/count: 1) asks for exactly one instead of a full batch.
+const schemaInstructions = (suggestionCountText) =>
+  `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [${suggestionCountText} objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -39,7 +42,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists;
+    let channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles;
     try {
       const body = req.body || {};
       channelName = typeof body.channelName === 'string' ? body.channelName.trim() : '';
@@ -71,6 +74,17 @@ export default async function handler(req, res) {
             .map((p) => ({ name: typeof p.name === 'string' ? p.name.trim() : '', videoCount: Number(p.videoCount) || 0 }))
             .filter((p) => p.name)
         : [];
+      // How many suggestions to generate — null (the original 6-8 spread) unless the caller asks
+      // for a specific number, e.g. ChannelDashboardStep.jsx's single-suggestion replacement flow
+      // (count: 1) after one is started or dismissed.
+      count = Number.isFinite(Number(body.count)) && Number(body.count) > 0 ? Math.min(20, Math.round(Number(body.count))) : null;
+      // Titles/ideas to explicitly steer away from — dismissed suggestions, remaining suggestions
+      // already on the list, and/or existing video titles, combined by the caller (see
+      // ChannelDashboardStep.jsx) — on top of (not instead of) the existingVideos list already
+      // baked into userContent below.
+      avoidTitles = Array.isArray(body.avoidTitles)
+        ? body.avoidTitles.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 200)
+        : [];
     } catch (err) {
       console.error('[program-manager] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -86,7 +100,10 @@ export default async function handler(req, res) {
         .join(', ');
       systemPrompt += ` This channel already has these YouTube playlists: ${playlistList}. When a suggestion is part of a series, prefer continuing one of these existing playlists when relevant, rather than always inventing a brand new one — continuity keeps the channel's series coherent and bingeable.`;
     }
-    systemPrompt += ` ${SCHEMA_INSTRUCTIONS}`;
+    if (avoidTitles.length) {
+      systemPrompt += ` Avoid suggesting anything substantially similar to these previously rejected or already-covered ideas: ${avoidTitles.join('; ')}`;
+    }
+    systemPrompt += ` ${schemaInstructions(count ? `exactly ${count}` : '6-8')}`;
 
     const userContent = [
       `Channel name: ${channelName}`,

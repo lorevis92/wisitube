@@ -294,6 +294,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
             creativeOverride: channel.prompt_overrides?.programManager || null,
             activeDirective: channel.automation_directive || '',
             existingPlaylists,
+            // Ideas the channel owner explicitly dismissed from ChannelDashboardStep.jsx's Content
+            // Program Manager panel — a full automated regeneration must not resurface them either.
+            avoidTitles: channel.dismissed_suggestions || [],
           }),
         });
         const data = await res.json();

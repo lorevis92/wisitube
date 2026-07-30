@@ -75,6 +75,10 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [suggestionsError, setSuggestionsError] = useState('');
   const [refiningIndex, setRefiningIndex] = useState(null);
   const [refineText, setRefineText] = useState('');
+  // True while a background single-suggestion replacement (see startSuggestion below) is in
+  // flight — shown as a small loading placeholder card at the end of the suggestions grid so the
+  // list doesn't visibly shrink by one and then jump back once the replacement arrives.
+  const [awaitingReplacement, setAwaitingReplacement] = useState(false);
   const [totalSpent, setTotalSpent] = useState(0);
   const [showPromptLab, setShowPromptLab] = useState(false);
   // Local in-progress edits per stage, keyed by stage — undefined means "not yet touched this
@@ -247,6 +251,9 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
           refinement: refinementText || '',
           creativeOverride: channel.prompt_overrides?.programManager || null,
           existingPlaylists,
+          // A full regeneration must not resurface ideas already explicitly dismissed as
+          // "not interested" (see dismissSuggestion below).
+          avoidTitles: channel.dismissed_suggestions || [],
         }),
       });
       const data = await res.json();
@@ -262,6 +269,106 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     } finally {
       setSuggestionsLoading(false);
     }
+  }
+
+  // Fetches exactly one replacement suggestion and appends it to whatever's currently on the list
+  // (simpler and just as correct as reinserting at the original slot, since by the time this
+  // resolves other suggestions may have been started/dismissed too, making "the original slot"
+  // ambiguous). baseChannel is the freshest known channel object at the moment this was kicked off
+  // (see startSuggestion) — used to build avoidTitles, not re-read from the (possibly stale) closure.
+  async function replaceSuggestionInBackground(baseChannel) {
+    setAwaitingReplacement(true);
+    try {
+      const existingPlaylists = await listChannelPlaylists(baseChannel);
+      const remainingTitles = (baseChannel.lastSuggestions?.suggestions || []).map((s) => s.title).filter(Boolean);
+      const existingVideoTitles = (videos || []).map((v) => v.displayTitle || v.topic || '').filter(Boolean);
+      const avoidTitles = [...remainingTitles, ...existingVideoTitles, ...(baseChannel.dismissed_suggestions || [])];
+      const res = await fetch('/api/program-manager', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channelName: baseChannel.name,
+          niche: baseChannel.niche || '',
+          editorialNotes: baseChannel.editorialNotes || '',
+          existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
+          refinement: '',
+          creativeOverride: baseChannel.prompt_overrides?.programManager || null,
+          existingPlaylists,
+          count: 1,
+          avoidTitles,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch a replacement suggestion');
+      const newSuggestion = (data.suggestions || [])[0];
+      if (!newSuggestion) return;
+
+      // Functional update to read the truly-latest channel state (something else may have changed
+      // it while this fetch was in flight, e.g. another suggestion started or dismissed) — captured
+      // into a local var so the subsequent saveChannel call has the exact object just applied.
+      let latestChannel;
+      setChannel((prev) => {
+        if (!prev) return prev;
+        const suggestions = [...(prev.lastSuggestions?.suggestions || []), newSuggestion];
+        latestChannel = { ...prev, lastSuggestions: { ...prev.lastSuggestions, suggestions } };
+        return latestChannel;
+      });
+      if (!latestChannel) return;
+      const updated = await saveChannel(latestChannel);
+      setChannel(updated);
+      onChannelChange?.(updated);
+    } catch (err) {
+      console.error('[ChannelDashboardStep] failed to fetch/save a replacement suggestion', err);
+    } finally {
+      setAwaitingReplacement(false);
+    }
+  }
+
+  // "Start this video" — removes the suggestion immediately (before the replacement round-trip
+  // even begins) so the list never keeps showing an idea that's already being turned into a video,
+  // even if the user navigates back here before the background replacement arrives.
+  function startSuggestion(s, i) {
+    onStartVideoFromSuggestion?.(s.title, s.series || null);
+    let latestChannel;
+    setChannel((prev) => {
+      if (!prev) return prev;
+      const remaining = (prev.lastSuggestions?.suggestions || []).filter((_, idx) => idx !== i);
+      latestChannel = { ...prev, lastSuggestions: { ...prev.lastSuggestions, suggestions: remaining } };
+      return latestChannel;
+    });
+    if (!latestChannel) return;
+    saveChannel(latestChannel)
+      .then((updated) => {
+        setChannel(updated);
+        onChannelChange?.(updated);
+        replaceSuggestionInBackground(updated);
+      })
+      .catch((err) => console.error('[ChannelDashboardStep] failed to remove started suggestion', err));
+  }
+
+  // "Not interested" — removes the suggestion with no replacement (the list simply gets shorter)
+  // and remembers the title so it never resurfaces in a future single replacement or full
+  // regeneration (see avoidTitles above and in fetchSuggestions) — capped at the most recent 50.
+  function dismissSuggestion(s, i) {
+    let latestChannel;
+    setChannel((prev) => {
+      if (!prev) return prev;
+      const remaining = (prev.lastSuggestions?.suggestions || []).filter((_, idx) => idx !== i);
+      const dismissed = [...(prev.dismissed_suggestions || []), s.title].filter(Boolean).slice(-50);
+      latestChannel = {
+        ...prev,
+        lastSuggestions: { ...prev.lastSuggestions, suggestions: remaining },
+        dismissed_suggestions: dismissed,
+      };
+      return latestChannel;
+    });
+    if (!latestChannel) return;
+    saveChannel(latestChannel)
+      .then((updated) => {
+        setChannel(updated);
+        onChannelChange?.(updated);
+      })
+      .catch((err) => console.error('[ChannelDashboardStep] failed to save dismissed suggestion', err));
   }
 
   async function togglePlaylists() {
@@ -802,7 +909,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
 
                   <div style={{ display: 'flex', gap: 6, marginTop: 'auto', flexWrap: 'wrap' }}>
                     <button
-                      onClick={() => onStartVideoFromSuggestion?.(s.title, s.series || null)}
+                      onClick={() => startSuggestion(s, i)}
                       style={{ ...btnPrimary, flex: 1, padding: '8px 12px', fontSize: 10 }}
                     >
                       Start this video
@@ -812,6 +919,13 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                       style={{ ...btnGhost, padding: '8px 12px', fontSize: 10 }}
                     >
                       Refine
+                    </button>
+                    <button
+                      onClick={() => dismissSuggestion(s, i)}
+                      title="Not interested"
+                      style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '8px 12px', fontSize: 10 }}
+                    >
+                      ✕ Not interested
                     </button>
                   </div>
 
@@ -839,6 +953,24 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                   )}
                 </div>
               ))}
+              {awaitingReplacement && (
+                <div
+                  style={{
+                    border: `1px dashed ${T.border}`,
+                    borderRadius: 4,
+                    padding: 12,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minHeight: 90,
+                    ...mono,
+                    fontSize: 11,
+                    color: T.textMuted,
+                  }}
+                >
+                  Finding a replacement idea…
+                </div>
+              )}
             </div>
           </div>
         )}

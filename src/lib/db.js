@@ -119,6 +119,11 @@ export async function deleteVideo(id) {
 //     add column if not exists automation_length_cap_enabled boolean not null default true,
 //     add column if not exists automation_length_cap_min integer not null default 2,
 //     add column if not exists automation_length_cap_max integer not null default 45;
+//
+// Required one-time setup for per-suggestion dismiss/replace (Content Program Manager):
+//
+//   alter table wisitube_channels
+//     add column if not exists dismissed_suggestions jsonb not null default '[]'::jsonb;
 
 function fromChannelRow(row) {
   return {
@@ -129,6 +134,11 @@ function fromChannelRow(row) {
     niche: row.niche || '',
     editorialNotes: row.editorial_notes || '',
     lastSuggestions: row.last_suggestions || null,
+    // Titles the channel owner explicitly said "not interested" to (ChannelDashboardStep.jsx) — fed
+    // back as avoidTitles on every future Content Program Manager call (a single replacement or a
+    // full regeneration) so a dismissed idea doesn't keep resurfacing. Capped at the most recent 50
+    // by whoever appends to it, not here.
+    dismissed_suggestions: Array.isArray(row.dismissed_suggestions) ? row.dismissed_suggestions : [],
     youtube_connected: !!row.youtube_connected,
     youtube_channel_name: row.youtube_channel_name || '',
     youtube_channel_id: row.youtube_channel_id || '',
@@ -184,6 +194,7 @@ export async function saveChannel(channel) {
     niche: channel.niche || '',
     editorial_notes: channel.editorialNotes || '',
     last_suggestions: channel.lastSuggestions || null,
+    dismissed_suggestions: Array.isArray(channel.dismissed_suggestions) ? channel.dismissed_suggestions : [],
     youtube_connected: !!channel.youtube_connected,
     youtube_channel_name: channel.youtube_channel_name || '',
     youtube_channel_id: channel.youtube_channel_id || '',
