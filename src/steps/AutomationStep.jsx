@@ -94,6 +94,11 @@ function statusColor(status) {
 
 export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedulerEnabledChange }) {
   const [channels, setChannels] = useState(null); // null = still loading
+  // Per-channel collapse state, keyed by channel id — closed (falsy/missing) by default so a page
+  // with several channels doesn't turn into a wall of near-identical fields (see the header
+  // summary line below for what's visible without expanding). Not persisted: every page load starts
+  // fully collapsed again, same simple default as everywhere else "closed by default" is used here.
+  const [expandedChannels, setExpandedChannels] = useState({});
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null); // { channelId, channelName, index, total, status }
   const [logItems, setLogItems] = useState([]);
@@ -236,6 +241,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
     saveChannel({ ...channel, ...patch })
       .then((updated) => setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c))))
       .catch((err) => console.error('[AutomationStep] failed to save channel automation settings', channelId, err));
+  }
+
+  function toggleChannelExpanded(channelId) {
+    setExpandedChannels((prev) => ({ ...prev, [channelId]: !prev[channelId] }));
   }
 
   // Turns automationEngine.js's { channelId, channelName, step, message, videoId, project } events
@@ -551,11 +560,64 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
           </div>
         ) : (
           <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {channels.map((c) => (
+            {channels.map((c) => {
+              const isExpanded = !!expandedChannels[c.id];
+              return (
               <div key={c.id} style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 14 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                  <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</div>
-                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => toggleChannelExpanded(c.id)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    width: '100%',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', minWidth: 0 }}>
+                    <span
+                      title={c.automation_enabled ? 'Enabled' : 'Disabled'}
+                      style={{
+                        display: 'inline-block',
+                        width: 8,
+                        height: 8,
+                        borderRadius: 8,
+                        background: c.automation_enabled ? T.green : T.textMuted,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</span>
+                    <span style={{ ...mono, fontSize: 11, color: T.textSecondary }}>
+                      {PROVIDER_LABELS[c.automation_image_provider] || c.automation_image_provider || 'pollinations'}
+                    </span>
+                    <span style={{ ...mono, fontSize: 11, color: T.textMuted }}>
+                      Today: {c.automation_daily_upload_count || 0}/{c.automation_videos_per_day || 0} uploads · $
+                      {(c.automation_daily_spend_usd || 0).toFixed(2)} / ${(c.automation_daily_budget_usd || 0).toFixed(2)} spent
+                    </span>
+                  </div>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: T.textMuted,
+                      fontFamily: FONT.ui,
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {isExpanded ? 'CLOSE ▲' : 'SHOW ▼'}
+                  </span>
+                </button>
+
+                {isExpanded && (
+                <>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 16, marginTop: 12 }}>
                     <label
                       style={{
                         display: 'flex',
@@ -597,7 +659,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       />
                       Enabled
                     </label>
-                  </div>
                 </div>
 
                 <div
@@ -893,13 +954,11 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     style={{ ...inputStyle, marginTop: 6, resize: 'vertical' }}
                   />
                 </div>
-
-                <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 10 }}>
-                  Today: {c.automation_daily_upload_count || 0}/{c.automation_videos_per_day || 0} uploads · $
-                  {(c.automation_daily_spend_usd || 0).toFixed(2)} / ${(c.automation_daily_budget_usd || 0).toFixed(2)} spent
-                </div>
+                </>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
