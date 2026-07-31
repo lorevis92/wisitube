@@ -23,9 +23,16 @@ function defaultVoiceForEngine(engine) {
   return engine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE;
 }
 
-// Phase 1 only ships one real recipe (see automationEngine.js getRecipeForContentType) — no other
-// content types are invented here ahead of that.
-const CONTENT_TYPES = [{ value: 'full_pipeline', label: 'Full Pipeline (images)' }];
+// automationEngine.js's getRecipeForContentType only has a real recipe wired up for
+// 'full_pipeline' — a channel set to 'static_background' is selectable here (so channels can start
+// being configured for it) but will simply be skipped by a real automation cycle for now ("no
+// recipe for content_type") until a dedicated recipe exists. Today it only affects the manual
+// Create flow's script-generation endpoints (see CreateStep.jsx/api/generate-outline.js/
+// api/generate-scenes.js) — no rendering/media pipeline for it yet.
+const CONTENT_TYPES = [
+  { value: 'full_pipeline', label: 'Full Pipeline (images)' },
+  { value: 'static_background', label: 'Static Background — Language Learning' },
+];
 
 // Same list as CreateStep.jsx's own local LANGUAGES const — duplicated rather than imported since
 // CreateStep.jsx doesn't export it (small, stable, controlled-duplication pattern already used

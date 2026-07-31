@@ -33,6 +33,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           aiDecidesLength: settings.aiDecidesLength === true,
           style: STYLES[settings.style].label,
           imageProvider: settings.imageProvider,
+          contentType: settings.contentType,
           characterHints,
           generalNotes: (settings.generalNotes || '').trim(),
           references,

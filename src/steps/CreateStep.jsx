@@ -11,6 +11,16 @@ import ExpandableTextarea from '../components/ExpandableTextarea';
 
 const LANGUAGES = ['English', 'Italiano', 'Español', 'Français', 'Deutsch'];
 
+// Same list as AutomationStep.jsx's own local CONTENT_TYPES const — duplicated rather than
+// imported, same controlled-duplication pattern already used elsewhere in this codebase (e.g.
+// YOUTUBE_LANGUAGE_CODES in ExportStep.jsx/fullPipelineRecipe.js). 'static_background' is
+// script-generation-only for now (see api/generate-outline.js/api/generate-scenes.js) — selectable
+// here just to generate/test the adjusted narration, no dedicated background/text-style UI yet.
+const CONTENT_TYPES = [
+  { value: 'full_pipeline', label: 'Full Pipeline (images)' },
+  { value: 'static_background', label: 'Static Background — Language Learning' },
+];
+
 export default function CreateStep({ settings, setSettings, onTitles, channel, isMobile }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -147,6 +157,20 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
         />
 
         <div style={fieldGrid}>
+          <div>
+            <div style={label}>Content type</div>
+            <select
+              value={settings.contentType || 'full_pipeline'}
+              onChange={(e) => set('contentType', e.target.value)}
+              style={{ ...inputStyle, marginTop: 8 }}
+            >
+              {CONTENT_TYPES.map((ct) => (
+                <option key={ct.value} value={ct.value}>
+                  {ct.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <div>
             <div style={label}>Visual style</div>
             <select value={settings.style} onChange={(e) => set('style', e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>

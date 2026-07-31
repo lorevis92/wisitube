@@ -27,6 +27,16 @@ For the character bible: identify every character that appears in more than one 
 
 For every real, named, identifiable person in the character_bible (historical figures, celebrities, public figures) — search the web to verify their actual physical appearance before writing descriptions. Identify which traits are constant identity anchors that persist across their entire life (bone structure, ear shape, distinctive permanent marks, eye shape/color, general build proportions) versus which traits change by era (hair length/color/style, facial hair, weight, clothing, age-related features). The base_description must contain only the constant anchors. Each variant's description must contain only the era-specific changes — never repeat the constant anchors in variants, they're inherited automatically. For fictional characters or figures the search doesn't surface reliable information about, fall back on your own knowledge or reasonable invention guided by any user-provided character hints. Keep base_description and every variant description short and telegraphic — max 12-15 words each, comma-separated traits, never a full discursive sentence — since these get concatenated directly into image-generation prompts and must stay lean.`;
 
+// Same "channel voice" role as DEFAULT_CREATIVE_DIRECTION above, for content_type
+// 'static_background' — no per-scene images exist in this mode, so the character-bible guidance
+// (and the narrative-arc guidance generally) drops every mention of visual appearance/art style,
+// keeping character_bible purely as a naming/identity aid for consistent narration.
+const DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND = `You are a scriptwriter for spoken-narration, language-learning videos with a static background — there is no per-scene visual component, only continuous narration meant to be listened to and read along.
+
+Everything you produce must be built AROUND the video's specific narrative angle, not a generic treatment of the topic. Structure the outline so each chapter has a clear role in the narrative arc: the first chapter is the HOOK, middle chapters develop and escalate the angle, the last chapter is the climax and closes with a call to action (subscribe / watch next). Every chapter must build on the last, staying anchored to the chosen angle throughout — never drift into a generic retelling of the topic.
+
+For the character bible: identify every recurring named person across the ENTIRE video — including the narrator/protagonist even if not explicitly named by the user. This exists only to keep names, roles and relationships consistent across the narration (e.g. always referring to the same person the same way) — there is no visual appearance to describe, so keep base_description and variants brief and focused on identity/role/relationship, never physical traits.`;
+
 // "Let AI decide the ideal length" mode (CreateStep.jsx/AutomationStep.jsx) — replaces the fixed
 // lengthMinutes-driven scene count with purely content-driven pacing. Deliberately says nothing
 // about topic "category" (history vs. science vs. whatever) — that's exactly the kind of shortcut
@@ -73,7 +83,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
-    let aiDecidesLength, capMinMinutes, capMaxMinutes;
+    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -85,6 +95,11 @@ export default async function handler(req, res) {
       language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
       imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
+      // 'static_background' (language-learning script, no per-scene images) vs. the default
+      // image-driven pipeline — see CreateStep.jsx/AutomationStep.jsx's "Content type" select.
+      // Script-generation-only for now: this changes narration pacing/schema below, nothing else.
+      contentType = typeof body.contentType === 'string' ? body.contentType.trim() : '';
+      isStaticBackground = contentType === 'static_background';
 
       aiDecidesLength = body.aiDecidesLength === true;
       if (aiDecidesLength) {
@@ -97,6 +112,19 @@ export default async function handler(req, res) {
         capMaxMinutes = hasCap ? max : null;
         lengthMinutes = null; // no fixed target in this mode — see AI_DECIDES_LENGTH_INSTRUCTION
         totalScenes = null;
+      } else if (isStaticBackground) {
+        // Never forced from the visual-pacing density formula (scenes/minute) — that formula
+        // assumes one image cut every few seconds, meaningless for continuous spoken narration
+        // over a static background. lengthMinutes is still respected as a rough target (see
+        // lengthInstruction below), but the actual scene count is left for the model to decide
+        // based on natural paragraph/thought divisions — same "free total_scenes" mechanism as
+        // aiDecidesLength, just without dropping the length target entirely.
+        capMinMinutes = null;
+        capMaxMinutes = null;
+        lengthMinutes = Number(body.lengthMinutes);
+        if (!Number.isFinite(lengthMinutes) || lengthMinutes <= 0) lengthMinutes = 1;
+        lengthMinutes = Math.min(25, Math.max(1, lengthMinutes));
+        totalScenes = null;
       } else {
         capMinMinutes = null;
         capMaxMinutes = null;
@@ -105,7 +133,6 @@ export default async function handler(req, res) {
         lengthMinutes = Math.min(25, Math.max(1, lengthMinutes));
         totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
       }
-
       hints = Array.isArray(body.characterHints)
         ? body.characterHints
             .filter((c) => c && typeof c === 'object' && ((typeof c.name === 'string' && c.name.trim()) || (typeof c.details === 'string' && c.details.trim())))
@@ -125,12 +152,19 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
+    // True whenever total_scenes is NOT a fixed, pre-computed target — either the model was asked
+    // to decide the whole length itself, or this content type never uses the visual-pacing formula
+    // in the first place. Both cases reuse the exact same "derive total_scenes from the outline's
+    // own chapter sum, optionally clamp to a cap" mechanism below.
+    const freeSceneCount = aiDecidesLength || isStaticBackground;
+
     // Nano Banana 2 / GPT Image 2 are LLM-native models with real-world knowledge of well-known
     // people and characters, unlike Pollinations' Flux/Kontext — writing exhaustive physical
     // descriptions for a recognizable figure is redundant at best and can actively fight what the
     // model would otherwise render correctly from the name alone. A technical fact about the
     // chosen image provider, not a stylistic choice — always included regardless of creativeOverride.
-    const providerAwareCharacterNote = imageProvider !== 'pollinations'
+    // Irrelevant for static_background: there are no per-scene images to write prompts for at all.
+    const providerAwareCharacterNote = imageProvider !== 'pollinations' && !isStaticBackground
       ? `
 
 The image model has strong built-in world knowledge and will recognize well-known real people and iconic fictional characters by name alone — do NOT write exhaustive physical descriptions for them, it's redundant and may conflict with what the model already renders correctly. For these characters, keep base_description minimal or empty, and use variants ONLY to pin down story-specific appearance choices the model wouldn't automatically infer — which specific life stage/era to depict, a specific costume or prop relevant to that scene. For invented/fictional characters with no public recognition (i.e. not portrayed by any known actor or widely depicted), still write a full base_description as before — there's nothing for the model to already know.`
@@ -144,33 +178,41 @@ ${refs.map((r) => `- label: "${r.label}"`).join('\n')}
 Keep the character_bible consistent with these — if a reference photo's label describes a character, that character's name and variants in character_bible should align with it.`
       : '';
 
-    // Length guidance — either a fixed target (lengthMinutes) or the content-driven instruction,
-    // optionally bounded by a safety cap (see AutomationStep.jsx's "Enable safety cap"). The cap
-    // sentence is appended to the AI-decides instruction itself, not treated as a separate rule, so
-    // it reads as a boundary on the same judgment call rather than a competing directive.
+    // Length guidance — a fixed target (lengthMinutes), the fully content-driven instruction, or
+    // (static_background) a target duration expressed as natural narration rather than a scene
+    // count — optionally bounded by a safety cap (see AutomationStep.jsx's "Enable safety cap",
+    // aiDecidesLength only). The cap sentence is appended to the AI-decides instruction itself, not
+    // treated as a separate rule, so it reads as a boundary on the same judgment call rather than a
+    // competing directive.
     const lengthInstruction = aiDecidesLength
       ? `${AI_DECIDES_LENGTH_INSTRUCTION}${
           capMinMinutes != null
             ? ` The total scene count across all chapters must correspond to between ${capMinMinutes} and ${capMaxMinutes} minutes (using ~12 scenes/minute as reference), regardless of the above — work within this boundary.`
             : ''
         }`
-      : `Video length: ~${lengthMinutes} minutes — split into a sensible number of chapters, roughly one chapter every 1.5-2 minutes.`;
+      : isStaticBackground
+        ? `Video length: ~${lengthMinutes} minutes of natural spoken narration. Divide it into as many scenes as feels natural for the content — roughly one complete paragraph or thought per scene — rather than targeting any specific scene count or a visual-cut pacing density.`
+        : `Video length: ~${lengthMinutes} minutes — split into a sensible number of chapters, roughly one chapter every 1.5-2 minutes.`;
+
+    // The visual-art-style paragraph below only makes sense when there are actual images to draw —
+    // skipped entirely for static_background, which has no per-scene images at all.
+    const styleTranslationNote = isStaticBackground
+      ? ''
+      : `\n\nCRITICAL: character descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.`;
 
     // Facts about THIS specific video (title, angle, length, visual style) — always injected
     // regardless of which creative direction is active (default or a channel's override), since an
     // override changes HOW to write, never WHAT video this is.
     const context = `Video title: "${title}"
 Narrative angle: ${angle || '(none specified — infer a coherent angle from the title itself)'}
-${lengthInstruction}
-
-CRITICAL: character descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.`;
+${lengthInstruction}${styleTranslationNote}`;
 
     // total_scenes is either the fixed target (forced onto the response later regardless of what
-    // the model returns) or, in AI-decides mode, whatever the model itself determines — the schema
-    // documentation and rule below reflect that difference explicitly rather than showing a number
-    // that doesn't apply.
-    const totalScenesSchemaValue = aiDecidesLength ? 'number (however many scenes you determine this video genuinely needs)' : totalScenes;
-    const totalScenesRule = aiDecidesLength
+    // the model returns) or, whenever freeSceneCount is true, whatever the model itself determines
+    // — the schema documentation and rule below reflect that difference explicitly rather than
+    // showing a number that doesn't apply.
+    const totalScenesSchemaValue = freeSceneCount ? 'number (however many scenes you determine this video genuinely needs)' : totalScenes;
+    const totalScenesRule = freeSceneCount
       ? `The sum of every chapter's scene_count MUST equal exactly the total_scenes value you provide.`
       : `The sum of every chapter's scene_count MUST equal exactly ${totalScenes}.`;
 
@@ -194,13 +236,16 @@ Rules:
 - Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).
 - Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}`;
 
-    const systemPrompt = `${context}\n\n${creativeOverride || DEFAULT_CREATIVE_DIRECTION}\n\n${SCHEMA_INSTRUCTIONS}`;
+    const defaultCreativeDirection = isStaticBackground ? DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND : DEFAULT_CREATIVE_DIRECTION;
+    const systemPrompt = `${context}\n\n${creativeOverride || defaultCreativeDirection}\n\n${SCHEMA_INSTRUCTIONS}`;
 
     const userLengthLine = aiDecidesLength
       ? `Video length: let it emerge naturally from how much content this topic genuinely supports — do not target a fixed number of scenes.${
           capMinMinutes != null ? ` Stay within ${capMinMinutes}-${capMaxMinutes} minutes (~${capMinMinutes * 12}-${capMaxMinutes * 12} scenes).` : ''
         }`
-      : `Video length: ~${lengthMinutes} minutes (${totalScenes} scenes total)`;
+      : isStaticBackground
+        ? `Video length: ~${lengthMinutes} minutes of natural spoken narration — let the number of scenes emerge from natural paragraph/thought divisions, not a fixed scene-count target.`
+        : `Video length: ~${lengthMinutes} minutes (${totalScenes} scenes total)`;
 
     const userLines = [
       `Topic: "${topic}"`,
@@ -298,10 +343,12 @@ Rules:
       return res.status(502).json({ error: 'AI response missing outline' });
     }
 
-    if (aiDecidesLength) {
+    if (freeSceneCount) {
       // Derived from what the model actually returned (the chapters are the real driver for
       // api/generate-scenes.js downstream) rather than trusted from the model's own top-level
-      // total_scenes field, which could drift from the chapter sum.
+      // total_scenes field, which could drift from the chapter sum. capMinMinutes/capMaxMinutes are
+      // only ever set when aiDecidesLength is the reason freeSceneCount is true (static_background
+      // has no cap mechanism), so this clamp naturally never fires for static_background.
       plan.total_scenes = plan.outline.reduce((sum, ch) => sum + (Number(ch.scene_count) || 0), 0);
       if (capMinMinutes != null && capMaxMinutes != null) {
         const capMinScenes = Math.max(1, Math.round(capMinMinutes * 12));

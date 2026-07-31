@@ -94,6 +94,11 @@ export default function App() {
     voice: 'af_heart',
     voiceEngine: 'kokoro',
     imageProvider: 'pollinations',
+    // 'full_pipeline' (default, image-driven) vs. 'static_background' (spoken narration only, no
+    // per-scene images — see CreateStep.jsx's "Content type" select). Script-generation-only for
+    // now: api/generate-outline.js/api/generate-scenes.js adjust narration pacing/schema for it,
+    // but rendering/media generation don't know about it yet.
+    contentType: 'full_pipeline',
     lengthMinutes: 5,
     // When true, lengthMinutes is ignored — api/generate-outline.js lets Claude size the video off
     // how much content the topic genuinely supports instead of a fixed target (see CreateStep.jsx's
@@ -318,6 +323,7 @@ export default function App() {
       style: STYLES[settings.style].label,
       format: settings.format,
       imageProvider: settings.imageProvider,
+      contentType: settings.contentType,
       characterBible: plan.characterBible,
       references: plan.references.map((r) => ({ id: r.id, label: r.label })),
       creativeOverride: currentChannel?.prompt_overrides?.scenes || null,

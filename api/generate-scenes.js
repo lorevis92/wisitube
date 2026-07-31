@@ -24,6 +24,13 @@ const DEFAULT_CREATIVE_DIRECTION = `You are a YouTube scriptwriter continuing a 
 
 Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers. Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.`;
 
+// Same "channel voice" role as DEFAULT_CREATIVE_DIRECTION above, for content_type
+// 'static_background' — no image_beats exist in this mode, so every instruction about animations,
+// shots or visual distinctness is dropped; only narration pacing/continuity remains.
+const DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND = `You are continuing the script for a spoken-narration, language-learning video with a static background already in progress — there is no visual component to write for, only continuous narration.
+
+Narration must flow naturally when read aloud in sequence, calm and measured conversational tone, no scene numbers, no visual cues or stage directions of any kind.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -43,7 +50,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, chapterTitle, chapterSummary, sceneCount, language, style, imageProvider, vertical;
-    let characterBible, refs, previousTail, isVeryFirstChunk, isVeryLastChunk, creativeOverride;
+    let characterBible, refs, previousTail, isVeryFirstChunk, isVeryLastChunk, creativeOverride, contentType, isStaticBackground;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -61,6 +68,12 @@ export default async function handler(req, res) {
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
       imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
       vertical = body.format === '9:16';
+      // 'static_background' — see api/generate-outline.js's own contentType handling for the full
+      // rationale. Here it only changes the narration field's instruction and drops image_beats
+      // from the schema entirely (sceneCount itself was already decided upstream by the outline
+      // phase either way, so no chunking logic changes are needed in this file).
+      contentType = typeof body.contentType === 'string' ? body.contentType.trim() : '';
+      isStaticBackground = contentType === 'static_background';
 
       characterBible = Array.isArray(body.characterBible)
         ? body.characterBible
@@ -89,7 +102,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    const referenceSection = refs.length
+    // Both sections below are entirely about assigning a reference photo / character appearance to
+    // an image_beat — meaningless for static_background, which has no image_beats at all.
+    const referenceSection = !isStaticBackground && refs.length
       ? `
 
 You have been given these reference photos, each with a label describing who/what they depict and in what context:
@@ -100,13 +115,24 @@ For EVERY image beat where the main subject (the person these references depict)
 When reference_id is set, image_prompt MUST be an editing instruction, never a fresh description that ignores the photo: state explicitly to keep the subject's face, hairstyle and distinctive features from the reference photo, and describe ONLY what changes — in the exact form "keep the subject's face, hairstyle and distinctive features from the reference photo; change only: [scene/setting/action]". When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`
       : '';
 
-    const characterAssignmentSection = characterBible.length
+    const characterAssignmentSection = !isStaticBackground && characterBible.length
       ? `
 
 Character bible for this video (already established — do NOT invent new characters, only ever use these exact ids):
 ${characterBible.map((c) => `- id: "${c.id}", name: "${c.name}"${c.variants.length ? `, variants: [${c.variants.map((l) => `"${l}"`).join(', ')}]` : ''}`).join('\n')}
 
 For EVERY image beat where one of these characters is visibly present — as the focal subject, in the background, or partially visible — character_id and variant_label are REQUIRED: do NOT leave them null just because no variant is a perfect match, pick the closest one by that beat's narrative context. Only set character_id and variant_label to null when no character_bible character is genuinely depicted in that specific beat. If a beat has both a valid reference_id and a valid character_id for the same character, reference_id (a real photo) takes priority for the final image — character_id and variant_label are still saved as information regardless.`
+      : '';
+
+    // static_background still benefits from knowing recurring names — purely so the narration
+    // refers to the same person consistently (e.g. always "Maria", not switching to "the woman"
+    // later) — none of the reference_id/character_id/variant_label image-assignment rules above
+    // apply since there's no image_beat to assign them to.
+    const characterNamingNote = isStaticBackground && characterBible.length
+      ? `\n\nRecurring people/characters in this video (use these exact names consistently throughout the narration): ${characterBible
+          .map((c) => c.name)
+          .filter(Boolean)
+          .join(', ')}.`
       : '';
 
     // Pollinations (Flux/Kontext) has no real-world knowledge and cannot render legible text —
@@ -138,14 +164,34 @@ Topic: "${topic}"
 
 ${continuityNote}`;
 
+    // Replaces the punchy, visual-cut-paced narration instruction with one suited to continuous
+    // spoken narration meant to be listened to and read along calmly — see the prompt spec for
+    // exactly why (pronunciation-friendly phrasing, natural sentence rhythm over brevity).
+    const narrationFieldDescription = isStaticBackground
+      ? `what the voiceover says for this scene — write natural, flowing narration at a clear, measured pace suitable for a language-learning audience: complete sentences, natural paragraph structure, not fragmented into short punchy beats. This content is meant to be listened to and read along calmly, not paced to visual cuts. Prioritize clarity of pronunciation-friendly phrasing and natural sentence rhythm over brevity. Written in ${language}`
+      : `what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}`;
+
     // The output-format half — field names, types, and hard correctness rules the client's parsing
-    // depends on. NEVER influenced by creativeOverride, in any case.
-    const SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
+    // depends on. NEVER influenced by creativeOverride, in any case. static_background's schema has
+    // no image_beats field at all — there is nothing to draw for this content type.
+    const SCHEMA_INSTRUCTIONS = isStaticBackground
+      ? `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
 JSON schema:
 {
   "scenes": [exactly ${sceneCount} objects: {
-    "narration": "what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}",
+    "narration": "${narrationFieldDescription}"
+  }]
+}
+
+Rules:
+- Each scene should be roughly one complete paragraph or thought — natural narration chunking, never a fixed sentence-count target.${characterNamingNote}`
+      : `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
+
+JSON schema:
+{
+  "scenes": [exactly ${sceneCount} objects: {
+    "narration": "${narrationFieldDescription}",
     "image_beats": [exactly 2 objects: {
       "image_prompt": "${imagePromptFieldDescription}",
       "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
@@ -160,7 +206,8 @@ Rules:
 - image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.
 - If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterAssignmentSection}`;
 
-    const systemPrompt = `${context}\n\n${creativeOverride || DEFAULT_CREATIVE_DIRECTION}\n\n${SCHEMA_INSTRUCTIONS}`;
+    const defaultCreativeDirection = isStaticBackground ? DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND : DEFAULT_CREATIVE_DIRECTION;
+    const systemPrompt = `${context}\n\n${creativeOverride || defaultCreativeDirection}\n\n${SCHEMA_INSTRUCTIONS}`;
 
     // Phase 2: call Anthropic.
     let response;
