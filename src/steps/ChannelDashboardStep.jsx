@@ -81,6 +81,13 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [awaitingReplacement, setAwaitingReplacement] = useState(false);
   const [totalSpent, setTotalSpent] = useState(0);
   const [showPromptLab, setShowPromptLab] = useState(false);
+  // Section collapse state — same "SHOW ▼/CLOSE ▲" pattern as Prompt Lab (and AutomationStep.jsx's
+  // per-channel sections), not persisted across sessions: every page load starts from these
+  // defaults again. Channel info and Content Program Manager start closed (secondary, edited
+  // rarely); the video grid starts open since it's the main reason to be on this page at all.
+  const [channelInfoOpen, setChannelInfoOpen] = useState(false);
+  const [programManagerOpen, setProgramManagerOpen] = useState(false);
+  const [videoGridOpen, setVideoGridOpen] = useState(true);
   // Local in-progress edits per stage, keyed by stage — undefined means "not yet touched this
   // session, fall back to channel.prompt_overrides[stage] or the stage's default text". Kept
   // separate from channel state so typing doesn't need a round-trip through saveChannel on every
@@ -557,8 +564,10 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
                 width: '100%',
               }}
             />
-            {channel?.niche && <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 4 }}>{channel.niche}</div>}
-            <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>💰 ${totalSpent.toFixed(2)} spent on this channel</div>
+            <div style={{ ...mono, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>
+              {channel?.youtube_connected ? `✓ Connected to ${channel.youtube_channel_name || 'YouTube channel'}` : 'Not connected'} · 💰 $
+              {totalSpent.toFixed(2)} spent
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={onBack} style={btnGhost}>
@@ -569,100 +578,125 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             </button>
           </div>
         </div>
-        <div style={{ marginTop: 16 }}>
-          <div style={label}>Niche</div>
-          <ExpandableTextarea
-            value={niche}
-            onChange={(e) => setNiche(e.target.value)}
-            onBlur={saveNiche}
-            placeholder="Niche (optional)"
-            rows={2}
-            style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
-          />
-        </div>
-        <div style={{ marginTop: 16 }}>
-          <div style={label}>Editorial notes</div>
-          <ExpandableTextarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            onBlur={saveNotes}
-            placeholder="Tone, recurring formats, things to avoid…"
-            rows={2}
-            style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
-          />
-        </div>
 
-        <div
+        <button
+          onClick={() => setChannelInfoOpen((v) => !v)}
           style={{
-            borderTop: `1px solid ${T.border}`,
-            marginTop: 16,
-            paddingTop: 16,
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            width: '100%',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 10,
+            cursor: 'pointer',
+            marginTop: 16,
           }}
         >
-          <div>
-            <div style={label}>YouTube</div>
-            {channel?.youtube_connected ? (
-              <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.text, marginTop: 6 }}>
-                ✓ Connected to {channel.youtube_channel_name || 'YouTube channel'}
-              </div>
-            ) : (
-              <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>
-                Connect this channel's YouTube account to enable direct upload.
-              </div>
-            )}
-          </div>
-          {channel?.youtube_connected ? (
-            <button onClick={handleDisconnectYoutube} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
-              Disconnect
-            </button>
-          ) : (
-            <button onClick={handleConnectYoutube} style={btnPrimary}>
-              Connect YouTube channel
-            </button>
-          )}
-        </div>
+          <span style={label}>Channel details</span>
+          <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+            {channelInfoOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+          </span>
+        </button>
 
-        {channel?.youtube_connected && (
-          <div style={{ marginTop: 12 }}>
-            <button onClick={togglePlaylists} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
-              📂 {playlistsOpen ? 'Hide' : 'View'} channel playlists
-            </button>
-            {playlistsOpen && (
-              <div style={{ marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 4, padding: 10, maxHeight: 220, overflowY: 'auto' }}>
-                {playlistsLoading ? (
-                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>Loading…</div>
-                ) : !playlists || playlists.length === 0 ? (
-                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>No playlists found on this channel.</div>
+        {channelInfoOpen && (
+          <>
+            <div style={{ marginTop: 16 }}>
+              <div style={label}>Niche</div>
+              <ExpandableTextarea
+                value={niche}
+                onChange={(e) => setNiche(e.target.value)}
+                onBlur={saveNiche}
+                placeholder="Niche (optional)"
+                rows={2}
+                style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
+              />
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <div style={label}>Editorial notes</div>
+              <ExpandableTextarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                onBlur={saveNotes}
+                placeholder="Tone, recurring formats, things to avoid…"
+                rows={2}
+                style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
+              />
+            </div>
+
+            <div
+              style={{
+                borderTop: `1px solid ${T.border}`,
+                marginTop: 16,
+                paddingTop: 16,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: 10,
+              }}
+            >
+              <div>
+                <div style={label}>YouTube</div>
+                {channel?.youtube_connected ? (
+                  <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.text, marginTop: 6 }}>
+                    ✓ Connected to {channel.youtube_channel_name || 'YouTube channel'}
+                  </div>
                 ) : (
-                  playlists.map((p, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 10,
-                        padding: '6px 0',
-                        borderTop: i > 0 ? `1px solid ${T.border}` : 'none',
-                        fontSize: 12,
-                        fontFamily: FONT.ui,
-                        color: T.text,
-                      }}
-                    >
-                      <span>{p.name}</span>
-                      <span style={{ ...mono, color: T.textMuted }}>
-                        {p.videoCount} video{p.videoCount === 1 ? '' : 's'}
-                      </span>
-                    </div>
-                  ))
+                  <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6 }}>
+                    Connect this channel's YouTube account to enable direct upload.
+                  </div>
+                )}
+              </div>
+              {channel?.youtube_connected ? (
+                <button onClick={handleDisconnectYoutube} style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder }}>
+                  Disconnect
+                </button>
+              ) : (
+                <button onClick={handleConnectYoutube} style={btnPrimary}>
+                  Connect YouTube channel
+                </button>
+              )}
+            </div>
+
+            {channel?.youtube_connected && (
+              <div style={{ marginTop: 12 }}>
+                <button onClick={togglePlaylists} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
+                  📂 {playlistsOpen ? 'Hide' : 'View'} channel playlists
+                </button>
+                {playlistsOpen && (
+                  <div style={{ marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 4, padding: 10, maxHeight: 220, overflowY: 'auto' }}>
+                    {playlistsLoading ? (
+                      <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>Loading…</div>
+                    ) : !playlists || playlists.length === 0 ? (
+                      <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>No playlists found on this channel.</div>
+                    ) : (
+                      playlists.map((p, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            gap: 10,
+                            padding: '6px 0',
+                            borderTop: i > 0 ? `1px solid ${T.border}` : 'none',
+                            fontSize: 12,
+                            fontFamily: FONT.ui,
+                            color: T.text,
+                          }}
+                        >
+                          <span>{p.name}</span>
+                          <span style={{ ...mono, color: T.textMuted }}>
+                            {p.videoCount} video{p.videoCount === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 )}
               </div>
             )}
-          </div>
+          </>
         )}
       </div>
 
@@ -815,13 +849,36 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
       </div>
 
       <div style={card}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+        <button
+          onClick={() => setProgramManagerOpen((v) => !v)}
+          style={{
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 10,
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
           <div>
             <div style={label}>Content Program Manager</div>
             {channel?.lastSuggestions?.generatedAt && (
               <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>generated {timeAgo(channel.lastSuggestions.generatedAt)}</div>
             )}
           </div>
+          <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+            {programManagerOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+          </span>
+        </button>
+
+        {programManagerOpen && (
+          <>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
           <button onClick={() => fetchSuggestions('')} disabled={suggestionsLoading} style={{ ...btnPrimary, opacity: suggestionsLoading ? 0.6 : 1 }}>
             {suggestionsLoading ? 'Working…' : channel?.lastSuggestions ? 'Refresh suggestions' : 'Suggest next videos'}
           </button>
@@ -974,16 +1031,34 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             </div>
           </div>
         )}
+          </>
+        )}
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={label}>Videos</div>
+        <button
+          onClick={() => setVideoGridOpen((v) => !v)}
+          style={{
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            cursor: 'pointer',
+          }}
+        >
+          <span style={label}>Videos ({videos.length})</span>
+          <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+            {videoGridOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+          </span>
+        </button>
         <button onClick={onNewVideo} style={btnGhost}>
           + New video
         </button>
       </div>
 
-      {videos.length === 0 ? (
+      {videoGridOpen && (videos.length === 0 ? (
         <div style={{ ...card, textAlign: 'center', padding: 40 }}>
           <div style={{ fontFamily: FONT.ui, fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 8 }}>No videos yet</div>
           <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginBottom: 20 }}>
@@ -1177,7 +1252,7 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
             );
           })}
         </div>
-      )}
+      ))}
     </div>
   );
 }
