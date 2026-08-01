@@ -20,6 +20,7 @@ import { generateAllScenes } from './lib/sceneOrchestrator';
 import { supabase } from './lib/supabase';
 import { resumePendingBatches } from './lib/batchResumption';
 import { rehydrateProjectMedia } from './lib/mediaRehydration';
+import { uploadMedia } from './lib/mediaStorage';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -329,6 +330,13 @@ export default function App() {
       scenes: buildScenesFromRaw(rawScenesSoFar, settings.contentType === 'static_background'),
       series: settings.series || null,
       displayTitle: plan.title || settings.topic?.slice(0, 60) || 'Untitled video',
+      // Resolved once in handleOutlineReady (background image already uploaded to this video's own
+      // Storage path there, if it needed to be) — carried through every partial save unchanged, same
+      // as characterBible/references above. Omitted entirely for full_pipeline, so its saved shape
+      // is byte-for-byte what it always was.
+      ...(settings.contentType === 'static_background'
+        ? { staticBackground: plan.staticBackground, staticTextStyle: plan.staticTextStyle, ...(plan.thumbnailStoragePath ? { thumbnailStoragePath: plan.thumbnailStoragePath } : {}) }
+        : {}),
     });
   }
 
@@ -364,6 +372,9 @@ export default function App() {
         characterBible: plan.characterBible,
         scenes: buildScenesFromRaw(scenes, settings.contentType === 'static_background'),
         series: settings.series || null,
+        ...(settings.contentType === 'static_background'
+          ? { staticBackground: plan.staticBackground, staticTextStyle: plan.staticTextStyle, ...(plan.thumbnailStoragePath ? { thumbnailStoragePath: plan.thumbnailStoragePath } : {}) }
+          : {}),
       });
       setTab('storyboard');
     } catch (e) {
@@ -405,6 +416,40 @@ export default function App() {
       variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
     }));
 
+    // CreateStep.jsx's background/thumbnail controls only ever produce settings-scoped, in-memory
+    // data (no videoId existed yet while the user was configuring them there) — resolve them into
+    // this video's own durable form now that newProjectId is real. A freshly picked/generated
+    // background Blob gets uploaded to Storage here (same deferred-upload precedent as reference
+    // photos, see ExportStep.jsx); an untouched channel default is already durable at its own
+    // Storage path and is simply carried forward as-is (no reupload, no extra cost) — same reuse
+    // approach staticBackgroundRecipe.js's buildStaticBackgroundFromChannel uses for automation.
+    let staticBackground = null;
+    let staticTextStyle = null;
+    let thumbnailStoragePath = null;
+    if (settings.contentType === 'static_background') {
+      const sb = settings.staticBackground || { type: 'color', color: '#111111' };
+      if (sb.type === 'image' && sb.blob && !sb.imageStoragePath) {
+        try {
+          const path = await uploadMedia(session.user.id, newProjectId, 'static-background', 'bg', sb.blob);
+          staticBackground = { type: 'image', imageStoragePath: path, url: URL.createObjectURL(sb.blob), blob: sb.blob };
+        } catch (err) {
+          console.error('[handleOutlineReady] failed to upload static background image, falling back to color', err);
+          staticBackground = { type: 'color', color: sb.color || '#111111', imageStoragePath: null, url: null, blob: null };
+        }
+      } else {
+        staticBackground = { type: sb.type || 'color', color: sb.color || '#111111', imageStoragePath: sb.imageStoragePath || null, url: null, blob: null };
+      }
+      staticTextStyle = settings.staticTextStyle || null;
+
+      if (settings.thumbnailMode === 'manual' && settings.manualThumbnailFile) {
+        try {
+          thumbnailStoragePath = await uploadMedia(session.user.id, newProjectId, 'thumbnail', 'thumbnail', settings.manualThumbnailFile);
+        } catch (err) {
+          console.error('[handleOutlineReady] failed to upload manual thumbnail', err);
+        }
+      }
+    }
+
     const plan = {
       title,
       angle,
@@ -415,6 +460,9 @@ export default function App() {
       references,
       outline: outlineData.outline || [],
       totalScenes: outlineData.total_scenes || 0,
+      staticBackground,
+      staticTextStyle,
+      thumbnailStoragePath,
     };
     setPendingPlan(plan);
     setSceneProgress({ current: 0, total: plan.totalScenes });
@@ -470,6 +518,14 @@ export default function App() {
       characterBible: record.characterBible || [],
       scenes: record.scenes || [],
       series: record.series || null,
+      // Without these, a resumed static_background video would come back with no
+      // staticBackground/staticTextStyle at all — StoryboardStep.jsx's seeding effect would then
+      // treat it as never-configured and silently reseed from the channel's current defaults,
+      // masking whatever this specific video actually had (its own override, or a channel default
+      // that has since changed). rehydrateProjectMedia (below) restores the background image's
+      // blob/url from imageStoragePath the same way it already does for scene images.
+      staticBackground: record.staticBackground || null,
+      staticTextStyle: record.staticTextStyle || null,
       // Not rebuilt into an object URL here (unlike images/audio above) — ExportStep does that
       // itself on mount, since it also needs the raw Blob for a same-mount YouTube upload without
       // re-fetching a blob: URL that may no longer be valid (see ExportStep.jsx runUpload).
