@@ -134,6 +134,10 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     set('staticBackground', { ...(settings.staticBackground || {}), type: 'color', color });
   }
 
+  function removeStaticBgImage() {
+    set('staticBackground', { ...(settings.staticBackground || {}), type: 'color', imageStoragePath: null, blob: null });
+  }
+
   function updateTextStyle(patch) {
     set('staticTextStyle', { ...(settings.staticTextStyle || {}), ...patch });
   }
@@ -551,11 +555,16 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
             </div>
 
             {bgPreviewUrl && settings.staticBackground?.type === 'image' && (
-              <img
-                src={bgPreviewUrl}
-                alt="Background"
-                style={{ width: '100%', maxWidth: 280, borderRadius: 4, border: `1px solid ${T.border}`, marginTop: 10, display: 'block' }}
-              />
+              <>
+                <img
+                  src={bgPreviewUrl}
+                  alt="Background"
+                  style={{ width: '100%', maxWidth: 280, borderRadius: 4, border: `1px solid ${T.border}`, marginTop: 10, display: 'block' }}
+                />
+                <button onClick={removeStaticBgImage} style={{ ...btnGhost, marginTop: 8, padding: '6px 10px', fontSize: 11 }}>
+                  ✕ Remove image
+                </button>
+              </>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
               <label style={{ ...btnGhost, cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>

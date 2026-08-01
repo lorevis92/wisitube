@@ -858,11 +858,19 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
             </div>
 
             {staticBgPreviewUrl && (
-              <img
-                src={staticBgPreviewUrl}
-                alt="Default background"
-                style={{ width: '100%', maxWidth: 280, borderRadius: 4, border: `1px solid ${T.border}`, marginTop: 10, display: 'block' }}
-              />
+              <>
+                <img
+                  src={staticBgPreviewUrl}
+                  alt="Default background"
+                  style={{ width: '100%', maxWidth: 280, borderRadius: 4, border: `1px solid ${T.border}`, marginTop: 10, display: 'block' }}
+                />
+                <button
+                  onClick={() => updateStaticDefaults({ automation_static_bg_image_path: null })}
+                  style={{ ...btnGhost, marginTop: 8, padding: '6px 10px', fontSize: 11 }}
+                >
+                  ✕ Remove image
+                </button>
+              </>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
               <label style={{ ...btnGhost, cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
