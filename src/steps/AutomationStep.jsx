@@ -23,12 +23,11 @@ function defaultVoiceForEngine(engine) {
   return engine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE;
 }
 
-// automationEngine.js's getRecipeForContentType only has a real recipe wired up for
-// 'full_pipeline' — a channel set to 'static_background' is selectable here (so channels can start
-// being configured for it) but will simply be skipped by a real automation cycle for now ("no
-// recipe for content_type") until a dedicated recipe exists. Today it only affects the manual
-// Create flow's script-generation endpoints (see CreateStep.jsx/api/generate-outline.js/
-// api/generate-scenes.js) — no rendering/media pipeline for it yet.
+// automationEngine.js's getRecipeForContentType has a real recipe wired up for both:
+// 'full_pipeline' (src/lib/recipes/fullPipelineRecipe.js) and 'static_background'
+// (src/lib/recipes/staticBackgroundRecipe.js). Also settable from ChannelDashboardStep.jsx (see its
+// own copy of this list) since content_type isn't automation-only — it also drives the manual
+// Create → Storyboard flow.
 const CONTENT_TYPES = [
   { value: 'full_pipeline', label: 'Full Pipeline (images)' },
   { value: 'static_background', label: 'Static Background — Language Learning' },

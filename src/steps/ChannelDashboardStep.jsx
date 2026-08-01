@@ -28,6 +28,16 @@ function channelDefaultsPseudoVideoId(channelId) {
   return `channel-defaults-${channelId}`;
 }
 
+// Same list as AutomationStep.jsx's own local CONTENT_TYPES const — duplicated rather than shared,
+// same controlled-duplication convention as elsewhere in this codebase. content_type isn't purely an
+// automation setting: it also drives the manual Create → Storyboard flow's script generation and
+// gates this page's "Default video settings" card below, so it needs to be settable here too, not
+// only from the Automation tab.
+const CONTENT_TYPES = [
+  { value: 'full_pipeline', label: 'Full Pipeline (images)' },
+  { value: 'static_background', label: 'Static Background — Language Learning' },
+];
+
 const PROMPT_STAGES = [
   { key: 'titles', stageLabel: 'Titles & Angles' },
   { key: 'outline', stageLabel: 'Outline & Structure' },
@@ -224,6 +234,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   async function saveNotes() {
     if (!channel || notes === (channel.editorialNotes || '')) return;
     const updated = await saveChannel({ ...channel, editorialNotes: notes });
+    setChannel(updated);
+    onChannelChange?.(updated);
+  }
+
+  async function saveContentType(value) {
+    if (!channel) return;
+    const updated = await saveChannel({ ...channel, content_type: value });
     setChannel(updated);
     onChannelChange?.(updated);
   }
@@ -722,6 +739,25 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                 rows={2}
                 style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
               />
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div style={label}>Content type</div>
+              <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 4, marginBottom: 8 }}>
+                Also used for videos created manually from Create — not automation-only.
+              </div>
+              <select
+                value={channel?.content_type || ''}
+                onChange={(e) => saveContentType(e.target.value)}
+                style={{ ...inputStyle, maxWidth: 320 }}
+              >
+                <option value="">— Select —</option>
+                {CONTENT_TYPES.map((ct) => (
+                  <option key={ct.value} value={ct.value}>
+                    {ct.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div
