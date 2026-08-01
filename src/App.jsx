@@ -604,7 +604,7 @@ export default function App() {
     setPendingPlan(null);
     setGenerationError('');
     setSceneProgress({ current: 0, total: 0 });
-    setSettings((s) => ({ ...s, topic, series }));
+    setSettings((s) => ({ ...s, topic, series, contentType: currentChannel?.content_type || 'full_pipeline' }));
     setTab('create');
   }
 
