@@ -44,6 +44,13 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const abortRef = useRef(null);
+  // Primary guard against concurrent renderVideo() calls — checked and set synchronously, before
+  // any await, so it takes effect in the exact same tick as the triggering click. The `rendering`
+  // state below still drives the UI (button swap, progress bar), but React state updates aren't
+  // committed synchronously, so relying on it alone left a real window for a second invocation to
+  // start before the "Render video" button had actually been replaced — two overlapping render
+  // loops racing to update the same `pct` state, causing the progress bar to jump backward.
+  const renderingRef = useRef(false);
   const [rendering, setRendering] = useState(false);
   const [pct, setPct] = useState(0);
   const [videoUrl, setVideoUrl] = useState('');
@@ -150,6 +157,8 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   }, []);
 
   async function renderVideo() {
+    if (renderingRef.current) return;
+    renderingRef.current = true;
     setError('');
     setVideoUrl('');
     setRenderedBlob(null);
@@ -218,6 +227,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       if (e?.name !== 'AbortError') setError('Render failed: ' + String(e.message || e));
     } finally {
       setRendering(false);
+      renderingRef.current = false;
     }
   }
 
