@@ -181,7 +181,11 @@ export async function setCaptions(videoId, project, { channel, metadata, onProgr
   onProgress?.({ kind: 'error-clear', phase: 'captions' });
   try {
     const refreshToken = channel?.youtube_refresh_token;
-    const srtContent = buildSrtFromScenes(project.scenes);
+    // project.staticBackground only ever exists for content_type 'static_background' (App.jsx's
+    // handleOutlineReady/StoryboardStep's seeding effect/staticBackgroundRecipe.js all gate it on
+    // that content type) — a reliable signal here without threading settings/contentType through
+    // publishToYoutube's whole call chain just for this one branch.
+    const srtContent = buildSrtFromScenes(project.scenes, !!project.staticBackground);
     console.log('[yt-upload] phase=set-captions:before', { videoId, srtLength: srtContent?.length });
     let res;
     try {

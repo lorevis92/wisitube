@@ -76,6 +76,43 @@ export function computeWordTimings(words, duration) {
   });
 }
 
+// Default cap on how long (in seconds) a single caption-style block may span before a new one
+// starts — matches how long a real subtitle line comfortably stays on screen. Shared by
+// srtBuilder.js (the .srt file uploaded to YouTube) and drawFlatText below (the static_background
+// on-screen caption), so both agree on the exact same chunking, not two independently-tuned values.
+export const CAPTION_BLOCK_SECONDS = 4;
+
+// Groups a sequence of already-timed entries ({ word, start, end } — e.g. from computeWordTimings)
+// into short blocks capped at maxSeconds: a new block starts as soon as adding the next entry would
+// push the running one past that cap. Generic over its input's time coordinate space (works equally
+// for one scene's local time or a whole timeline's absolute time), which is what lets srtBuilder.js
+// (absolute, whole-timeline entries) and drawFlatText (one scene's local entries) share it.
+export function groupWordsIntoBlocks(entries, maxSeconds = CAPTION_BLOCK_SECONDS) {
+  const blocks = [];
+  let current = null;
+  entries.forEach((entry) => {
+    if (current && entry.end - current.start <= maxSeconds) {
+      current.words.push(entry.word);
+      current.end = entry.end;
+      return;
+    }
+    if (current) blocks.push(current);
+    current = { words: [entry.word], start: entry.start, end: entry.end };
+  });
+  if (current) blocks.push(current);
+  return blocks;
+}
+
+// Times one continuous narration across `duration` (via computeWordTimings) and chunks the result
+// into short, subtitle-style blocks — used by drawFlatText for the static_background on-screen
+// caption, where (unlike the two-beat kinetic subtitle) a scene's whole narration is one
+// continuous span with no beat-halving to key off of.
+export function computeCaptionBlocks(words, duration, maxSeconds = CAPTION_BLOCK_SECONDS) {
+  const timings = computeWordTimings(words, duration);
+  const entries = words.map((w, i) => ({ word: w, start: timings[i].start, end: timings[i].end }));
+  return groupWordsIntoBlocks(entries, maxSeconds);
+}
+
 function easeOutBack(x) {
   const c1 = 1.70158;
   const c3 = c1 + 1;
@@ -154,8 +191,8 @@ function drawSubtitle(ctx, W, H, words, localTime, duration) {
 }
 
 // content_type 'static_background' — the entire video is one unchanging background (solid color
-// or a single generated image, no Ken Burns/pan/zoom) with the current scene's full narration
-// drawn flat on top (all words visible together, no kinetic word-pop). See drawFlatText below for
+// or a single generated image, no Ken Burns/pan/zoom) with short, synced caption blocks of the
+// current scene's narration drawn flat on top (no kinetic word-pop). See drawFlatText below for
 // the text half; this only paints the background itself, once per frame (cheap — it's identical
 // every frame, no per-item lookup needed).
 function drawStaticBg(ctx, W, H, background) {
@@ -169,10 +206,10 @@ function drawStaticBg(ctx, W, H, background) {
   }
 }
 
-// Auto-shrinks fontSize until every line of the (already word-wrapped) narration fits within
-// maxHeight — unlike drawSubtitle's kinetic overlay (capped at 3 lines, word-pop scale headroom
-// already assumed), static narration can run to several lines since it's the ONLY visual content
-// and isn't paced to short punchy beats (see api/generate-scenes.js's static_background prompt).
+// Auto-shrinks fontSize until every line of the (already word-wrapped) block fits within
+// maxHeight — a block is already short (capped at CAPTION_BLOCK_SECONDS of speech, see
+// computeCaptionBlocks), so this rarely needs to shrink much; MAX_FLAT_TEXT_LINES below is the
+// hard backstop for the rare unusually word-dense block.
 function fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize) {
   let fontSize = maxFontSize;
   let lineGroups;
@@ -187,30 +224,43 @@ function fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize) 
   return { fontSize, lineGroups, lineH };
 }
 
-// Draws the given scene's ENTIRE narration at once, wrapped and centered, styled per textStyle
-// (project.staticTextStyle, or the channel's automation_static_text_* defaults it was seeded
-// from — see StoryboardStep.jsx). No word-level timing/animation: this is meant to be read calmly
-// alongside the audio, not paced to it.
-function drawFlatText(ctx, W, H, narration, textStyle) {
+const MAX_FLAT_TEXT_LINES = 2;
+
+// Draws only the current caption block (~CAPTION_BLOCK_SECONDS of speech, computed from this
+// scene's own full narration/duration via computeCaptionBlocks — no beat-halving, since
+// static_background scenes have no beats at all), wrapped to at most MAX_FLAT_TEXT_LINES lines,
+// styled per textStyle (project.staticTextStyle, or the channel's automation_static_text_*
+// defaults it was seeded from — see StoryboardStep.jsx). Cycles forward in sync with the
+// narration as `local` advances, same idea as a real subtitle track — replaces the previous
+// "whole narration as one static wall of text" behavior.
+function drawFlatText(ctx, W, H, narration, duration, local, textStyle) {
   const words = String(narration || '').split(/\s+/).filter(Boolean);
   if (!words.length) return;
 
+  const blocks = computeCaptionBlocks(words, duration);
+  if (!blocks.length) return;
+  const clampedLocal = Math.min(Math.max(local, 0), duration);
+  const block = blocks.find((b) => clampedLocal >= b.start && clampedLocal < b.end) || blocks[blocks.length - 1];
+
   const maxWidth = W * 0.82;
-  const maxHeight = H * 0.72;
-  const { fontSize, lineGroups, lineH } = fitFlatText(ctx, words, maxWidth, maxHeight, Math.round(H * 0.075), Math.round(H * 0.03));
+  const maxFontSize = Math.round(H * 0.075);
+  const minFontSize = Math.round(H * 0.03);
+  const maxHeight = maxFontSize * 1.35 * MAX_FLAT_TEXT_LINES;
+  const { fontSize, lineGroups, lineH } = fitFlatText(ctx, block.words, maxWidth, maxHeight, maxFontSize, minFontSize);
+  const lines = lineGroups.slice(0, MAX_FLAT_TEXT_LINES);
 
   ctx.font = `600 ${fontSize}px Syne, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const totalHeight = lineGroups.length * lineH;
+  const totalHeight = lines.length * lineH;
   const startY = H / 2 - totalHeight / 2 + lineH / 2;
 
   const textColor = textStyle?.textColor || '#FFFFFF';
   const outline = textStyle?.outline !== false;
   const outlineColor = textStyle?.outlineColor || '#000000';
 
-  lineGroups.forEach((indices, li) => {
-    const line = indices.map((i) => words[i]).join(' ');
+  lines.forEach((indices, li) => {
+    const line = indices.map((i) => block.words[i]).join(' ');
     const y = startY + li * lineH;
     if (outline) {
       ctx.lineWidth = Math.max(3, fontSize * 0.12);
@@ -273,7 +323,9 @@ export function totalDuration(items) {
  *
  * staticBackground (content_type 'static_background' only): { type: 'color'|'image', color, img }
  * — when present, replaces the entire per-beat Ken Burns rendering with one unchanging background
- * for the whole video, plus the active scene's full narration drawn flat on top (see drawFlatText).
+ * for the whole video, plus the current caption block (a short, synced chunk of the active scene's
+ * narration — see drawFlatText/computeCaptionBlocks) drawn flat on top, cycling forward like a real
+ * subtitle track rather than showing the whole scene's narration as one static block of text.
  * `items` still only need `duration`/`narration`/`buffer` in this mode — `images` is never read.
  * textStyle: project.staticTextStyle — { textColor, outline, outlineColor }.
  */
@@ -287,14 +339,13 @@ export function drawFrame(ctx, items, t, { W, H, subtitles = false, staticBackgr
     if (tt >= starts[i]) idx = i;
   }
   const it = items[idx];
+  const local = tt - starts[idx];
 
   if (staticBackground) {
     drawStaticBg(ctx, W, H, staticBackground);
-    drawFlatText(ctx, W, H, it.narration, textStyle);
+    drawFlatText(ctx, W, H, it.narration, it.duration, local, textStyle);
     return idx;
   }
-
-  const local = tt - starts[idx];
 
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, W, H);
