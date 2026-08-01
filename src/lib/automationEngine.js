@@ -99,11 +99,18 @@ function estimateFullPipelineCost(channel) {
     lengthMinutes = Number(channel.automation_length_minutes) || 5;
   }
   const totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
-  const beats = totalScenes * 2;
   const provider = channel.automation_image_provider || 'pollinations';
   const voiceEngine = channel.automation_voice_engine || 'kokoro';
 
-  const imageTotal = beats * priceForImage(provider, { width: 1280, height: 720, quality: 'medium', hasReference: false });
+  // 'static_background' has no per-scene image_beats at all (see api/generate-scenes.js) — quoting
+  // a scenes×2 image cost here would be phantom, same fix as StoryboardStep.jsx's own estimateCost.
+  // Not currently reachable (getRecipeForContentType skips this content type before any budget
+  // check runs), but kept correct for when a recipe exists.
+  const isStaticBackground = channel.content_type === 'static_background';
+  const beats = isStaticBackground ? 0 : totalScenes * 2;
+  const imageTotal = isStaticBackground
+    ? 0
+    : beats * priceForImage(provider, { width: 1280, height: 720, quality: 'medium', hasReference: false });
   const voiceTotal = priceForVoice(voiceEngine, totalScenes * ESTIMATED_CHARS_PER_SCENE);
   return imageTotal + voiceTotal;
 }

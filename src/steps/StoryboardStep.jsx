@@ -150,15 +150,25 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
 
   // Combines both billable axes — images and voice — into one estimate, since either (or both)
   // can be a paid engine independently of the other.
+  //
+  // 'static_background' has no per-scene image_beats at all (see api/generate-scenes.js) — the
+  // placeholder beats buildScenesFromRaw still creates (App.jsx's fallback for missing/empty
+  // image_beats, unchanged since rendering/media isn't wired up for this content type yet) are not
+  // real billable images, so the whole image axis is excluded here rather than quoting a cost for
+  // generation that was never actually going to happen. Once a background-image step exists (a
+  // later phase), this is where its own, real per-video (not per-scene) cost would be added.
   function estimateCost() {
     const provider = settings.imageProvider || 'pollinations';
     const voiceEngine = settings.voiceEngine || 'kokoro';
+    const isStaticBackground = settings.contentType === 'static_background';
 
-    const beats = pendingBeats();
-    const imageTotal = beats.reduce(
-      (sum, beat) => sum + priceForImage(provider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: !!beat.referenceId }),
-      0
-    );
+    const beats = isStaticBackground ? [] : pendingBeats();
+    const imageTotal = isStaticBackground
+      ? 0
+      : beats.reduce(
+          (sum, beat) => sum + priceForImage(provider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: !!beat.referenceId }),
+          0
+        );
 
     const charCount = pendingAudioCharCount();
     const voiceTotal = priceForVoice(voiceEngine, charCount);
