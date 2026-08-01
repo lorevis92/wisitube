@@ -37,11 +37,11 @@ self.onmessage = (e) => {
   }
 
   if (type === 'generate') {
-    const { id, text, voice } = e.data;
+    const { id, text, voice, speed } = e.data;
     queue = queue.then(async () => {
       try {
         const tts = await loadTTS();
-        const audio = await tts.generate(text, { voice });
+        const audio = await tts.generate(text, { voice, speed: speed || 1.0 });
         const blob = await audio.toBlob();
         postMessage({ type: 'result', id, blob });
       } catch (err) {

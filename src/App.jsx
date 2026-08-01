@@ -111,11 +111,10 @@ export default function App() {
     style: 'facestick',
     voice: 'af_heart',
     voiceEngine: 'kokoro',
+    speechSpeed: 1.0,
     imageProvider: 'pollinations',
-    // 'full_pipeline' (default, image-driven) vs. 'static_background' (spoken narration only, no
-    // per-scene images — see CreateStep.jsx's "Content type" select). Script-generation-only for
-    // now: api/generate-outline.js/api/generate-scenes.js adjust narration pacing/schema for it,
-    // but rendering/media generation don't know about it yet.
+    // 'full_pipeline' (default, image-driven) vs. 'static_background' (spoken narration only, one
+    // unchanging background — see CreateStep.jsx's "Content type" select).
     contentType: 'full_pipeline',
     lengthMinutes: 5,
     // When true, lengthMinutes is ignored — api/generate-outline.js lets Claude size the video off

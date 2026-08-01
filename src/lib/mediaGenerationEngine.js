@@ -197,12 +197,13 @@ export async function generateSceneAudio(scene, { settings, channelId, userId, v
   onProgress?.({ kind: 'scene', sceneId: scene.id, patch: { audioStatus: 'loading', audioError: null, audioBackupFailed: false } });
   const startedAt = performance.now();
   const voiceEngine = settings.voiceEngine || 'kokoro';
+  const speechSpeed = Number(settings.speechSpeed) || 1.0;
   const wasWarmBefore = isModelWarm();
   try {
     let audioBlob;
     if (voiceEngine === 'minimax') {
       const { audioUrl: remoteUrl, costUsd } = await withNetworkRetry(
-        (signal) => generateAudio(scene.narration, settings.voice, { language: settings.language }, signal),
+        (signal) => generateAudio(scene.narration, settings.voice, { language: settings.language, speed: speechSpeed }, signal),
         GENERATION_TIMEOUT_MS,
         (attempt, total, err) =>
           onProgress?.({ kind: 'retry', message: `Audio generation retry ${attempt}/${total} after network error: ${err.message}` })
@@ -210,7 +211,7 @@ export async function generateSceneAudio(scene, { settings, channelId, userId, v
       if (costUsd > 0) await recordCost({ channelId, videoId, provider: 'minimax', type: 'audio', amountUsd: costUsd });
       audioBlob = await (await fetch(remoteUrl)).blob();
     } else {
-      audioBlob = await generateSpeech(scene.narration, settings.voice);
+      audioBlob = await generateSpeech(scene.narration, settings.voice, speechSpeed);
     }
     const audioUrl = URL.createObjectURL(audioBlob);
     const buffer = await decodeAudio(audioUrl);

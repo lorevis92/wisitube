@@ -114,6 +114,7 @@ function buildAutomationSettings(channel) {
     contentType: 'static_background',
     voiceEngine,
     voice,
+    speechSpeed: Number(channel.automation_speech_speed) || 1.0,
     lengthMinutes: Number(channel.automation_length_minutes) || 5,
   };
 }

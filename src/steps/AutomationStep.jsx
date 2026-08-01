@@ -877,6 +877,25 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                   </div>
 
                   <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                      <div style={label}>Speech speed</div>
+                      <span style={{ ...mono, fontSize: 11, color: T.text, fontWeight: 700 }}>
+                        {(Number(c.automation_speech_speed) || 1.0).toFixed(2)}x
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.7"
+                      max="1.2"
+                      step="0.05"
+                      disabled={running}
+                      value={Number(c.automation_speech_speed) || 1.0}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_speech_speed: Number(e.target.value) })}
+                      style={{ width: '100%', marginTop: 6 }}
+                    />
+                  </div>
+
+                  <div>
                     <div style={label}>Language</div>
                     <select
                       value={c.automation_language || 'English'}

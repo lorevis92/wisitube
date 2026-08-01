@@ -133,6 +133,11 @@ export async function deleteVideo(id) {
 //     add column if not exists automation_static_text_color text not null default '#FFFFFF',
 //     add column if not exists automation_static_text_outline boolean not null default true,
 //     add column if not exists automation_static_text_outline_color text not null default '#000000';
+//
+// Required one-time setup for configurable narration speed (Kokoro + MiniMax, both content types):
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_speech_speed numeric(3,2) not null default 1.0;
 
 function fromChannelRow(row) {
   return {
@@ -163,6 +168,7 @@ function fromChannelRow(row) {
     // this column doesn't know about — callers (AutomationStep.jsx, fullPipelineRecipe.js) fall
     // back to a per-engine default when this is empty, same as content_type's own '' default below.
     automation_voice: row.automation_voice || '',
+    automation_speech_speed: row.automation_speech_speed ?? 1.0,
     automation_style: row.automation_style || 'facestick',
     automation_language: row.automation_language || 'English',
     automation_format: row.automation_format || '16:9',
@@ -229,6 +235,7 @@ export async function saveChannel(channel) {
     automation_image_provider: channel.automation_image_provider || 'pollinations',
     automation_voice_engine: channel.automation_voice_engine || 'kokoro',
     automation_voice: channel.automation_voice || '',
+    automation_speech_speed: channel.automation_speech_speed ?? 1.0,
     automation_style: channel.automation_style || 'facestick',
     automation_language: channel.automation_language || 'English',
     automation_format: channel.automation_format || '16:9',

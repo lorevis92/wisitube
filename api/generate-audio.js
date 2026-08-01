@@ -39,7 +39,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let text, voice, language;
+    let text, voice, language, speed;
     try {
       const body = req.body || {};
       text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -48,6 +48,10 @@ export default async function handler(req, res) {
 
       voice = typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : 'Wise_Woman';
       language = LANGUAGE_BOOST[body.language] || 'auto';
+      // The UI only ever offers 0.7-1.2 (a practical range), but this endpoint clamps to the
+      // API's own full accepted range (0.5-2.0) as a defensive backstop against any other caller.
+      const rawSpeed = Number(body.speed);
+      speed = Number.isFinite(rawSpeed) ? Math.min(2.0, Math.max(0.5, rawSpeed)) : 1.0;
       // body.referenceAudio is accepted for forward-compatibility with future voice cloning, but
       // speech-02-hd only takes a system voice_id, not raw reference audio — nothing to wire up yet.
     } catch (err) {
@@ -63,7 +67,7 @@ export default async function handler(req, res) {
         headers: { Authorization: `Key ${falKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text,
-          voice_setting: { voice_id: voice },
+          voice_setting: { voice_id: voice, speed },
           language_boost: language,
           // Defaults to 'hex' (inline base64) otherwise — we want a fetchable URL like every
           // other provider in this app returns.

@@ -72,10 +72,13 @@ function getWorker() {
 
 // Generations are queued inside the worker itself (WASM must run one inference at a time) —
 // this just tracks each in-flight request by id so its result finds its way back here.
-export function generateSpeech(text, voice) {
+// speed: Kokoro's own playback-rate multiplier, 1.0 = normal — same settings.speechSpeed value
+// used for MiniMax (api/generate-audio.js), just passed straight through to kokoro-js instead of
+// nested under a voice_setting object.
+export function generateSpeech(text, voice, speed = 1.0) {
   return new Promise((resolve, reject) => {
     const id = ++reqId;
     pending.set(id, { resolve, reject });
-    getWorker().postMessage({ type: 'generate', id, text, voice });
+    getWorker().postMessage({ type: 'generate', id, text, voice, speed });
   });
 }

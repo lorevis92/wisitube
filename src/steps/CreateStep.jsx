@@ -206,11 +206,12 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     setVoiceTest(settings.voice);
     try {
       let blob;
+      const speed = Number(settings.speechSpeed) || 1.0;
       if ((settings.voiceEngine || 'kokoro') === 'minimax') {
-        const { audioUrl } = await generateAudio('Hi! This is the voice that will narrate your video.', settings.voice, { language: settings.language });
+        const { audioUrl } = await generateAudio('Hi! This is the voice that will narrate your video.', settings.voice, { language: settings.language, speed });
         blob = await (await fetch(audioUrl)).blob();
       } else {
-        blob = await generateSpeech('Hi! This is the voice that will narrate your video.', settings.voice);
+        blob = await generateSpeech('Hi! This is the voice that will narrate your video.', settings.voice, speed);
       }
       if (audioRef.current) {
         audioRef.current.src = URL.createObjectURL(blob);
@@ -358,6 +359,21 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
               </button>
             </div>
             <audio ref={audioRef} style={{ display: 'none' }} />
+          </div>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <div style={label}>Speech speed</div>
+              <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>{(Number(settings.speechSpeed) || 1.0).toFixed(2)}x</span>
+            </div>
+            <input
+              type="range"
+              min="0.7"
+              max="1.2"
+              step="0.05"
+              value={Number(settings.speechSpeed) || 1.0}
+              onChange={(e) => set('speechSpeed', Number(e.target.value))}
+              style={{ width: '100%', marginTop: 10 }}
+            />
           </div>
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
