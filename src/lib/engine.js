@@ -78,10 +78,9 @@ export function computeWordTimings(words, duration) {
 
 // Default cap on how long (in seconds) a single .srt caption block may span before a new one
 // starts — matches how long a real subtitle line comfortably stays on screen. Used by
-// srtBuilder.js for full_pipeline's two-beat-halved narration (static_background no longer needs
-// this at all: api/generate-scenes.js now writes one short sentence per scene, so a scene's whole
-// narration IS the caption block — see drawFlatText below and srtBuilder.js's isStaticBackground
-// branch, both keyed off the scene's own real duration with no further sub-chunking).
+// srtBuilder.js for full_pipeline's two-beat-halved narration only — static_background doesn't
+// need an estimated time cap at all, it splits at real sentence boundaries instead (see
+// splitSentencesWithTiming below and srtBuilder.js's isStaticBackground branch).
 export const CAPTION_BLOCK_SECONDS = 4;
 
 // Groups a sequence of already-timed entries ({ word, start, end } — e.g. from computeWordTimings)
@@ -124,6 +123,64 @@ export function splitNarrationHalves(narration) {
   const words = String(narration || '').split(/\s+/).filter(Boolean);
   const cut = Math.ceil(words.length / 2);
   return [words.slice(0, cut), words.slice(cut)];
+}
+
+// Not exhaustive by design (same spirit as kokoro-js's own internal sentence-splitter abbreviation
+// list) — covers the titles/etc. most likely to actually show up in generated narration across the
+// languages this app supports (English/Italiano/Français/Deutsch), not every possible abbreviation.
+const SENTENCE_ABBREVIATIONS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'etc', 'e.g', 'i.e', 'a.m', 'p.m', 'u.s', 'u.k', 'inc', 'ltd', 'co', 'no', 'vol', 'fig', 'approx',
+  'sig', 'sig.ra', 'sigg', 'dott', 'dott.ssa', 'prof.ssa',
+  'mme', 'mlle',
+  'hr', 'fr',
+]);
+
+// Splits a narration into individual sentences at '.'/'!'/'?' boundaries, without breaking on a
+// recognized abbreviation (Mr., Dr., etc.) or a single capital-letter initial (e.g. "J." in "J.
+// Smith") — those don't end a sentence even though they end in a period. A word's trailing
+// punctuation is what's checked, not the character in isolation, so this never touches a period
+// used mid-word (a real decimal number like "3.14" has no space around its period, so it's never
+// even considered as a candidate boundary here).
+function splitIntoSentences(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return [];
+  const words = trimmed.split(/\s+/);
+  const sentences = [];
+  let current = [];
+  words.forEach((word, i) => {
+    current.push(word);
+    if (!/[.!?]$/.test(word)) return;
+    const isLast = i === words.length - 1;
+    const stripped = word.replace(/[.!?]+$/, '');
+    const isAbbreviation = SENTENCE_ABBREVIATIONS.has(stripped.toLowerCase()) || /^[A-Z]$/.test(stripped);
+    if (isAbbreviation && !isLast) return;
+    sentences.push(current.join(' '));
+    current = [];
+  });
+  if (current.length) sentences.push(current.join(' '));
+  return sentences;
+}
+
+// Splits a scene's narration into its individual sentences and times each one proportionally to
+// its own word count against the scene's total word count and real (measured) duration — word
+// count, not character-weighted like computeWordTimings, since that's what actually tracks how
+// much of a steadily-paced narration's audio each sentence occupies. A single-sentence scene (the
+// common case now that api/generate-scenes.js writes one sentence per static_background scene)
+// returns exactly one block spanning the whole duration, unchanged from before. Shared by
+// drawFlatText (which sentence is on screen right now) and srtBuilder.js (matching .srt cues), so
+// both switch/cut at exactly the same instant.
+export function splitSentencesWithTiming(narration, duration) {
+  const sentences = splitIntoSentences(narration);
+  if (!sentences.length) return [];
+  const wordLists = sentences.map((s) => s.split(/\s+/).filter(Boolean));
+  const totalWords = wordLists.reduce((sum, w) => sum + w.length, 0) || 1;
+  let acc = 0;
+  return wordLists.map((words) => {
+    const start = (acc / totalWords) * duration;
+    acc += words.length;
+    const end = (acc / totalWords) * duration;
+    return { words, start, end };
+  });
 }
 
 function drawSubtitle(ctx, W, H, words, localTime, duration) {
@@ -220,16 +277,19 @@ function fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize) 
 // to be hit in the normal case now that scenes are sentence-length (see api/generate-scenes.js).
 const MAX_FLAT_TEXT_LINES = 6;
 
-// Draws the current scene's ENTIRE narration as one flat block of text for the scene's whole real
-// duration (no sub-chunking, no word-level timing/animation) — the same mechanism already proven
-// in full_pipeline's kinetic subtitle, minus the word-pop animation, now viable here because
-// api/generate-scenes.js writes one short sentence per static_background scene: at that length, the
-// scene's own real audioDuration is naturally enough time to read it calmly, and it fits 1-2 lines
-// without needing to guess sub-scene timing the way estimated word-weight chunking did. Styled per
-// textStyle (project.staticTextStyle, or the channel's automation_static_text_* defaults it was
-// seeded from — see StoryboardStep.jsx).
-function drawFlatText(ctx, W, H, narration, textStyle) {
-  const words = String(narration || '').split(/\s+/).filter(Boolean);
+// Draws the current SENTENCE of the scene's narration as one flat block of text (no word-level
+// timing/animation within it) for that sentence's own share of the scene's whole real duration,
+// proportional to its word count (see splitSentencesWithTiming) — the common case (one sentence per
+// scene, see api/generate-scenes.js) is unchanged from before: a single sentence simply spans the
+// whole duration. The occasional two-sentence scene switches exactly at the sentence boundary,
+// never mid-thought. Styled per textStyle (project.staticTextStyle, or the channel's
+// automation_static_text_* defaults it was seeded from — see StoryboardStep.jsx).
+function drawFlatText(ctx, W, H, narration, duration, local, textStyle) {
+  const blocks = splitSentencesWithTiming(narration, duration);
+  if (!blocks.length) return;
+  const clampedLocal = Math.min(Math.max(local, 0), duration);
+  const block = blocks.find((b) => clampedLocal >= b.start && clampedLocal < b.end) || blocks[blocks.length - 1];
+  const words = block.words;
   if (!words.length) return;
 
   const maxWidth = W * 0.82;
@@ -313,9 +373,10 @@ export function totalDuration(items) {
  *
  * staticBackground (content_type 'static_background' only): { type: 'color'|'image', color, img }
  * — when present, replaces the entire per-beat Ken Burns rendering with one unchanging background
- * for the whole video, plus the active scene's entire narration drawn flat on top for that scene's
- * whole real duration (see drawFlatText) — one short sentence per scene (see
- * api/generate-scenes.js), so this reads calmly and stays in sync without needing sub-chunking.
+ * for the whole video, plus the active scene's current sentence drawn flat on top, for that
+ * sentence's own share of the scene's real duration (see drawFlatText/splitSentencesWithTiming) —
+ * a single-sentence scene (the common case) just spans the whole duration unchanged; an occasional
+ * two-sentence scene switches exactly at the sentence boundary.
  * `items` still only need `duration`/`narration`/`buffer` in this mode — `images` is never read.
  * textStyle: project.staticTextStyle — { textColor, outline, outlineColor }.
  */
@@ -333,7 +394,7 @@ export function drawFrame(ctx, items, t, { W, H, subtitles = false, staticBackgr
 
   if (staticBackground) {
     drawStaticBg(ctx, W, H, staticBackground);
-    drawFlatText(ctx, W, H, it.narration, textStyle);
+    drawFlatText(ctx, W, H, it.narration, it.duration, local, textStyle);
     return idx;
   }
 

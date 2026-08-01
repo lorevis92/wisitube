@@ -1,7 +1,7 @@
 // Builds a standard .srt caption file from a project's scenes, reusing the exact per-word timing
 // engine.js computes for the on-screen subtitle rendering — so the uploaded captions track always
 // lines up with what viewers see on screen, not an independent guess.
-import { computeWordTimings, splitNarrationHalves, groupWordsIntoBlocks } from './engine';
+import { computeWordTimings, splitNarrationHalves, groupWordsIntoBlocks, splitSentencesWithTiming } from './engine';
 
 function formatSrtTimestamp(seconds) {
   const totalMs = Math.max(0, Math.round(seconds * 1000));
@@ -36,18 +36,19 @@ function collectWordEntries(scenes) {
   return entries;
 }
 
-// One .srt cue per scene, spanning that scene's own real (measured) duration — matching exactly
-// what's drawn on screen (engine.js's drawFlatText, one flat block of the scene's whole narration
-// for its whole duration, no sub-chunking). Viable because api/generate-scenes.js writes one short
-// sentence, occasionally two, per static_background scene, so a whole scene's narration is already
-// caption-sized — no per-word timing/grouping needed at all for this content type.
+// One .srt cue per SENTENCE (see splitSentencesWithTiming, shared with engine.js's drawFlatText),
+// each spanning its own proportional share of the scene's real (measured) duration — matching
+// exactly what's drawn on screen: a single-sentence scene (the common case) is one cue for the
+// whole duration, an occasional two-sentence scene becomes two cues that cut exactly at the
+// sentence boundary.
 function buildStaticBackgroundBlocks(scenes) {
   const blocks = [];
   let sceneStart = 0;
   scenes.forEach((scene) => {
     const duration = (scene.audioDuration || 0) + (scene.pad || 0);
-    const words = String(scene.narration || '').split(/\s+/).filter(Boolean);
-    if (words.length) blocks.push({ words, start: sceneStart, end: sceneStart + duration });
+    splitSentencesWithTiming(scene.narration, duration).forEach((b) => {
+      if (b.words.length) blocks.push({ words: b.words, start: sceneStart + b.start, end: sceneStart + b.end });
+    });
     sceneStart += duration;
   });
   return blocks;
