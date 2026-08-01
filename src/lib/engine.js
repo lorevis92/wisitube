@@ -153,6 +153,76 @@ function drawSubtitle(ctx, W, H, words, localTime, duration) {
   });
 }
 
+// content_type 'static_background' — the entire video is one unchanging background (solid color
+// or a single generated image, no Ken Burns/pan/zoom) with the current scene's full narration
+// drawn flat on top (all words visible together, no kinetic word-pop). See drawFlatText below for
+// the text half; this only paints the background itself, once per frame (cheap — it's identical
+// every frame, no per-item lookup needed).
+function drawStaticBg(ctx, W, H, background) {
+  if (background?.type === 'image' && background.img) {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, W, H);
+    drawCover(ctx, background.img, W, H, 1, 0, 0);
+  } else {
+    ctx.fillStyle = background?.color || '#111111';
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// Auto-shrinks fontSize until every line of the (already word-wrapped) narration fits within
+// maxHeight — unlike drawSubtitle's kinetic overlay (capped at 3 lines, word-pop scale headroom
+// already assumed), static narration can run to several lines since it's the ONLY visual content
+// and isn't paced to short punchy beats (see api/generate-scenes.js's static_background prompt).
+function fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize) {
+  let fontSize = maxFontSize;
+  let lineGroups;
+  let lineH;
+  do {
+    ctx.font = `600 ${fontSize}px Syne, sans-serif`;
+    lineGroups = wrapWordIndices(ctx, words, maxWidth);
+    lineH = fontSize * 1.35;
+    if (lineGroups.length * lineH <= maxHeight) break;
+    fontSize -= 2;
+  } while (fontSize > minFontSize);
+  return { fontSize, lineGroups, lineH };
+}
+
+// Draws the given scene's ENTIRE narration at once, wrapped and centered, styled per textStyle
+// (project.staticTextStyle, or the channel's automation_static_text_* defaults it was seeded
+// from — see StoryboardStep.jsx). No word-level timing/animation: this is meant to be read calmly
+// alongside the audio, not paced to it.
+function drawFlatText(ctx, W, H, narration, textStyle) {
+  const words = String(narration || '').split(/\s+/).filter(Boolean);
+  if (!words.length) return;
+
+  const maxWidth = W * 0.82;
+  const maxHeight = H * 0.72;
+  const { fontSize, lineGroups, lineH } = fitFlatText(ctx, words, maxWidth, maxHeight, Math.round(H * 0.075), Math.round(H * 0.03));
+
+  ctx.font = `600 ${fontSize}px Syne, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const totalHeight = lineGroups.length * lineH;
+  const startY = H / 2 - totalHeight / 2 + lineH / 2;
+
+  const textColor = textStyle?.textColor || '#FFFFFF';
+  const outline = textStyle?.outline !== false;
+  const outlineColor = textStyle?.outlineColor || '#000000';
+
+  lineGroups.forEach((indices, li) => {
+    const line = indices.map((i) => words[i]).join(' ');
+    const y = startY + li * lineH;
+    if (outline) {
+      ctx.lineWidth = Math.max(3, fontSize * 0.12);
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = outlineColor;
+      ctx.strokeText(line, W / 2, y);
+    }
+    ctx.fillStyle = textColor;
+    ctx.fillText(line, W / 2, y);
+  });
+}
+
 function drawBeat(ctx, W, H, beat, p, alpha) {
   const tr = (ANIMATIONS[beat.animation] || ANIMATIONS.zoom_in)(ease(p));
   ctx.globalAlpha = alpha;
@@ -200,8 +270,14 @@ export function totalDuration(items) {
  * (seconds) onto `ctx`. Pure with respect to the timeline: the same (items, t) always produces
  * the same pixels, whether called 60x/sec from the live preview or once per frame from the
  * offline exporter.
+ *
+ * staticBackground (content_type 'static_background' only): { type: 'color'|'image', color, img }
+ * — when present, replaces the entire per-beat Ken Burns rendering with one unchanging background
+ * for the whole video, plus the active scene's full narration drawn flat on top (see drawFlatText).
+ * `items` still only need `duration`/`narration`/`buffer` in this mode — `images` is never read.
+ * textStyle: project.staticTextStyle — { textColor, outline, outlineColor }.
  */
-export function drawFrame(ctx, items, t, { W, H, subtitles = false } = {}) {
+export function drawFrame(ctx, items, t, { W, H, subtitles = false, staticBackground = null, textStyle = null } = {}) {
   const starts = computeStarts(items);
   const total = totalDuration(items);
   const tt = Math.max(0, Math.min(t, total));
@@ -211,6 +287,13 @@ export function drawFrame(ctx, items, t, { W, H, subtitles = false } = {}) {
     if (tt >= starts[i]) idx = i;
   }
   const it = items[idx];
+
+  if (staticBackground) {
+    drawStaticBg(ctx, W, H, staticBackground);
+    drawFlatText(ctx, W, H, it.narration, textStyle);
+    return idx;
+  }
+
   const local = tt - starts[idx];
 
   ctx.fillStyle = '#000000';
@@ -243,7 +326,7 @@ export function pickMime() {
  * the midpoint. duration already includes any per-scene padding (>= buffer.duration).
  * Returns a controller: { stop(), total, blobPromise (only when record=true) }
  */
-export async function playTimeline({ canvas, items, subtitles = false, record = false, onProgress, onDone }) {
+export async function playTimeline({ canvas, items, subtitles = false, staticBackground = null, textStyle = null, record = false, onProgress, onDone }) {
   const W = canvas.width;
   const H = canvas.height;
   const ctx = canvas.getContext('2d');
@@ -305,7 +388,7 @@ export async function playTimeline({ canvas, items, subtitles = false, record = 
       if (tt >= starts[i]) idx = i;
     }
 
-    drawFrame(ctx, items, tt, { W, H, subtitles });
+    drawFrame(ctx, items, tt, { W, H, subtitles, staticBackground, textStyle });
 
     if (onProgress) onProgress(tt, total, idx);
 

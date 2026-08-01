@@ -12,11 +12,21 @@ import {
   getCostsByChannel,
   savePromptVersion,
   listPromptVersions,
+  recordCost,
 } from '../lib/db';
-import { getMediaUrl } from '../lib/mediaStorage';
+import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
 import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
+import { generateImage } from '../lib/sceneOrchestrator';
+import { priceForImage } from '../lib/imageProviders';
 import ExpandableTextarea from '../components/ExpandableTextarea';
+
+// A channel-level default asset isn't tied to any one video, but uploadMedia (src/lib/mediaStorage.js)
+// is keyed by (userId, videoId, kind, id) — reusing it here with a stable per-channel pseudo-videoId
+// avoids adding a whole separate storage mechanism just for one default image per channel.
+function channelDefaultsPseudoVideoId(channelId) {
+  return `channel-defaults-${channelId}`;
+}
 
 const PROMPT_STAGES = [
   { key: 'titles', stageLabel: 'Titles & Angles' },
@@ -63,7 +73,7 @@ function extractYoutubeId(input) {
   return trimmed;
 }
 
-export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
+export default function ChannelDashboardStep({ channelId, userId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
   const [channel, setChannel] = useState(null);
   const [name, setName] = useState('');
   const [nameFocused, setNameFocused] = useState(false);
@@ -121,6 +131,34 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
   const [ytIdInput, setYtIdInput] = useState('');
   const [ytEditBusy, setYtEditBusy] = useState(null); // videoId currently being saved, or null
   const [ytEditError, setYtEditError] = useState('');
+
+  // Default background/text style for content_type 'static_background' videos on this channel —
+  // see StoryboardStep.jsx, which seeds a new video's own project.staticBackground/staticTextStyle
+  // from these exactly once.
+  const [staticBgGenPrompt, setStaticBgGenPrompt] = useState('');
+  const [staticBgBusy, setStaticBgBusy] = useState(false);
+  const [staticBgError, setStaticBgError] = useState('');
+  const [staticBgPreviewUrl, setStaticBgPreviewUrl] = useState('');
+
+  // Re-signs the preview URL whenever the stored default image path changes (upload/generation
+  // above, or a fresh page load) — same short-lived-signed-URL pattern as the video grid's own
+  // thumbnail previews further down.
+  useEffect(() => {
+    const path = channel?.automation_static_bg_image_path;
+    if (!path) {
+      setStaticBgPreviewUrl('');
+      return;
+    }
+    let cancelled = false;
+    getMediaUrl(path)
+      .then((url) => {
+        if (!cancelled) setStaticBgPreviewUrl(url);
+      })
+      .catch((err) => console.error('[ChannelDashboardStep] failed to sign default background preview', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [channel?.automation_static_bg_image_path]);
 
   useEffect(() => {
     let cancelled = false;
@@ -415,6 +453,68 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
     onChannelChange?.(updated);
   }
 
+  // Instant-save for the simple defaults below (color pickers, outline toggle) — same
+  // read-latest-then-save pattern as saveNiche/saveNotes above, just generalized to an arbitrary
+  // patch since there are several independent fields here.
+  async function updateStaticDefaults(patch) {
+    if (!channel) return;
+    try {
+      const updated = await saveChannel({ ...channel, ...patch });
+      setChannel(updated);
+      onChannelChange?.(updated);
+    } catch (err) {
+      console.error('[ChannelDashboardStep] failed to save static background defaults', err);
+    }
+  }
+
+  async function handleUploadStaticBgImage(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow picking the same file again later
+    if (!file || !channel) return;
+    setStaticBgBusy(true);
+    setStaticBgError('');
+    try {
+      const path = await uploadMedia(userId, channelDefaultsPseudoVideoId(channelId), 'static-bg-default', 'bg', file);
+      await updateStaticDefaults({ automation_static_bg_image_path: path });
+    } catch (err) {
+      setStaticBgError('Upload failed: ' + String(err.message || err));
+    } finally {
+      setStaticBgBusy(false);
+    }
+  }
+
+  // Same single-still-image gateway StoryboardStep.jsx's own background section uses — one plain
+  // generateImage call, nanobanana-batch has no single-image endpoint of its own so it falls back
+  // to nanobanana's synchronous one (same reasoning as thumbnailEngine.js).
+  async function handleGenerateStaticBgImage() {
+    const trimmed = staticBgGenPrompt.trim();
+    if (!trimmed || !channel) {
+      setStaticBgError('Enter a description for the background image.');
+      return;
+    }
+    const provider = channel.automation_image_provider === 'nanobanana-batch' ? 'nanobanana' : channel.automation_image_provider || 'pollinations';
+    const cost = priceForImage(provider, { width: 1280, height: 720, quality: 'medium', hasReference: false });
+    if (cost > 0 && !window.confirm(`Generate this default background image using ${provider} (~$${cost.toFixed(2)})?`)) return;
+    setStaticBgBusy(true);
+    setStaticBgError('');
+    try {
+      const { imageUrl, costUsd } = await generateImage(trimmed, provider, [], {
+        width: 1280,
+        height: 720,
+        seed: Math.floor(Math.random() * 999999),
+        quality: 'medium',
+      });
+      if (costUsd > 0) await recordCost({ channelId, videoId: null, provider, type: 'image', amountUsd: costUsd });
+      const blob = await (await fetch(imageUrl)).blob();
+      const path = await uploadMedia(userId, channelDefaultsPseudoVideoId(channelId), 'static-bg-default', 'bg', blob);
+      await updateStaticDefaults({ automation_static_bg_image_path: path });
+    } catch (err) {
+      setStaticBgError('Generation failed: ' + String(err.message || err));
+    } finally {
+      setStaticBgBusy(false);
+    }
+  }
+
   async function handleDeleteChannel() {
     if (!window.confirm(`Delete "${channel?.name || 'this channel'}"? This also deletes all ${videos?.length || 0} of its videos and cannot be undone.`)) return;
     await deleteChannel(channelId);
@@ -699,6 +799,88 @@ export default function ChannelDashboardStep({ channelId, onResume, onNewVideo, 
           </>
         )}
       </div>
+
+      {channel?.content_type === 'static_background' && (
+        <div style={card}>
+          <div style={label}>Default video settings — Static Background</div>
+          <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+            Applied to every new video on this channel until changed for that specific video (see Storyboard).
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={label}>Default background</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                Solid color
+                <input
+                  type="color"
+                  value={channel?.automation_static_bg_color || '#111111'}
+                  onChange={(e) => updateStaticDefaults({ automation_static_bg_color: e.target.value })}
+                  style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+                />
+              </label>
+            </div>
+
+            {staticBgPreviewUrl && (
+              <img
+                src={staticBgPreviewUrl}
+                alt="Default background"
+                style={{ width: '100%', maxWidth: 280, borderRadius: 4, border: `1px solid ${T.border}`, marginTop: 10, display: 'block' }}
+              />
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+              <label style={{ ...btnGhost, cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
+                Upload image
+                <input type="file" accept="image/*" onChange={handleUploadStaticBgImage} style={{ display: 'none' }} />
+              </label>
+              <input
+                value={staticBgGenPrompt}
+                onChange={(e) => setStaticBgGenPrompt(e.target.value)}
+                placeholder="…or describe an image to generate"
+                style={{ ...inputStyle, flex: 1, minWidth: 180 }}
+              />
+              <button onClick={handleGenerateStaticBgImage} disabled={staticBgBusy} style={{ ...btnPrimary, opacity: staticBgBusy ? 0.6 : 1 }}>
+                {staticBgBusy ? 'Working…' : 'Generate'}
+              </button>
+            </div>
+            {staticBgError && <div style={{ marginTop: 8, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{staticBgError}</div>}
+          </div>
+
+          <div style={{ marginTop: 16, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+            <div style={label}>Default text style</div>
+            <div style={{ display: 'flex', gap: 18, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                Text color
+                <input
+                  type="color"
+                  value={channel?.automation_static_text_color || '#FFFFFF'}
+                  onChange={(e) => updateStaticDefaults({ automation_static_text_color: e.target.value })}
+                  style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+                />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                <input
+                  type="checkbox"
+                  checked={channel?.automation_static_text_outline !== false}
+                  onChange={(e) => updateStaticDefaults({ automation_static_text_outline: e.target.checked })}
+                />
+                Outline
+              </label>
+              {channel?.automation_static_text_outline !== false && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                  Outline color
+                  <input
+                    type="color"
+                    value={channel?.automation_static_text_outline_color || '#000000'}
+                    onChange={(e) => updateStaticDefaults({ automation_static_text_outline_color: e.target.value })}
+                    style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={card}>
         <button

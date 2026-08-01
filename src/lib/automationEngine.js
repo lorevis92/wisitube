@@ -7,6 +7,7 @@ import { saveChannel, listChannels, logAutomationStep } from './db';
 import { priceForImage } from './imageProviders';
 import { priceForVoice } from './voiceProviders';
 import { runFullPipeline } from './recipes/fullPipelineRecipe';
+import { runStaticBackgroundPipeline } from './recipes/staticBackgroundRecipe';
 
 const PAID_IMAGE_PROVIDERS = ['nanobanana', 'gptimage', 'nanobanana-batch'];
 const PAID_VOICE_ENGINES = ['minimax'];
@@ -71,6 +72,8 @@ export function getRecipeForContentType(contentType) {
   switch (contentType) {
     case 'full_pipeline':
       return runFullPipeline;
+    case 'static_background':
+      return runStaticBackgroundPipeline;
     default:
       return null;
   }
@@ -104,8 +107,10 @@ function estimateFullPipelineCost(channel) {
 
   // 'static_background' has no per-scene image_beats at all (see api/generate-scenes.js) — quoting
   // a scenes×2 image cost here would be phantom, same fix as StoryboardStep.jsx's own estimateCost.
-  // Not currently reachable (getRecipeForContentType skips this content type before any budget
-  // check runs), but kept correct for when a recipe exists.
+  // No background-image cost line either: staticBackgroundRecipe.js never generates a fresh
+  // background per video, it reuses the channel's already-configured default image/color as-is
+  // (see buildStaticBackgroundFromChannel there) — that image was already billed once, at whatever
+  // point the channel owner generated it in ChannelDashboardStep.jsx, not on every automated video.
   const isStaticBackground = channel.content_type === 'static_background';
   const beats = isStaticBackground ? 0 : totalScenes * 2;
   const imageTotal = isStaticBackground

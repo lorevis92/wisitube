@@ -174,20 +174,31 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         // re-reads what renderVideoForExport already resolved a moment ago.
         setUsingFallback(true);
         setPct(0);
+        // content_type 'static_background' scenes have no `images` field at all (see App.jsx's
+        // buildScenesFromRaw) — same guard renderVideoForExport (src/lib/videoRenderEngine.js) uses.
+        const isStaticBackground = settings.contentType === 'static_background';
         const items = await Promise.all(
           scenes.map(async (s) => ({
-            images: await Promise.all(
-              s.images.map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))
-            ),
+            images: isStaticBackground
+              ? []
+              : await Promise.all((s.images || []).map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))),
             buffer: await decodeAudio(s.audioUrl),
             duration: (s.audioDuration || 0) + s.pad,
             narration: s.narration,
           }))
         );
+        let staticBackground = null;
+        if (isStaticBackground && project.staticBackground) {
+          const bg = project.staticBackground;
+          staticBackground =
+            bg.type === 'image' && bg.url ? { type: 'image', img: await loadImage(bg.url) } : { type: 'color', color: bg.color || '#111111' };
+        }
         const playback = await playTimeline({
           canvas: canvasRef.current,
           items,
           subtitles: project.subtitles,
+          staticBackground,
+          textStyle: project.staticTextStyle,
           record: true,
           onProgress: (t, tot) => setPct(Math.min(100, Math.round((t / tot) * 100))),
           onDone: () => {},

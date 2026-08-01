@@ -24,13 +24,17 @@ export default function EditorStep({ project, setProject, settings, onExport, is
     setProject((p) => ({ ...p, subtitles }));
   }, [subtitles, setProject]);
 
+  // content_type 'static_background' scenes have no `images` field at all (see App.jsx's
+  // buildScenesFromRaw) — same guard every other item-builder in this codebase uses.
+  const isStaticBackground = settings.contentType === 'static_background';
+
   async function buildItems(fromIdx = 0) {
     const slice = scenes.slice(fromIdx);
     return Promise.all(
       slice.map(async (s) => ({
-        images: await Promise.all(
-          s.images.map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))
-        ),
+        images: isStaticBackground
+          ? []
+          : await Promise.all((s.images || []).map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))),
         buffer: await decodeAudio(s.audioUrl),
         duration: (s.audioDuration || 0) + s.pad,
         narration: s.narration,
@@ -38,17 +42,26 @@ export default function EditorStep({ project, setProject, settings, onExport, is
     );
   }
 
+  async function buildStaticBackground() {
+    if (!isStaticBackground || !project.staticBackground) return null;
+    const bg = project.staticBackground;
+    return bg.type === 'image' && bg.url ? { type: 'image', img: await loadImage(bg.url) } : { type: 'color', color: bg.color || '#111111' };
+  }
+
   async function play(fromIdx = 0) {
     stop();
     setError('');
     try {
       const items = await buildItems(fromIdx);
+      const staticBackground = await buildStaticBackground();
       const offset = durations.slice(0, fromIdx).reduce((a, b) => a + b, 0);
       setPlaying(true);
       controllerRef.current = await playTimeline({
         canvas: canvasRef.current,
         items,
         subtitles,
+        staticBackground,
+        textStyle: project.staticTextStyle,
         onProgress: (t, _tot, idx) => {
           setTime(offset + t);
           setActiveIdx(fromIdx + idx);
@@ -249,7 +262,7 @@ export default function EditorStep({ project, setProject, settings, onExport, is
                   style={{ width: '100%', marginTop: 8 }}
                 />
               </div>
-              {sel.images.map((beat, b) => (
+              {(sel.images || []).map((beat, b) => (
                 <div key={beat.id}>
                   <div style={label}>Beat {b + 1} animation</div>
                   <select

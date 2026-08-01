@@ -124,6 +124,15 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists dismissed_suggestions jsonb not null default '[]'::jsonb;
+//
+// Required one-time setup for content_type 'static_background' default background/text style:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_static_bg_color text not null default '#111111',
+//     add column if not exists automation_static_bg_image_path text,
+//     add column if not exists automation_static_text_color text not null default '#FFFFFF',
+//     add column if not exists automation_static_text_outline boolean not null default true,
+//     add column if not exists automation_static_text_outline_color text not null default '#000000';
 
 function fromChannelRow(row) {
   return {
@@ -175,6 +184,14 @@ function fromChannelRow(row) {
     automation_length_cap_enabled: row.automation_length_cap_enabled ?? true,
     automation_length_cap_min: row.automation_length_cap_min ?? 2,
     automation_length_cap_max: row.automation_length_cap_max ?? 45,
+    // Default background/text style for content_type 'static_background' videos on this channel
+    // (see ChannelDashboardStep.jsx) — seeded into a new video's own project.staticBackground/
+    // staticTextStyle once (StoryboardStep.jsx), then freely overridable per video from there.
+    automation_static_bg_color: row.automation_static_bg_color || '#111111',
+    automation_static_bg_image_path: row.automation_static_bg_image_path || null,
+    automation_static_text_color: row.automation_static_text_color || '#FFFFFF',
+    automation_static_text_outline: row.automation_static_text_outline ?? true,
+    automation_static_text_outline_color: row.automation_static_text_outline_color || '#000000',
     automation_last_reset_date: row.automation_last_reset_date || null,
     automation_daily_upload_count: row.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: row.automation_daily_spend_usd ?? 0,
@@ -223,6 +240,11 @@ export async function saveChannel(channel) {
     automation_length_cap_enabled: channel.automation_length_cap_enabled ?? true,
     automation_length_cap_min: channel.automation_length_cap_min ?? 2,
     automation_length_cap_max: channel.automation_length_cap_max ?? 45,
+    automation_static_bg_color: channel.automation_static_bg_color || '#111111',
+    automation_static_bg_image_path: channel.automation_static_bg_image_path || null,
+    automation_static_text_color: channel.automation_static_text_color || '#FFFFFF',
+    automation_static_text_outline: channel.automation_static_text_outline ?? true,
+    automation_static_text_outline_color: channel.automation_static_text_outline_color || '#000000',
     automation_last_reset_date: channel.automation_last_reset_date || todayDateString(),
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,

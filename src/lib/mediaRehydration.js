@@ -75,5 +75,22 @@ export async function rehydrateProjectMedia(project) {
     })
   );
 
-  return { ...project, scenes, references };
+  // content_type 'static_background' — same "blob nulled out by stripBlobsForSync, storagePath is
+  // the durable copy" pattern as scene images/audio above, just a single project-level image
+  // instead of one per beat.
+  let staticBackground = project.staticBackground;
+  if (staticBackground?.type === 'image') {
+    if (staticBackground.blob) {
+      staticBackground = { ...staticBackground, url: staticBackground.url || URL.createObjectURL(staticBackground.blob) };
+    } else if (staticBackground.imageStoragePath) {
+      try {
+        const blob = await downloadMediaAsBlob(staticBackground.imageStoragePath);
+        staticBackground = { ...staticBackground, blob, url: URL.createObjectURL(blob) };
+      } catch (err) {
+        console.error('[mediaRehydration] could not restore static background image from storage', staticBackground.imageStoragePath, err);
+      }
+    }
+  }
+
+  return { ...project, scenes, references, staticBackground };
 }

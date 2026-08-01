@@ -46,11 +46,13 @@ async function renderMixedAudio(items, total) {
 
 /**
  * items: same shape as playTimeline's — [{ images: [{img, animation}, {img, animation}], buffer, duration, narration }]
+ * (content_type 'static_background': images is always [] — see drawFrame, src/lib/engine.js).
+ * staticBackground/textStyle: see drawFrame's own doc comment — passed straight through.
  * Returns a Promise<Blob> (video/mp4). Throws WebCodecsUnsupportedError if the browser lacks
  * VideoEncoder/AudioEncoder — callers should catch that specifically and fall back to the
  * MediaRecorder/WebM path.
  */
-export async function renderToMp4({ items, width, height, subtitles = false, onProgress, signal }) {
+export async function renderToMp4({ items, width, height, subtitles = false, staticBackground = null, textStyle = null, onProgress, signal }) {
   if (typeof window === 'undefined' || typeof window.VideoEncoder === 'undefined' || typeof window.AudioEncoder === 'undefined') {
     throw new WebCodecsUnsupportedError();
   }
@@ -103,7 +105,7 @@ export async function renderToMp4({ items, width, height, subtitles = false, onP
     await abortIfNeeded();
 
     const t = frameIndex / FPS;
-    drawFrame(ctx, items, t, { W: width, H: height, subtitles });
+    drawFrame(ctx, items, t, { W: width, H: height, subtitles, staticBackground, textStyle });
     await videoSource.add(t, 1 / FPS); // awaiting respects the encoder's own backpressure
 
     if (frameIndex % 30 === 0 && onProgress) onProgress(frameIndex, totalFrames);

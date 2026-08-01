@@ -26,19 +26,41 @@ let beatIdCounter = 1;
 
 // Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
 // entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
-const isSceneMediaReady = (s) =>
-  Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
+// content_type 'static_background' scenes ALSO lack `images` entirely, but for the opposite
+// reason (intentional — there is no per-scene image for this content type at all, see
+// buildScenesFromRaw above) — isStaticBackground disambiguates "images N/A, ignore" from
+// "images missing/legacy, not ready".
+const isSceneMediaReady = (s, isStaticBackground = false) =>
+  (isStaticBackground || (Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready'))) &&
+  s.audioStatus === 'ready';
 
 // Turns the raw { narration, image_beats } scenes returned by api/generate-scenes.js into the
 // internal scene/beat shape the rest of the app works with — shared by the incremental partial
 // save (during chunked generation) and the final assembly, so both stay in sync.
-function buildScenesFromRaw(rawScenes) {
+//
+// isStaticBackground: content_type 'static_background' scenes have no image_beats in the API
+// response at all (see api/generate-scenes.js) — the `images` field is omitted entirely rather
+// than filled with placeholder beats, so every consumer (StoryboardStep.jsx, mediaGenerationEngine.js,
+// videoRenderEngine.js, etc.) can tell "no images for this content type" apart from "images not
+// generated yet" just by the field's absence, instead of quietly treating two empty placeholder
+// beats as real, billable, renderable image slots (the root cause of the phantom-cost/image bug).
+function buildScenesFromRaw(rawScenes, isStaticBackground) {
   return (rawScenes || []).map((s) => {
+    const base = {
+      id: sceneIdCounter++,
+      narration: s.narration || '',
+      pad: 0.3,
+      audioStatus: 'idle',
+      audioUrl: '',
+      audioBlob: null,
+      audioDuration: 0,
+    };
+    if (isStaticBackground) return base;
+
     const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
     while (beats.length < 2) beats.push({});
     return {
-      id: sceneIdCounter++,
-      narration: s.narration || '',
+      ...base,
       images: beats.map((b) => ({
         id: beatIdCounter++,
         prompt: b.image_prompt || '',
@@ -51,11 +73,6 @@ function buildScenesFromRaw(rawScenes) {
         url: '',
         blob: null,
       })),
-      pad: 0.3,
-      audioStatus: 'idle',
-      audioUrl: '',
-      audioBlob: null,
-      audioDuration: 0,
     };
   });
 }
@@ -309,7 +326,7 @@ export default function App() {
       subtitles: true,
       references: plan.references,
       characterBible: plan.characterBible,
-      scenes: buildScenesFromRaw(rawScenesSoFar),
+      scenes: buildScenesFromRaw(rawScenesSoFar, settings.contentType === 'static_background'),
       series: settings.series || null,
       displayTitle: plan.title || settings.topic?.slice(0, 60) || 'Untitled video',
     });
@@ -345,7 +362,7 @@ export default function App() {
         subtitles: true,
         references: plan.references,
         characterBible: plan.characterBible,
-        scenes: buildScenesFromRaw(scenes),
+        scenes: buildScenesFromRaw(scenes, settings.contentType === 'static_background'),
         series: settings.series || null,
       });
       setTab('storyboard');
@@ -510,7 +527,9 @@ export default function App() {
     // Resume only ever happens from within a channel's dashboard, so currentChannelId is already
     // set — this just guards against staleness (e.g. a video record whose channelId differs).
     if (record.channelId) setCurrentChannelId(record.channelId);
-    const hasAllMedia = resumedProject.scenes.length > 0 && resumedProject.scenes.every(isSceneMediaReady);
+    const resumedIsStaticBackground = (record.settings || settings).contentType === 'static_background';
+    const hasAllMedia =
+      resumedProject.scenes.length > 0 && resumedProject.scenes.every((s) => isSceneMediaReady(s, resumedIsStaticBackground));
     setTab(hasAllMedia ? 'editor' : 'storyboard');
     setResuming(false);
   }
@@ -562,7 +581,7 @@ export default function App() {
   }
 
   const hasPlan = !!project;
-  const hasMedia = hasPlan && project.scenes.every(isSceneMediaReady);
+  const hasMedia = hasPlan && project.scenes.every((s) => isSceneMediaReady(s, settings.contentType === 'static_background'));
   const currentVideoTitle = hasPlan
     ? project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video'
     : pendingPlan?.title || '';
@@ -637,6 +656,7 @@ export default function App() {
           (currentChannelId ? (
             <ChannelDashboardStep
               channelId={currentChannelId}
+              userId={session.user?.id}
               onResume={handleResume}
               onNewVideo={startNewProject}
               onBack={backToChannels}
@@ -728,6 +748,7 @@ export default function App() {
             setProject={setProject}
             settings={settings}
             onReady={() => setTab('editor')}
+            channel={currentChannel}
             channelId={currentChannelId}
             videoId={projectId}
             userId={session.user?.id}

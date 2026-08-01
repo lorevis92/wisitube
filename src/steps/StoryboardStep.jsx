@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { isModelWarm } from '../lib/tts';
 import { estimateRemainingSeconds, formatDuration } from '../lib/estimator';
@@ -8,23 +8,81 @@ import { priceForVoice } from '../lib/voiceProviders';
 import { generateBeatImage, generateSceneAudio, generateAllMedia } from '../lib/mediaGenerationEngine';
 import { generateAllMediaViaBatch } from '../lib/geminiBatchImageEngine';
 import { resumePendingBatches } from '../lib/batchResumption';
+import { generateImage } from '../lib/sceneOrchestrator';
+import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
+import { recordCost } from '../lib/db';
 import ImageLightbox from '../components/ImageLightbox';
 import ExpandableTextarea from '../components/ExpandableTextarea';
 
 // Array.isArray/length guard: projects saved before the 2-image-beat model lack `images`
 // entirely — treat those as not-ready rather than crashing on scenes.every() over undefined.
-const isSceneReady = (s) =>
-  Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready') && s.audioStatus === 'ready';
+// content_type 'static_background' scenes ALSO lack `images`, but intentionally (see
+// App.jsx's buildScenesFromRaw) — isStaticBackground disambiguates the two cases.
+const isSceneReady = (s, isStaticBackground = false) =>
+  (isStaticBackground || (Array.isArray(s.images) && s.images.length > 0 && s.images.every((im) => im.status === 'ready'))) &&
+  s.audioStatus === 'ready';
 
-export default function StoryboardStep({ project, setProject, settings, onReady, channelId, videoId, userId, isMobile }) {
+export default function StoryboardStep({ project, setProject, settings, onReady, channel, channelId, videoId, userId, isMobile }) {
   const [running, setRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [showSeo, setShowSeo] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [costConfirm, setCostConfirm] = useState(null); // { imageCount, imageTotal, charCount, voiceTotal, total } | null
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [bgPrompt, setBgPrompt] = useState('');
+  const [bgBusy, setBgBusy] = useState(false);
+  const [bgError, setBgError] = useState('');
 
+  const isStaticBackground = settings.contentType === 'static_background';
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
+
+  // Seeds this video's own background/text-style config from the channel's defaults exactly once
+  // — only when this video has never had one set yet (project.staticBackground absent), so a later
+  // per-video override (point 6) is never silently overwritten by re-seeding on every render/mount.
+  // A channel default background IMAGE lives at its own Storage path (see ChannelDashboardStep.jsx)
+  // — downloaded once here into a real blob/url so this video's own render/export can use it
+  // exactly like any other image (see rehydrateProjectMedia's identical pattern for scene images).
+  useEffect(() => {
+    if (!isStaticBackground || project.staticBackground) return;
+    let cancelled = false;
+    (async () => {
+      const hasChannelImage = !!channel?.automation_static_bg_image_path;
+      let seeded = {
+        type: hasChannelImage ? 'image' : 'color',
+        color: channel?.automation_static_bg_color || '#111111',
+        imageStoragePath: hasChannelImage ? channel.automation_static_bg_image_path : null,
+        url: null,
+        blob: null,
+      };
+      if (hasChannelImage) {
+        try {
+          const blob = await downloadMediaAsBlob(seeded.imageStoragePath);
+          seeded = { ...seeded, blob, url: URL.createObjectURL(blob) };
+        } catch (err) {
+          console.error('[StoryboardStep] failed to load channel default background image', err);
+          seeded = { type: 'color', color: seeded.color, imageStoragePath: null, url: null, blob: null };
+        }
+      }
+      if (cancelled) return;
+      setProject((p) =>
+        p.staticBackground
+          ? p
+          : {
+              ...p,
+              staticBackground: seeded,
+              staticTextStyle: p.staticTextStyle || {
+                textColor: channel?.automation_static_text_color || '#FFFFFF',
+                outline: channel?.automation_static_text_outline !== false,
+                outlineColor: channel?.automation_static_text_outline_color || '#000000',
+              },
+            }
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStaticBackground, channel?.id]);
 
   const updateScene = (id, patch) =>
     setProject((p) => ({
@@ -103,6 +161,17 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         if (!(project.pendingImageBatches || []).length) {
           await generateAllMediaViaBatch(project, { settings, channelId, videoId, logStep: null, resolution: '0.5K', onProgress: handleProgress });
         }
+      } else if (isStaticBackground) {
+        // No per-scene images to generate at all for this content type (see App.jsx's
+        // buildScenesFromRaw) — only voice, plus the single background image if it's still
+        // pending (type 'image', not yet generated, and a prompt has actually been entered) — the
+        // cost dialog above (see estimateCost/pendingBackgroundImageCost) already quoted this
+        // exact image alongside the voice cost, so generating it here too is what that
+        // confirmation was actually about.
+        await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: handleProgress, skipImages: true });
+        if (project.staticBackground?.type === 'image' && !project.staticBackground?.imageStoragePath && bgPrompt.trim()) {
+          await generateBackgroundImage(bgPrompt);
+        }
       } else {
         await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: handleProgress });
       }
@@ -133,6 +202,66 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     }
   }
 
+  // A single still image, generated once for the whole video — not the per-beat pipeline at all,
+  // just one plain call to the same generateImage/provider gateway every other image in this app
+  // already goes through. Uploaded to Storage the same way scene images/thumbnails are, so it
+  // survives a refresh via rehydrateProjectMedia (src/lib/mediaRehydration.js).
+  async function generateBackgroundImage(prompt) {
+    const trimmed = (prompt || '').trim();
+    if (!trimmed) return;
+    setBgBusy(true);
+    setBgError('');
+    try {
+      const { imageUrl, costUsd } = await generateImage(trimmed, effectiveBgProvider, [], {
+        width: dims.width,
+        height: dims.height,
+        seed: Math.floor(Math.random() * 999999),
+        quality: 'medium',
+      });
+      if (costUsd > 0) await recordCost({ channelId, videoId, provider: effectiveBgProvider, type: 'image', amountUsd: costUsd });
+      const blob = await (await fetch(imageUrl)).blob();
+      const url = URL.createObjectURL(blob);
+      const imageStoragePath = await uploadMedia(userId, videoId, 'static-background', 'bg', blob);
+      setProject((p) => ({ ...p, staticBackground: { ...(p.staticBackground || {}), type: 'image', imageStoragePath, url, blob } }));
+    } catch (err) {
+      setBgError('Background generation failed: ' + String(err.message || err));
+    } finally {
+      setBgBusy(false);
+    }
+  }
+
+  // Standalone confirmation for the dedicated "Generate background" button — a plain window.confirm
+  // (same pattern as other one-off paid actions in this codebase, e.g. ChannelDashboardStep.jsx's
+  // channel/video deletions) rather than the shared costConfirm dialog, since that dialog's own
+  // "Confirm & generate" click doesn't run this — it runs generateAll, which only picks up an
+  // already-pending background (see there) rather than triggering a fresh one from whatever prompt
+  // is currently typed here.
+  function requestGenerateBackgroundImage() {
+    const trimmed = bgPrompt.trim();
+    if (!trimmed) {
+      setBgError('Enter a description for the background image.');
+      return;
+    }
+    const cost = priceForImage(effectiveBgProvider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: false });
+    if (cost > 0 && !window.confirm(`Generate this background image using ${effectiveBgProvider} (~$${cost.toFixed(2)})?`)) return;
+    generateBackgroundImage(bgPrompt);
+  }
+
+  function setBackgroundColor(color) {
+    setProject((p) => ({
+      ...p,
+      staticBackground: { ...(p.staticBackground || {}), type: 'color', color },
+    }));
+  }
+
+  function setBackgroundType(type) {
+    setProject((p) => ({ ...p, staticBackground: { ...(p.staticBackground || {}), type } }));
+  }
+
+  function updateTextStyle(patch) {
+    setProject((p) => ({ ...p, staticTextStyle: { ...(p.staticTextStyle || {}), ...patch } }));
+  }
+
   // Paid providers require an explicit confirmation before any billable call goes out — computed
   // from the beats that actually still need generating (not a blind scenes×2 for the whole video),
   // so "Generate missing" on a partially-done video quotes only what will really be charged.
@@ -148,32 +277,48 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
       .reduce((sum, s) => sum + (s.narration?.length || 0), 0);
   }
 
+  // The image-provider-as-actually-used for a single still image — nanobanana-batch has no
+  // single-image endpoint of its own (batch is only worth it at scale), so the background image
+  // (like thumbnails, see thumbnailEngine.js) uses Nano Banana 2's ordinary synchronous provider
+  // instead, same reasoning throughout this codebase.
+  const effectiveBgProvider = settings.imageProvider === 'nanobanana-batch' ? 'nanobanana' : settings.imageProvider || 'pollinations';
+
+  // Real cost only when the background is actually still pending generation — a background
+  // already generated (imageStoragePath set) was already billed at that point, and a 'color'
+  // background is never billable at all.
+  function pendingBackgroundImageCost() {
+    if (!isStaticBackground || project.staticBackground?.type !== 'image' || project.staticBackground?.imageStoragePath) return 0;
+    return priceForImage(effectiveBgProvider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: false });
+  }
+
   // Combines both billable axes — images and voice — into one estimate, since either (or both)
   // can be a paid engine independently of the other.
   //
-  // 'static_background' has no per-scene image_beats at all (see api/generate-scenes.js) — the
-  // placeholder beats buildScenesFromRaw still creates (App.jsx's fallback for missing/empty
-  // image_beats, unchanged since rendering/media isn't wired up for this content type yet) are not
-  // real billable images, so the whole image axis is excluded here rather than quoting a cost for
-  // generation that was never actually going to happen. Once a background-image step exists (a
-  // later phase), this is where its own, real per-video (not per-scene) cost would be added.
+  // 'static_background' has no per-scene image_beats at all (see api/generate-scenes.js) — quoting
+  // a cost for scene beats that were never going to be generated would be a phantom line, so that
+  // axis is excluded entirely. In its place: the single background image's real cost, but only
+  // while it's still pending (see pendingBackgroundImageCost) — "Confirm & generate" (see
+  // confirmGenerateAll) generates it together with the audio in that case, so this dialog quotes
+  // exactly what that click is about to actually spend.
   function estimateCost() {
-    const provider = settings.imageProvider || 'pollinations';
     const voiceEngine = settings.voiceEngine || 'kokoro';
-    const isStaticBackground = settings.contentType === 'static_background';
 
     const beats = isStaticBackground ? [] : pendingBeats();
-    const imageTotal = isStaticBackground
+    const perSceneImageTotal = isStaticBackground
       ? 0
       : beats.reduce(
-          (sum, beat) => sum + priceForImage(provider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: !!beat.referenceId }),
+          (sum, beat) =>
+            sum + priceForImage(settings.imageProvider || 'pollinations', { width: dims.width, height: dims.height, quality: 'medium', hasReference: !!beat.referenceId }),
           0
         );
+    const bgImageTotal = pendingBackgroundImageCost();
+    const imageTotal = perSceneImageTotal + bgImageTotal;
+    const imageCount = beats.length + (bgImageTotal > 0 ? 1 : 0);
 
     const charCount = pendingAudioCharCount();
     const voiceTotal = priceForVoice(voiceEngine, charCount);
 
-    return { imageCount: beats.length, imageTotal, charCount, voiceTotal, total: imageTotal + voiceTotal };
+    return { imageCount, imageTotal, charCount, voiceTotal, total: imageTotal + voiceTotal };
   }
 
   function requestGenerateAll() {
@@ -190,7 +335,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     generateAll();
   }
 
-  const readyCount = project.scenes.filter(isSceneReady).length;
+  const readyCount = project.scenes.filter((s) => isSceneReady(s, isStaticBackground)).length;
   const allReady = readyCount === project.scenes.length;
   const totalSec = project.scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
   const { syncSeconds: remainingSeconds, imageEta } = useMemo(
@@ -382,16 +527,17 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                 Scene <span style={mono}>{String(i + 1).padStart(2, '0')}</span>
               </span>
               <span style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase' }}>
-                {scene.images.map((im, b) => (
-                  <span key={im.id} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    {statusDot(im.status)} img{b + 1}
-                    {im.backupFailed && (
-                      <span title="Upload to Supabase Storage failed — will be lost on refresh unless retried" style={{ color: T.primary }}>
-                        ⚠ not backed up
-                      </span>
-                    )}
-                  </span>
-                ))}
+                {!isStaticBackground &&
+                  scene.images.map((im, b) => (
+                    <span key={im.id} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                      {statusDot(im.status)} img{b + 1}
+                      {im.backupFailed && (
+                        <span title="Upload to Supabase Storage failed — will be lost on refresh unless retried" style={{ color: T.primary }}>
+                          ⚠ not backed up
+                        </span>
+                      )}
+                    </span>
+                  ))}
                 <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                   {statusDot(scene.audioStatus, scene.audioStatus === 'error' ? scene.audioError : undefined)} voice
                   {scene.audioBackupFailed && (
@@ -404,10 +550,33 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               </span>
             </div>
 
-            {/* Two image beats, side by side */}
+            {/* content_type 'static_background' scenes have no image_beats at all (see
+                App.jsx's buildScenesFromRaw) — nothing per-scene to show or generate here, the
+                one background for the whole video is configured once, below. */}
+            {isStaticBackground ? (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 10,
+                  border: `1px dashed ${T.border}`,
+                  borderRadius: 4,
+                  fontSize: 12,
+                  color: T.textSecondary,
+                  fontFamily: FONT.ui,
+                }}
+              >
+                This video uses a single background —{' '}
+                <button
+                  onClick={() => document.getElementById('static-background-section')?.scrollIntoView({ behavior: 'smooth' })}
+                  style={{ background: 'none', border: 'none', padding: 0, color: T.primary, textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+                >
+                  configured below
+                </button>
+                .
+              </div>
+            ) : (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
               {scene.images.map((beat, b) => {
-                console.log('[render-debug]', beat.id, beat.url);
                 return (
                   <div key={beat.id}>
                     <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
@@ -511,6 +680,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                 );
               })}
             </div>
+            )}
 
             <ExpandableTextarea
               value={scene.narration}
@@ -533,6 +703,99 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         ))}
           </div>
         </>
+      )}
+
+      {isStaticBackground && (
+        <div id="static-background-section" style={card}>
+          <div style={label}>Background & text style</div>
+          <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+            The whole video shows one unchanging background with the current scene's narration written on top.
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+            <button
+              onClick={() => setBackgroundType('color')}
+              style={project.staticBackground?.type !== 'image' ? btnPrimary : btnGhost}
+            >
+              Solid color
+            </button>
+            <button
+              onClick={() => setBackgroundType('image')}
+              style={project.staticBackground?.type === 'image' ? btnPrimary : btnGhost}
+            >
+              Generated image
+            </button>
+          </div>
+
+          {project.staticBackground?.type === 'image' ? (
+            <div style={{ marginTop: 12 }}>
+              {project.staticBackground?.url && (
+                <img
+                  src={project.staticBackground.url}
+                  alt="Background"
+                  style={{ width: '100%', maxWidth: 320, borderRadius: 4, border: `1px solid ${T.border}`, marginBottom: 8, display: 'block' }}
+                />
+              )}
+              <input
+                value={bgPrompt}
+                onChange={(e) => setBgPrompt(e.target.value)}
+                placeholder="Describe the background image…"
+                style={inputStyle}
+              />
+              <button
+                onClick={requestGenerateBackgroundImage}
+                disabled={bgBusy}
+                style={{ ...btnPrimary, marginTop: 8, opacity: bgBusy ? 0.6 : 1 }}
+              >
+                {bgBusy ? 'Generating…' : project.staticBackground?.imageStoragePath ? '↻ Regenerate background' : 'Generate background'}
+              </button>
+              {bgError && <div style={{ marginTop: 8, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{bgError}</div>}
+            </div>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              <input
+                type="color"
+                value={project.staticBackground?.color || '#111111'}
+                onChange={(e) => setBackgroundColor(e.target.value)}
+                style={{ width: 60, height: 36, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+              />
+            </div>
+          )}
+
+          <div style={{ marginTop: 16, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+            <div style={label}>Text style</div>
+            <div style={{ display: 'flex', gap: 18, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                Text color
+                <input
+                  type="color"
+                  value={project.staticTextStyle?.textColor || '#FFFFFF'}
+                  onChange={(e) => updateTextStyle({ textColor: e.target.value })}
+                  style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+                />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                <input
+                  type="checkbox"
+                  checked={project.staticTextStyle?.outline !== false}
+                  onChange={(e) => updateTextStyle({ outline: e.target.checked })}
+                />
+                Outline
+              </label>
+              {project.staticTextStyle?.outline !== false && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                  Outline color
+                  <input
+                    type="color"
+                    value={project.staticTextStyle?.outlineColor || '#000000'}
+                    onChange={(e) => updateTextStyle({ outlineColor: e.target.value })}
+                    style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {lightbox && <ImageLightbox src={lightbox.url} alt={lightbox.alt} onClose={() => setLightbox(null)} />}
