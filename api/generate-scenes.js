@@ -164,11 +164,13 @@ Topic: "${topic}"
 
 ${continuityNote}`;
 
-    // Replaces the punchy, visual-cut-paced narration instruction with one suited to continuous
-    // spoken narration meant to be listened to and read along calmly — see the prompt spec for
-    // exactly why (pronunciation-friendly phrasing, natural sentence rhythm over brevity).
+    // One sentence per scene (occasionally two short related ones) rather than a whole paragraph
+    // — this is what actually keeps the on-screen caption and the .srt file in sync with the real
+    // audio: a scene this short fits naturally in 1-2 lines for its own full, real, measured
+    // duration (see engine.js's drawFlatText/srtBuilder.js), instead of needing an estimated
+    // sub-chunking pass to guess where mid-paragraph pauses might fall.
     const narrationFieldDescription = isStaticBackground
-      ? `what the voiceover says for this scene — write natural, flowing narration at a clear, measured pace suitable for a language-learning audience: complete sentences, natural paragraph structure, not fragmented into short punchy beats. This content is meant to be listened to and read along calmly, not paced to visual cuts. Prioritize clarity of pronunciation-friendly phrasing and natural sentence rhythm over brevity. Written in ${language}`
+      ? `what the voiceover says for this scene — write ONE natural, complete sentence per scene (occasionally two short related sentences if they truly belong together) — never a full paragraph. The sentence must still sound natural and unhurried, suited for a language-learning listener, never fragmented or artificially clipped mid-thought. Break naturally at sentence boundaries, creating more, shorter scenes rather than fewer long ones. Written in ${language}`
       : `what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in ${language}`;
 
     // The output-format half — field names, types, and hard correctness rules the client's parsing
@@ -185,7 +187,7 @@ JSON schema:
 }
 
 Rules:
-- Each scene should be roughly one complete paragraph or thought — natural narration chunking, never a fixed sentence-count target.${characterNamingNote}`
+- Each scene should be roughly one complete sentence (occasionally two short related sentences) — never a full paragraph, and never a fixed word/character-count target.${characterNamingNote}`
       : `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
 JSON schema:

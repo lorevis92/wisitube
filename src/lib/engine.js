@@ -76,17 +76,17 @@ export function computeWordTimings(words, duration) {
   });
 }
 
-// Default cap on how long (in seconds) a single caption-style block may span before a new one
-// starts — matches how long a real subtitle line comfortably stays on screen. Shared by
-// srtBuilder.js (the .srt file uploaded to YouTube) and drawFlatText below (the static_background
-// on-screen caption), so both agree on the exact same chunking, not two independently-tuned values.
+// Default cap on how long (in seconds) a single .srt caption block may span before a new one
+// starts — matches how long a real subtitle line comfortably stays on screen. Used by
+// srtBuilder.js for full_pipeline's two-beat-halved narration (static_background no longer needs
+// this at all: api/generate-scenes.js now writes one short sentence per scene, so a scene's whole
+// narration IS the caption block — see drawFlatText below and srtBuilder.js's isStaticBackground
+// branch, both keyed off the scene's own real duration with no further sub-chunking).
 export const CAPTION_BLOCK_SECONDS = 4;
 
 // Groups a sequence of already-timed entries ({ word, start, end } — e.g. from computeWordTimings)
 // into short blocks capped at maxSeconds: a new block starts as soon as adding the next entry would
-// push the running one past that cap. Generic over its input's time coordinate space (works equally
-// for one scene's local time or a whole timeline's absolute time), which is what lets srtBuilder.js
-// (absolute, whole-timeline entries) and drawFlatText (one scene's local entries) share it.
+// push the running one past that cap.
 export function groupWordsIntoBlocks(entries, maxSeconds = CAPTION_BLOCK_SECONDS) {
   const blocks = [];
   let current = null;
@@ -101,16 +101,6 @@ export function groupWordsIntoBlocks(entries, maxSeconds = CAPTION_BLOCK_SECONDS
   });
   if (current) blocks.push(current);
   return blocks;
-}
-
-// Times one continuous narration across `duration` (via computeWordTimings) and chunks the result
-// into short, subtitle-style blocks — used by drawFlatText for the static_background on-screen
-// caption, where (unlike the two-beat kinetic subtitle) a scene's whole narration is one
-// continuous span with no beat-halving to key off of.
-export function computeCaptionBlocks(words, duration, maxSeconds = CAPTION_BLOCK_SECONDS) {
-  const timings = computeWordTimings(words, duration);
-  const entries = words.map((w, i) => ({ word: w, start: timings[i].start, end: timings[i].end }));
-  return groupWordsIntoBlocks(entries, maxSeconds);
 }
 
 function easeOutBack(x) {
@@ -191,10 +181,10 @@ function drawSubtitle(ctx, W, H, words, localTime, duration) {
 }
 
 // content_type 'static_background' — the entire video is one unchanging background (solid color
-// or a single generated image, no Ken Burns/pan/zoom) with short, synced caption blocks of the
-// current scene's narration drawn flat on top (no kinetic word-pop). See drawFlatText below for
-// the text half; this only paints the background itself, once per frame (cheap — it's identical
-// every frame, no per-item lookup needed).
+// or a single generated image, no Ken Burns/pan/zoom) with the current scene's whole narration
+// drawn flat on top (no kinetic word-pop). See drawFlatText below for the text half; this only
+// paints the background itself, once per frame (cheap — it's identical every frame, no per-item
+// lookup needed).
 function drawStaticBg(ctx, W, H, background) {
   if (background?.type === 'image' && background.img) {
     ctx.fillStyle = '#000000';
@@ -206,10 +196,10 @@ function drawStaticBg(ctx, W, H, background) {
   }
 }
 
-// Auto-shrinks fontSize until every line of the (already word-wrapped) block fits within
-// maxHeight — a block is already short (capped at CAPTION_BLOCK_SECONDS of speech, see
-// computeCaptionBlocks), so this rarely needs to shrink much; MAX_FLAT_TEXT_LINES below is the
-// hard backstop for the rare unusually word-dense block.
+// Auto-shrinks fontSize until every line of the (already word-wrapped) narration fits within
+// maxHeight — a scene's whole narration is already short (api/generate-scenes.js writes one
+// sentence, occasionally two, per static_background scene), so this rarely needs to shrink much;
+// MAX_FLAT_TEXT_LINES below is a generous safety backstop, not a design target.
 function fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize) {
   let fontSize = maxFontSize;
   let lineGroups;
@@ -224,29 +214,29 @@ function fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize) 
   return { fontSize, lineGroups, lineH };
 }
 
-const MAX_FLAT_TEXT_LINES = 2;
+// Generous safety backstop only — static_background has the whole screen to itself (no image, no
+// competing visual element), so there's no reason to force brevity the way a real subtitle overlay
+// would. This just guards against an unusually long sentence overflowing the frame; it is not meant
+// to be hit in the normal case now that scenes are sentence-length (see api/generate-scenes.js).
+const MAX_FLAT_TEXT_LINES = 6;
 
-// Draws only the current caption block (~CAPTION_BLOCK_SECONDS of speech, computed from this
-// scene's own full narration/duration via computeCaptionBlocks — no beat-halving, since
-// static_background scenes have no beats at all), wrapped to at most MAX_FLAT_TEXT_LINES lines,
-// styled per textStyle (project.staticTextStyle, or the channel's automation_static_text_*
-// defaults it was seeded from — see StoryboardStep.jsx). Cycles forward in sync with the
-// narration as `local` advances, same idea as a real subtitle track — replaces the previous
-// "whole narration as one static wall of text" behavior.
-function drawFlatText(ctx, W, H, narration, duration, local, textStyle) {
+// Draws the current scene's ENTIRE narration as one flat block of text for the scene's whole real
+// duration (no sub-chunking, no word-level timing/animation) — the same mechanism already proven
+// in full_pipeline's kinetic subtitle, minus the word-pop animation, now viable here because
+// api/generate-scenes.js writes one short sentence per static_background scene: at that length, the
+// scene's own real audioDuration is naturally enough time to read it calmly, and it fits 1-2 lines
+// without needing to guess sub-scene timing the way estimated word-weight chunking did. Styled per
+// textStyle (project.staticTextStyle, or the channel's automation_static_text_* defaults it was
+// seeded from — see StoryboardStep.jsx).
+function drawFlatText(ctx, W, H, narration, textStyle) {
   const words = String(narration || '').split(/\s+/).filter(Boolean);
   if (!words.length) return;
-
-  const blocks = computeCaptionBlocks(words, duration);
-  if (!blocks.length) return;
-  const clampedLocal = Math.min(Math.max(local, 0), duration);
-  const block = blocks.find((b) => clampedLocal >= b.start && clampedLocal < b.end) || blocks[blocks.length - 1];
 
   const maxWidth = W * 0.82;
   const maxFontSize = Math.round(H * 0.075);
   const minFontSize = Math.round(H * 0.03);
   const maxHeight = maxFontSize * 1.35 * MAX_FLAT_TEXT_LINES;
-  const { fontSize, lineGroups, lineH } = fitFlatText(ctx, block.words, maxWidth, maxHeight, maxFontSize, minFontSize);
+  const { fontSize, lineGroups, lineH } = fitFlatText(ctx, words, maxWidth, maxHeight, maxFontSize, minFontSize);
   const lines = lineGroups.slice(0, MAX_FLAT_TEXT_LINES);
 
   ctx.font = `600 ${fontSize}px Syne, sans-serif`;
@@ -260,7 +250,7 @@ function drawFlatText(ctx, W, H, narration, duration, local, textStyle) {
   const outlineColor = textStyle?.outlineColor || '#000000';
 
   lines.forEach((indices, li) => {
-    const line = indices.map((i) => block.words[i]).join(' ');
+    const line = indices.map((i) => words[i]).join(' ');
     const y = startY + li * lineH;
     if (outline) {
       ctx.lineWidth = Math.max(3, fontSize * 0.12);
@@ -323,9 +313,9 @@ export function totalDuration(items) {
  *
  * staticBackground (content_type 'static_background' only): { type: 'color'|'image', color, img }
  * — when present, replaces the entire per-beat Ken Burns rendering with one unchanging background
- * for the whole video, plus the current caption block (a short, synced chunk of the active scene's
- * narration — see drawFlatText/computeCaptionBlocks) drawn flat on top, cycling forward like a real
- * subtitle track rather than showing the whole scene's narration as one static block of text.
+ * for the whole video, plus the active scene's entire narration drawn flat on top for that scene's
+ * whole real duration (see drawFlatText) — one short sentence per scene (see
+ * api/generate-scenes.js), so this reads calmly and stays in sync without needing sub-chunking.
  * `items` still only need `duration`/`narration`/`buffer` in this mode — `images` is never read.
  * textStyle: project.staticTextStyle — { textColor, outline, outlineColor }.
  */
@@ -343,7 +333,7 @@ export function drawFrame(ctx, items, t, { W, H, subtitles = false, staticBackgr
 
   if (staticBackground) {
     drawStaticBg(ctx, W, H, staticBackground);
-    drawFlatText(ctx, W, H, it.narration, it.duration, local, textStyle);
+    drawFlatText(ctx, W, H, it.narration, textStyle);
     return idx;
   }
 
