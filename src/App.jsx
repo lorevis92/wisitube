@@ -13,7 +13,7 @@ import AutomationMirrorStep from './steps/AutomationMirrorStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost } from './theme';
-import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings } from './lib/db';
+import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings, loadChannel } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
@@ -594,7 +594,15 @@ export default function App() {
   // series is only non-null when started from a Content Program Manager suggestion that belongs
   // to one — always set explicitly (not merged) so a manual "New video" doesn't inherit a stale
   // series from whatever suggestion was started last.
-  function startNewProjectWithTopic(topic, series = null) {
+  //
+  // content_type is read via a fresh loadChannel(currentChannelId) here rather than off currentChannel
+  // state — that state is only populated asynchronously, by ChannelDashboardStep's own mount effect
+  // (onChannelChange), so it can still be null (first open of a channel this session) or, worse,
+  // still hold the PREVIOUS channel's record (switched channels and clicked "+ New video" before the
+  // new one's load finished) at the exact moment this function needs it. A direct fetch here is
+  // correct regardless of any other component's loading timing, instead of merely reducing the odds
+  // of catching it mid-flight.
+  async function startNewProjectWithTopic(topic, series = null) {
     generationRef.current += 1;
     setProject(null);
     setProjectId(null);
@@ -604,7 +612,18 @@ export default function App() {
     setPendingPlan(null);
     setGenerationError('');
     setSceneProgress({ current: 0, total: 0 });
-    setSettings((s) => ({ ...s, topic, series, contentType: currentChannel?.content_type || 'full_pipeline' }));
+
+    let contentType = 'full_pipeline';
+    if (currentChannelId) {
+      try {
+        const ch = await loadChannel(currentChannelId);
+        contentType = ch?.content_type || 'full_pipeline';
+      } catch (err) {
+        console.error('[startNewProjectWithTopic] failed to load channel for content_type', err);
+      }
+    }
+
+    setSettings((s) => ({ ...s, topic, series, contentType }));
     setTab('create');
   }
 
@@ -613,6 +632,12 @@ export default function App() {
   }
 
   function openChannel(channel) {
+    // Cleared up front rather than left as whatever channel was open before — currentChannel is only
+    // repopulated asynchronously once ChannelDashboardStep's own load finishes (via onChannelChange),
+    // so without this reset, anything reading currentChannel during that window (today:
+    // startNewProjectWithTopic, though it no longer relies on it — potentially other code later) would
+    // silently see the PREVIOUS channel's data instead of an explicit "not loaded yet".
+    setCurrentChannel(null);
     setCurrentChannelId(channel.id);
     setCurrentChannelName(channel.name || '');
   }
