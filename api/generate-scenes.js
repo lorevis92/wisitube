@@ -169,13 +169,13 @@ ${continuityNote}`;
     // match how the sentence would actually be spoken. Applies to both content types' narration.
     const noDashesInstruction = `Never use em dashes, en dashes, or hyphens as punctuation within the narration (no " — " or " - " connecting clauses). Use only standard punctuation — periods, commas, semicolons — as in natural everyday written language. This text will be read aloud, and dashes don't reflect how people actually speak.`;
 
-    // One sentence per scene (occasionally two short related ones) rather than a whole paragraph
-    // — this is what actually keeps the on-screen caption and the .srt file in sync with the real
-    // audio: a scene this short fits naturally in 1-2 lines for its own full, real, measured
-    // duration (see engine.js's drawFlatText/srtBuilder.js), instead of needing an estimated
-    // sub-chunking pass to guess where mid-paragraph pauses might fall.
+    // Exactly one sentence per scene, strictly — no "occasionally two" exception at all. This is
+    // what makes the scene boundary and the sentence boundary the exact same thing, so the
+    // on-screen caption/.srt cue can simply span the scene's own real, measured duration with zero
+    // internal splitting logic — identical in spirit to full_pipeline's scene-boundary-exact sync,
+    // just without image beats. A thought needing two sentences becomes two separate scenes.
     const narrationFieldDescription = isStaticBackground
-      ? `what the voiceover says for this scene — write ONE natural, complete sentence per scene (occasionally two short related sentences if they truly belong together) — never a full paragraph. The sentence must still sound natural and unhurried, suited for a language-learning listener, never fragmented or artificially clipped mid-thought. Break naturally at sentence boundaries, creating more, shorter scenes rather than fewer long ones. ${noDashesInstruction} Written in ${language}`
+      ? `what the voiceover says for this scene — write exactly ONE natural, complete sentence per scene, never more than one, no exceptions. If a thought naturally needs two sentences, split it into two separate scenes instead of combining them. The sentence must still sound natural and unhurried, suited for a language-learning listener, never fragmented or artificially clipped mid-thought. ${noDashesInstruction} Written in ${language}`
       : `what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters. ${noDashesInstruction} Written in ${language}`;
 
     // The output-format half — field names, types, and hard correctness rules the client's parsing
@@ -192,7 +192,7 @@ JSON schema:
 }
 
 Rules:
-- Each scene should be roughly one complete sentence (occasionally two short related sentences) — never a full paragraph, and never a fixed word/character-count target.${characterNamingNote}`
+- Each scene MUST be exactly one complete sentence — never two, never a full paragraph, and never a fixed word/character-count target. A thought needing two sentences is two scenes, not one.${characterNamingNote}`
       : `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
 JSON schema:

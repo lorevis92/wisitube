@@ -117,12 +117,13 @@ export default async function handler(req, res) {
         // assumes one image cut every few seconds, meaningless for continuous spoken narration
         // over a static background. lengthMinutes is still respected as a rough target (see
         // lengthInstruction below), but the actual scene count is left for the model to decide
-        // based on natural sentence-level divisions (one sentence per scene, not a whole
-        // paragraph — see api/generate-scenes.js's own narration instruction) — same "free
-        // total_scenes" mechanism as aiDecidesLength, just without dropping the length target
-        // entirely. This naturally means many more, shorter scenes than a paragraph-level split
-        // would — expected and correct: it's what keeps each scene's real audio duration short
-        // enough for its on-screen caption/.srt cue to stay in sync without needing sub-chunking.
+        // based on exactly one sentence per scene, strictly, never two (see
+        // api/generate-scenes.js's own narration instruction) — same "free total_scenes"
+        // mechanism as aiDecidesLength, just without dropping the length target entirely. This
+        // naturally means many more, shorter scenes than a paragraph-level split would — expected
+        // and correct: it's what makes the scene boundary and the sentence boundary the exact same
+        // thing, so the on-screen caption/.srt cue can simply span the scene's own real duration
+        // with zero internal splitting logic.
         capMinMinutes = null;
         capMaxMinutes = null;
         lengthMinutes = Number(body.lengthMinutes);
@@ -195,7 +196,7 @@ Keep the character_bible consistent with these — if a reference photo's label 
             : ''
         }`
       : isStaticBackground
-        ? `Video length: ~${lengthMinutes} minutes of natural spoken narration. Divide it into as many scenes as feels natural for the content — roughly one complete sentence (occasionally two short related sentences) per scene, never a whole paragraph — rather than targeting any specific scene count or a visual-cut pacing density. This will naturally mean more, shorter scenes than a chapter-level split.`
+        ? `Video length: ~${lengthMinutes} minutes of natural spoken narration. Divide it into as many scenes as feels natural for the content — exactly ONE complete sentence per scene, never two, never a whole paragraph — rather than targeting any specific scene count or a visual-cut pacing density. This will naturally mean more, shorter scenes than a chapter-level split.`
         : `Video length: ~${lengthMinutes} minutes — split into a sensible number of chapters, roughly one chapter every 1.5-2 minutes.`;
 
     // The visual-art-style paragraph below only makes sense when there are actual images to draw —
@@ -248,7 +249,7 @@ Rules:
           capMinMinutes != null ? ` Stay within ${capMinMinutes}-${capMaxMinutes} minutes (~${capMinMinutes * 12}-${capMaxMinutes * 12} scenes).` : ''
         }`
       : isStaticBackground
-        ? `Video length: ~${lengthMinutes} minutes of natural spoken narration — let the number of scenes emerge from natural sentence-level divisions (one sentence, occasionally two short related ones, per scene — never a whole paragraph), not a fixed scene-count target.`
+        ? `Video length: ~${lengthMinutes} minutes of natural spoken narration — let the number of scenes emerge from natural sentence-level divisions (exactly one sentence per scene, never two, never a whole paragraph), not a fixed scene-count target.`
         : `Video length: ~${lengthMinutes} minutes (${totalScenes} scenes total)`;
 
     const userLines = [

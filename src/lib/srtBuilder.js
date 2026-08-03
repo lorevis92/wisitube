@@ -1,7 +1,7 @@
 // Builds a standard .srt caption file from a project's scenes, reusing the exact per-word timing
 // engine.js computes for the on-screen subtitle rendering — so the uploaded captions track always
 // lines up with what viewers see on screen, not an independent guess.
-import { computeWordTimings, splitNarrationHalves, groupWordsIntoBlocks, splitSentencesWithTiming } from './engine';
+import { computeWordTimings, splitNarrationHalves, groupWordsIntoBlocks } from './engine';
 
 function formatSrtTimestamp(seconds) {
   const totalMs = Math.max(0, Math.round(seconds * 1000));
@@ -36,19 +36,18 @@ function collectWordEntries(scenes) {
   return entries;
 }
 
-// One .srt cue per SENTENCE (see splitSentencesWithTiming, shared with engine.js's drawFlatText),
-// each spanning its own proportional share of the scene's real (measured) duration — matching
-// exactly what's drawn on screen: a single-sentence scene (the common case) is one cue for the
-// whole duration, an occasional two-sentence scene becomes two cues that cut exactly at the
-// sentence boundary.
+// One .srt cue per scene, spanning that scene's own real (measured) duration — matching exactly
+// what's drawn on screen (engine.js's drawFlatText: the scene's whole narration, flat, for the
+// scene's whole duration, no internal splitting). Safe because api/generate-scenes.js guarantees
+// exactly one sentence per static_background scene, strictly, never two — there is nothing to
+// split within a scene, the scene boundary already is the sentence boundary.
 function buildStaticBackgroundBlocks(scenes) {
   const blocks = [];
   let sceneStart = 0;
   scenes.forEach((scene) => {
     const duration = (scene.audioDuration || 0) + (scene.pad || 0);
-    splitSentencesWithTiming(scene.narration, duration).forEach((b) => {
-      if (b.words.length) blocks.push({ words: b.words, start: sceneStart + b.start, end: sceneStart + b.end });
-    });
+    const words = String(scene.narration || '').split(/\s+/).filter(Boolean);
+    if (words.length) blocks.push({ words, start: sceneStart, end: sceneStart + duration });
     sceneStart += duration;
   });
   return blocks;
