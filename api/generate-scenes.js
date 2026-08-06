@@ -145,13 +145,21 @@ For EVERY image beat where one of these characters is visibly present — as the
       ? `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Write it as a natural sentence that explicitly names the recognizable character/person by their proper name or title (e.g. "Legolas skateboarding in streetwear", not "a blond elf with pointed ears skateboarding") — trust the model's own knowledge for their appearance. Additionally: if this beat visually represents a specific number, statistic, price, percentage, or short quote mentioned in the narration, include the EXACT text to render on-screen in quotes within the prompt (e.g. a chart labeled "+340%"), and state it must be rendered verbatim, character-for-character accurate — never approximated or altered. Only do this when on-screen text genuinely aids comprehension (data/finance/stats content), not for purely narrative/scenic beats.`
       : `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.`;
 
+    // Tone-matched to each content type's own established narration style (full_pipeline: punchy/
+    // conversational; static_background: calm/measured) — same substance either way: a brief recap
+    // (key insight + a callback to the story's turning point) woven into the narration ahead of the
+    // CTA, not a bullet-list summary bolted on at the end.
+    const closingRecapNote = isStaticBackground
+      ? `This chunk ends the entire video — before the closing call-to-action, include 1-2 scenes that calmly recap the single key concept or insight this video delivered, plus a brief callback to the pivotal moment of the story, phrased as a natural continuation of the narration, not a bullet list or a mechanical summary. It should feel like a settled, satisfying close that reinforces what the listener just learned, then move into the call-to-action (subscribe/watch next).`
+      : `This chunk ends the entire video — before the final call-to-action, include 1-2 scenes that briefly recap the single key concept or insight this video delivered, plus a short callback to the pivotal/turning-point moment of the story, phrased naturally as part of the narration flow, not as a bullet list. It should feel like a satisfying close that reinforces what the viewer just learned or experienced, not a mechanical summary, then transition into the call-to-action (subscribe/watch next).`;
+
     const continuityNote = [
       `You are writing scenes 1-${sceneCount} of the chapter '${chapterTitle}': ${chapterSummary}.`,
       previousTail
         ? `The previous scene ended with: "${previousTail}". Continue the narration naturally from there — no abrupt restart, no re-introduction of things already established.`
         : '',
       isVeryFirstChunk ? 'This chunk opens the entire video — it must open with the strongest hook.' : '',
-      isVeryLastChunk ? 'This chunk ends the entire video — its final scene must close with a call to action (subscribe/watch next).' : '',
+      isVeryLastChunk ? closingRecapNote : '',
     ]
       .filter(Boolean)
       .join(' ');
