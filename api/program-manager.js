@@ -21,8 +21,12 @@ const DEFAULT_CREATIVE_DIRECTION = `You are an expert YouTube content strategist
 // regardless of what creative direction is in play. Takes the suggestion count as a parameter
 // (default the original 6-8 spread) since a per-suggestion replacement (see ChannelDashboardStep.jsx
 // "Start this video"/count: 1) asks for exactly one instead of a full batch.
+// fulfills_promise_video_id: optional — set only when a suggestion is the one that pays off a
+// pending promise from pendingPromises below (see the system-prompt addition in the handler). The
+// client uses this to mark the ORIGINAL video's promise as fulfilled once this suggestion is
+// actually started (see ChannelDashboardStep.jsx/fullPipelineRecipe.js/staticBackgroundRecipe.js).
 const schemaInstructions = (suggestionCountText) =>
-  `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [${suggestionCountText} objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
+  `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [${suggestionCountText} objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low", "fulfills_promise_video_id": "the video id from the pending-promises list this suggestion fulfills, or null" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -42,7 +46,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles;
+    let channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, pendingPromises;
     try {
       const body = req.body || {};
       channelName = typeof body.channelName === 'string' ? body.channelName.trim() : '';
@@ -85,6 +89,18 @@ export default async function handler(req, res) {
       avoidTitles = Array.isArray(body.avoidTitles)
         ? body.avoidTitles.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 200)
         : [];
+      // Videos on this channel whose closing CTA promised a specific future topic, not yet
+      // addressed (src/lib/db.js listPendingPromises) — see the system-prompt addition below.
+      pendingPromises = Array.isArray(body.pendingPromises)
+        ? body.pendingPromises
+            .filter((p) => p && typeof p === 'object' && typeof p.videoId === 'string' && p.videoId && typeof p.promise === 'string' && p.promise.trim())
+            .map((p) => ({
+              videoId: p.videoId,
+              videoTitle: typeof p.videoTitle === 'string' ? p.videoTitle.trim() : '',
+              promise: p.promise.trim(),
+            }))
+            .slice(0, 50)
+        : [];
     } catch (err) {
       console.error('[program-manager] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -93,6 +109,12 @@ export default async function handler(req, res) {
     let systemPrompt = creativeOverride || DEFAULT_CREATIVE_DIRECTION;
     if (activeDirective) {
       systemPrompt += ` The channel owner has an active creative directive that takes priority over general suggestions: "${activeDirective}". Your suggestions must primarily serve this directive — check the existing videos list to see what's already been covered under it, and propose the logical next step, not a repeat or an unrelated idea. Only fall back to general channel-growth suggestions if the directive appears fully satisfied by existing content.`;
+    }
+    if (pendingPromises.length) {
+      const promiseList = pendingPromises
+        .map((p) => `- id "${p.videoId}"${p.videoTitle ? ` (from "${p.videoTitle}")` : ''}: ${p.promise}`)
+        .join('\n');
+      systemPrompt += ` The following videos on this channel made an explicit promise to cover something in a future video, not yet fulfilled — treat fulfilling these as HIGH priority in your suggestions, above generic growth ideas (unless a directive is active, which still takes precedence): ${promiseList}. When a suggestion fulfills one of these, set a new field fulfills_promise_video_id to that video's id.`;
     }
     if (existingPlaylists.length) {
       const playlistList = existingPlaylists

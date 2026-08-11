@@ -186,6 +186,16 @@ ${continuityNote}`;
       ? `what the voiceover says for this scene — write exactly ONE natural, complete sentence per scene, never more than one, no exceptions. If a thought naturally needs two sentences, split it into two separate scenes instead of combining them. The sentence must still sound natural and unhurried, suited for a language-learning listener, never fragmented or artificially clipped mid-thought. ${noDashesInstruction} Written in ${language}`
       : `what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters. ${noDashesInstruction} Written in ${language}`;
 
+    // Only asked for on the chunk that actually ends the video — a top-level field, not something
+    // buried inside a scene's narration, so the client can read it directly without parsing prose.
+    // Feeds ChannelDashboardStep.jsx/App.jsx (saved onto the video record) and, later,
+    // api/program-manager.js's pendingPromises context, so a promise made in one video's CTA can
+    // actually surface as a high-priority suggestion for the next one.
+    const promisedFollowUpField = isVeryLastChunk
+      ? `,
+  "promised_follow_up": "if the closing call-to-action promises a specific future topic (e.g. 'next time we'll cover...'), a short description of that topic; null if the CTA is generic (e.g. just 'subscribe for more')"`
+      : '';
+
     // The output-format half — field names, types, and hard correctness rules the client's parsing
     // depends on. NEVER influenced by creativeOverride, in any case. static_background's schema has
     // no image_beats field at all — there is nothing to draw for this content type.
@@ -196,7 +206,7 @@ JSON schema:
 {
   "scenes": [exactly ${sceneCount} objects: {
     "narration": "${narrationFieldDescription}"
-  }]
+  }]${promisedFollowUpField}
 }
 
 Rules:
@@ -214,7 +224,7 @@ JSON schema:
       "character_id": string | null,
       "variant_label": string | null
     }]
-  }]
+  }]${promisedFollowUpField}
 }
 
 Rules:

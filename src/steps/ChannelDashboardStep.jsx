@@ -4,6 +4,7 @@ import {
   listVideosByChannel,
   deleteVideo,
   saveVideo,
+  loadVideo,
   loadChannel,
   listChannels,
   saveChannel,
@@ -13,6 +14,7 @@ import {
   savePromptVersion,
   listPromptVersions,
   recordCost,
+  listPendingPromises,
 } from '../lib/db';
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
@@ -302,6 +304,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
       // and returns [] rather than throwing, so this never blocks getting suggestions.
       const existingPlaylists = await listChannelPlaylists(channel);
+      const pendingPromises = await listPendingPromises(channel.id).catch((err) => {
+        console.error('[ChannelDashboardStep] failed to load pending promises', err);
+        return [];
+      });
       const res = await fetch('/api/program-manager', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -313,6 +319,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           refinement: refinementText || '',
           creativeOverride: channel.prompt_overrides?.programManager || null,
           existingPlaylists,
+          pendingPromises,
           // A full regeneration must not resurface ideas already explicitly dismissed as
           // "not interested" (see dismissSuggestion below).
           avoidTitles: channel.dismissed_suggestions || [],
@@ -342,6 +349,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     setAwaitingReplacement(true);
     try {
       const existingPlaylists = await listChannelPlaylists(baseChannel);
+      const pendingPromises = await listPendingPromises(baseChannel.id).catch((err) => {
+        console.error('[ChannelDashboardStep] failed to load pending promises', err);
+        return [];
+      });
       const remainingTitles = (baseChannel.lastSuggestions?.suggestions || []).map((s) => s.title).filter(Boolean);
       const existingVideoTitles = (videos || []).map((v) => v.displayTitle || v.topic || '').filter(Boolean);
       const avoidTitles = [...remainingTitles, ...existingVideoTitles, ...(baseChannel.dismissed_suggestions || [])];
@@ -356,6 +367,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           refinement: '',
           creativeOverride: baseChannel.prompt_overrides?.programManager || null,
           existingPlaylists,
+          pendingPromises,
           count: 1,
           avoidTitles,
         }),
@@ -391,6 +403,15 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   // even if the user navigates back here before the background replacement arrives.
   function startSuggestion(s, i) {
     onStartVideoFromSuggestion?.(s.title, s.series || null);
+    // This suggestion is api/program-manager.js's answer to a pending promise from an earlier
+    // video's closing CTA — mark that ORIGINAL video as fulfilled now, so it stops showing up in
+    // future pendingPromises lists. Fire-and-forget: loads the record fresh (not from local
+    // `videos` state, which may be stale) rather than blocking the rest of this click's flow on it.
+    if (s.fulfills_promise_video_id) {
+      loadVideo(s.fulfills_promise_video_id)
+        .then((v) => (v ? saveVideo({ ...v, promiseFulfilled: true }) : null))
+        .catch((err) => console.error('[ChannelDashboardStep] failed to mark promise as fulfilled', err));
+    }
     let latestChannel;
     setChannel((prev) => {
       if (!prev) return prev;

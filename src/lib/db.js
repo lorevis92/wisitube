@@ -42,8 +42,20 @@ export function stripBlobsForSync(value) {
 
 // ---- Videos ----
 // wisitube_videos columns: id, channel_id, created_at, updated_at, topic, settings (jsonb),
-// display_title, project (jsonb — everything else: titles, scenes, description, tags,
-// thumbnails, subtitles, references, characterBible, series… with Blobs stripped).
+// display_title, promised_follow_up, promise_fulfilled, project (jsonb — everything else: titles,
+// scenes, description, tags, thumbnails, subtitles, references, characterBible, series… with Blobs
+// stripped).
+//
+// promised_follow_up/promise_fulfilled are explicit top-level columns rather than folded into the
+// project jsonb blob — api/program-manager.js's pendingPromises query (ChannelDashboardStep.jsx)
+// needs to filter/select on these directly (WHERE promised_follow_up IS NOT NULL AND
+// promise_fulfilled = false), which a value buried inside jsonb can't do without a much less
+// convenient query. Required one-time setup in Supabase (no migration tooling in this repo — run
+// manually in the SQL editor once):
+//
+//   alter table public.wisitube_videos
+//     add column if not exists promised_follow_up text,
+//     add column if not exists promise_fulfilled boolean not null default false;
 
 function fromVideoRow(row) {
   return {
@@ -54,12 +66,14 @@ function fromVideoRow(row) {
     topic: row.topic || '',
     settings: row.settings || {},
     displayTitle: row.display_title || '',
+    promisedFollowUp: row.promised_follow_up || null,
+    promiseFulfilled: !!row.promise_fulfilled,
     ...(row.project || {}),
   };
 }
 
 export async function saveVideo(video) {
-  const { id, channelId, createdAt, topic, settings, displayTitle, ...project } = video;
+  const { id, channelId, createdAt, topic, settings, displayTitle, promisedFollowUp, promiseFulfilled, ...project } = video;
   const now = new Date().toISOString();
   const row = {
     id,
@@ -72,6 +86,8 @@ export async function saveVideo(video) {
     // project, or every autosave after that point tries to write a File into the jsonb column.
     settings: stripBlobsForSync(settings || {}),
     display_title: displayTitle || '',
+    promised_follow_up: promisedFollowUp || null,
+    promise_fulfilled: !!promiseFulfilled,
     project: stripBlobsForSync(project),
   };
   const data = unwrap(await supabase.from('wisitube_videos').upsert(row, { onConflict: 'id' }).select().single());
@@ -88,6 +104,23 @@ export async function listVideosByChannel(channelId) {
     await supabase.from('wisitube_videos').select('*').eq('channel_id', channelId).order('updated_at', { ascending: false })
   );
   return (data || []).map(fromVideoRow);
+}
+
+// Videos on this channel whose closing CTA promised a specific future topic that hasn't been
+// addressed by a later video yet — fed to api/program-manager.js as pendingPromises (see
+// ChannelDashboardStep.jsx/fullPipelineRecipe.js/staticBackgroundRecipe.js, every call site of that
+// endpoint) so the suggestion phase can treat fulfilling them as high priority. Already in the exact
+// shape that endpoint expects, so callers don't need their own mapping step.
+export async function listPendingPromises(channelId) {
+  const data = unwrap(
+    await supabase
+      .from('wisitube_videos')
+      .select('id, display_title, promised_follow_up')
+      .eq('channel_id', channelId)
+      .eq('promise_fulfilled', false)
+      .not('promised_follow_up', 'is', null)
+  );
+  return (data || []).map((row) => ({ videoId: row.id, videoTitle: row.display_title || '', promise: row.promised_follow_up }));
 }
 
 export async function deleteVideo(id) {

@@ -354,7 +354,7 @@ export default function App() {
     };
 
     try {
-      const scenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
+      const { scenes, promisedFollowUp } = await generateAllScenes(plan.outline, context, (soFar, total) => {
         if (generationRef.current !== generation) return; // abandoned — a different video took over
         setSceneProgress({ current: soFar.length, total });
         persistPartial(plan, soFar, id, createdAtVal, channelIdVal);
@@ -371,6 +371,12 @@ export default function App() {
         characterBible: plan.characterBible,
         scenes: buildScenesFromRaw(scenes, settings.contentType === 'static_background'),
         series: settings.series || null,
+        // Whatever the closing CTA promised for a future video (see api/generate-scenes.js's
+        // promised_follow_up field) — null when the CTA was generic. Feeds
+        // api/program-manager.js's pendingPromises context (ChannelDashboardStep.jsx) once this
+        // video is saved, and is cleared to fulfilled (not this field itself) when a later
+        // suggestion is started to address it — see ChannelDashboardStep.jsx's fulfillPromise.
+        promisedFollowUp: promisedFollowUp || null,
         ...(settings.contentType === 'static_background'
           ? { staticBackground: plan.staticBackground, staticTextStyle: plan.staticTextStyle, ...(plan.thumbnailStoragePath ? { thumbnailStoragePath: plan.thumbnailStoragePath } : {}) }
           : {}),
@@ -536,6 +542,12 @@ export default function App() {
       youtubeVideoId: record.youtubeVideoId || null,
       pendingImageBatches: record.pendingImageBatches || [],
       batchRecoveryCycles: record.batchRecoveryCycles || 0,
+      // Same reason as staticBackground/staticTextStyle above: without these, resuming this video
+      // and letting its own autosave fire again would silently reset promise_fulfilled back to
+      // false (saveVideo's default when the field is absent from the in-memory project), even if a
+      // later suggestion had already fulfilled it.
+      promisedFollowUp: record.promisedFollowUp || null,
+      promiseFulfilled: !!record.promiseFulfilled,
     });
 
     if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile

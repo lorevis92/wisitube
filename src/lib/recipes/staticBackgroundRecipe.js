@@ -12,7 +12,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, listVideosByChannel, getCostsByChannel } from '../db';
+import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel, listPendingPromises } from '../db';
 import { uploadMedia } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -176,6 +176,10 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
       const existingVideos = await listVideosByChannel(channelId);
       const existingPlaylists = await listChannelPlaylists(channel);
+      const pendingPromises = await listPendingPromises(channelId).catch((err) => {
+        console.error('[staticBackgroundRecipe] failed to load pending promises', err);
+        return [];
+      });
       const res = await fetch('/api/program-manager', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -188,6 +192,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           creativeOverride: channel.prompt_overrides?.programManager || null,
           activeDirective: channel.automation_directive || '',
           existingPlaylists,
+          pendingPromises,
           avoidTitles: channel.dismissed_suggestions || [],
         }),
       });
@@ -212,6 +217,15 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
     await logStep(channelId, videoId, 'video-record', 'success', 'created video record');
     report('video-record', 'Created video record');
+    // Automation's equivalent of ChannelDashboardStep.jsx's "Start this video" — this suggestion
+    // was the Content Program Manager's answer to a pending promise (see the suggestion phase's
+    // pendingPromises above), so mark the ORIGINAL video that made that promise as fulfilled now
+    // that a real video committing to it exists. Best-effort: never fails the cycle over this.
+    if (suggestion.fulfills_promise_video_id) {
+      loadVideo(suggestion.fulfills_promise_video_id)
+        .then((v) => (v ? saveVideo({ ...v, promiseFulfilled: true }) : null))
+        .catch((err) => console.error('[staticBackgroundRecipe] failed to mark promise as fulfilled', err));
+    }
   } catch (err) {
     await logStep(channelId, videoId, 'video-record', 'error', String(err?.message || err));
     throw err;
@@ -307,13 +321,13 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         creativeOverride: channel.prompt_overrides?.scenes || null,
       };
 
-      const rawScenes = await generateAllScenes(plan.outline, context, (soFar, total) => {
+      const { scenes: rawScenes, promisedFollowUp } = await generateAllScenes(plan.outline, context, (soFar, total) => {
         report('scenes', `${soFar.length}/${total} scenes written`);
         project = { ...project, scenes: buildScenesFromRaw(soFar) };
         persist().catch((err) => console.error('[staticBackgroundRecipe] partial scene save failed', err));
       });
 
-      project = { ...project, scenes: buildScenesFromRaw(rawScenes) };
+      project = { ...project, scenes: buildScenesFromRaw(rawScenes), promisedFollowUp: promisedFollowUp || null };
       await persist();
     });
     await logStep(channelId, videoId, 'scenes', 'success', `${project.scenes.length} scenes generated`);

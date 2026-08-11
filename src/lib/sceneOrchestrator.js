@@ -31,7 +31,9 @@ async function callGenerateScenes(payload) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Scene generation failed');
   if (!Array.isArray(data.scenes) || !data.scenes.length) throw new Error('Scene generation returned no scenes');
-  return data.scenes;
+  // promised_follow_up only ever appears on the isVeryLastChunk request/response (see
+  // api/generate-scenes.js's promisedFollowUpField) — undefined on every other chunk.
+  return { scenes: data.scenes, promisedFollowUp: data.promised_follow_up || null };
 }
 
 // A chapter with more scenes than the per-call cap becomes several chunks, the last one taking
@@ -53,6 +55,8 @@ function splitIntoChunkSizes(sceneCount) {
  * onProgress(scenesSoFar, totalScenes): called after every successful chunk with the full
  * accumulated scenes array so far — safe for the caller to both derive a progress count from
  * (scenesSoFar.length) and persist as partial, resumable state.
+ * Returns { scenes, promisedFollowUp } — promisedFollowUp is whatever the very last chunk declared
+ * (see api/generate-scenes.js's promised_follow_up field), or null when the closing CTA was generic.
  */
 export async function generateAllScenes(outline, context, onProgress) {
   const chapters = Array.isArray(outline) ? outline : [];
@@ -67,10 +71,11 @@ export async function generateAllScenes(outline, context, onProgress) {
 
   const allScenes = [];
   let previousTail = null;
+  let promisedFollowUp = null;
 
   for (let i = 0; i < jobs.length; i++) {
     const { chapter, size } = jobs[i];
-    const scenes = await withRetry(() => callGenerateScenes({
+    const { scenes, promisedFollowUp: chunkPromise } = await withRetry(() => callGenerateScenes({
       topic: context.topic,
       title: context.title,
       chapterTitle: chapter.title,
@@ -91,11 +96,12 @@ export async function generateAllScenes(outline, context, onProgress) {
 
     allScenes.push(...scenes);
     previousTail = scenes[scenes.length - 1]?.narration || previousTail;
+    if (chunkPromise) promisedFollowUp = chunkPromise;
 
     if (onProgress) onProgress(allScenes.slice(), totalScenes || allScenes.length);
   }
 
-  return allScenes;
+  return { scenes: allScenes, promisedFollowUp };
 }
 
 async function callGenerateImage(payload, signal) {
