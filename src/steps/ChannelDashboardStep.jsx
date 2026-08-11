@@ -247,6 +247,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     onChannelChange?.(updated);
   }
 
+  async function saveChannelIntro(value) {
+    if (!channel) return;
+    const updated = await saveChannel({ ...channel, automation_channel_intro: value });
+    setChannel(updated);
+    onChannelChange?.(updated);
+  }
+
   // Persists one stage's creative-direction override — an empty/whitespace-only value, or a value
   // that exactly matches the stage's default text (the textarea's un-overridden starting value,
   // now real editable text rather than a placeholder — see PROMPT_STAGES.map below), both collapse
@@ -779,6 +786,22 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={channel?.automation_channel_intro === true}
+                  onChange={(e) => saveChannelIntro(e.target.checked)}
+                />
+                Include channel intro at video start
+              </label>
+              <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+                When enabled, videos open with a brief welcome that introduces the channel's purpose (using your
+                Niche description) — useful for language-learning or narration-focused channels where listeners
+                benefit from knowing what to expect.
+              </div>
             </div>
 
             <div

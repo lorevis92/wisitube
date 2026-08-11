@@ -38,6 +38,10 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           generalNotes: (settings.generalNotes || '').trim(),
           references,
           creativeOverride: channel?.prompt_overrides?.outline || null,
+          // Per-video override (CreateStep.jsx's "Include channel intro at video start" checkbox,
+          // seeded from the channel default) falls back to the channel default itself when unset.
+          channelIntroEnabled: (settings.channelIntroEnabled !== undefined ? settings.channelIntroEnabled : channel?.automation_channel_intro) === true,
+          niche: channel?.niche || '',
         }),
       });
       const data = await res.json();

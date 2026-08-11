@@ -171,6 +171,11 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists automation_speech_speed numeric(3,2) not null default 1.0;
+//
+// Required one-time setup for the optional channel self-introduction at video start:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_channel_intro boolean not null default false;
 
 function fromChannelRow(row) {
   return {
@@ -237,6 +242,9 @@ function fromChannelRow(row) {
     // Defaults to true (opt-out, not opt-in): a channel that's never touched this toggle keeps the
     // pre-existing behavior of publishing every produced video automatically.
     automation_auto_publish: row.automation_auto_publish ?? true,
+    // Opt-in (default off): when true, videos open with a brief welcome introducing the channel's
+    // purpose, built from `niche` — see ChannelDashboardStep.jsx and api/generate-outline.js.
+    automation_channel_intro: !!row.automation_channel_intro,
   };
 }
 
@@ -289,6 +297,7 @@ export async function saveChannel(channel) {
     automation_daily_upload_count: channel.automation_daily_upload_count ?? 0,
     automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,
     automation_auto_publish: channel.automation_auto_publish ?? true,
+    automation_channel_intro: !!channel.automation_channel_intro,
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

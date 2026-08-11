@@ -83,7 +83,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
-    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground;
+    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground, channelIntroEnabled, niche;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -152,6 +152,12 @@ export default async function handler(req, res) {
         : [];
 
       creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+
+      // Channel self-introduction (ChannelDashboardStep.jsx's "Include channel intro at video
+      // start" toggle, per-video overridable from CreateStep.jsx) — only meaningful together with
+      // a non-empty niche description, since that's what the welcome is built from.
+      channelIntroEnabled = body.channelIntroEnabled === true;
+      niche = typeof body.niche === 'string' ? body.niche.trim() : '';
     } catch (err) {
       console.error('[generate-outline] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -205,12 +211,22 @@ Keep the character_bible consistent with these — if a reference photo's label 
       ? ''
       : `\n\nCRITICAL: character descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms (jawline, cheekbones, deep-set eyes) for stylized styles — they force the image model out of the style. For realistic styles (watercolor, comic), facial traits are allowed.`;
 
+    // Channel self-introduction (ChannelDashboardStep.jsx's "Include channel intro at video start"
+    // toggle) — only fires with a non-empty niche, since that's the raw material the welcome is
+    // built from. Targets the first chapter specifically (the outline's own HOOK chapter, per the
+    // creative direction above), asking it to open with the welcome before the hook itself — a fact
+    // about this specific video, so it's injected into `context`, always included regardless of
+    // which creative direction (default or a channel's override) is active.
+    const channelIntroNote = channelIntroEnabled && niche
+      ? `\n\nFor the first chapter: before diving into the story's hook, open with a brief, warm welcome (2-3 sentences) that identifies what this channel does, based on this description: "${niche}". Weave this naturally into the opening — it should feel like a genuine, friendly introduction, not a boilerplate disclaimer. If the niche description implies a language-learning purpose, frame it naturally (e.g. "told in clear, natural English so you can enjoy the story while practicing your listening"). Then transition smoothly into the hook.`
+      : '';
+
     // Facts about THIS specific video (title, angle, length, visual style) — always injected
     // regardless of which creative direction is active (default or a channel's override), since an
     // override changes HOW to write, never WHAT video this is.
     const context = `Video title: "${title}"
 Narrative angle: ${angle || '(none specified — infer a coherent angle from the title itself)'}
-${lengthInstruction}${styleTranslationNote}`;
+${lengthInstruction}${styleTranslationNote}${channelIntroNote}`;
 
     // total_scenes is either the fixed target (forced onto the response later regardless of what
     // the model returns) or, whenever freeSceneCount is true, whatever the model itself determines

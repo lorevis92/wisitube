@@ -255,6 +255,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           generalNotes: '',
           references: [],
           creativeOverride: channel.prompt_overrides?.outline || null,
+          channelIntroEnabled: channel.automation_channel_intro === true,
+          niche: channel.niche || '',
         }),
       });
       const outlineData = await res.json();
@@ -319,6 +321,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         characterBible: plan.characterBible,
         references: [],
         creativeOverride: channel.prompt_overrides?.scenes || null,
+        channelIntroEnabled: channel.automation_channel_intro === true,
+        niche: channel.niche || '',
       };
 
       const { scenes: rawScenes, promisedFollowUp } = await generateAllScenes(plan.outline, context, (soFar, total) => {

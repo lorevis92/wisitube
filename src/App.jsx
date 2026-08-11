@@ -351,6 +351,10 @@ export default function App() {
       characterBible: plan.characterBible,
       references: plan.references.map((r) => ({ id: r.id, label: r.label })),
       creativeOverride: currentChannel?.prompt_overrides?.scenes || null,
+      // Same fallback as TitleSelectStep.jsx's own generate-outline call — per-video override falls
+      // back to the channel default when unset.
+      channelIntroEnabled: (settings.channelIntroEnabled !== undefined ? settings.channelIntroEnabled : currentChannel?.automation_channel_intro) === true,
+      niche: currentChannel?.niche || '',
     };
 
     try {

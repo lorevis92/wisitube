@@ -51,7 +51,7 @@ function splitIntoChunkSizes(sceneCount) {
 
 /**
  * outline: [{ id, title, summary, scene_count }]
- * context: { topic, title, language, style, format, imageProvider, contentType, characterBible, references, creativeOverride }
+ * context: { topic, title, language, style, format, imageProvider, contentType, characterBible, references, creativeOverride, channelIntroEnabled, niche }
  * onProgress(scenesSoFar, totalScenes): called after every successful chunk with the full
  * accumulated scenes array so far — safe for the caller to both derive a progress count from
  * (scenesSoFar.length) and persist as partial, resumable state.
@@ -89,6 +89,8 @@ export async function generateAllScenes(outline, context, onProgress) {
       characterBible: context.characterBible,
       references: context.references,
       creativeOverride: context.creativeOverride,
+      channelIntroEnabled: context.channelIntroEnabled,
+      niche: context.niche,
       previousTail,
       isVeryFirstChunk: i === 0,
       isVeryLastChunk: i === jobs.length - 1,

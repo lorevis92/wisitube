@@ -51,6 +51,7 @@ export default async function handler(req, res) {
     // Phase 1: validate and sanitize the request body.
     let topic, title, chapterTitle, chapterSummary, sceneCount, language, style, imageProvider, vertical;
     let characterBible, refs, previousTail, isVeryFirstChunk, isVeryLastChunk, creativeOverride, contentType, isStaticBackground;
+    let channelIntroEnabled, niche;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -97,6 +98,12 @@ export default async function handler(req, res) {
       isVeryFirstChunk = !!body.isVeryFirstChunk;
       isVeryLastChunk = !!body.isVeryLastChunk;
       creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+
+      // Same channel self-introduction toggle as api/generate-outline.js — here it only feeds the
+      // optional mid-video echo below (the welcome itself was already written into the first
+      // chapter's outline by that earlier stage).
+      channelIntroEnabled = body.channelIntroEnabled === true;
+      niche = typeof body.niche === 'string' ? body.niche.trim() : '';
     } catch (err) {
       console.error('[generate-scenes] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -153,6 +160,17 @@ For EVERY image beat where one of these characters is visibly present — as the
       ? `This chunk ends the entire video — before the closing call-to-action, include 1-2 scenes that calmly recap the single key concept or insight this video delivered, plus a brief callback to the pivotal moment of the story, phrased as a natural continuation of the narration, not a bullet list or a mechanical summary. It should feel like a settled, satisfying close that reinforces what the listener just learned, then move into the call-to-action (subscribe/watch next).`
       : `This chunk ends the entire video — before the final call-to-action, include 1-2 scenes that briefly recap the single key concept or insight this video delivered, plus a short callback to the pivotal/turning-point moment of the story, phrased naturally as part of the narration flow, not as a bullet list. It should feel like a satisfying close that reinforces what the viewer just learned or experienced, not a mechanical summary, then transition into the call-to-action (subscribe/watch next).`;
 
+    // Optional, occasional callback to the channel's own purpose (ChannelDashboardStep.jsx's
+    // "Include channel intro at video start" toggle) — deliberately left to the writer's own
+    // judgment per chunk rather than forced onto a specific chapter picked by this endpoint: only
+    // the model, writing the actual narration, can tell whether THIS chunk genuinely has a strong
+    // hook or surprising turn worth the callback. Never applied to the very first or very last
+    // chunk — those already carry the full welcome (outline stage) and the closing recap above.
+    const midVideoEchoNote =
+      channelIntroEnabled && niche && !isVeryFirstChunk && !isVeryLastChunk
+        ? `If this chapter contains a particularly strong hook or surprising turn, you may briefly and naturally echo the channel's purpose ("${niche}") in 1 short sentence — only if it fits naturally, never forced.`
+        : '';
+
     const continuityNote = [
       `You are writing scenes 1-${sceneCount} of the chapter '${chapterTitle}': ${chapterSummary}.`,
       previousTail
@@ -160,6 +178,7 @@ For EVERY image beat where one of these characters is visibly present — as the
         : '',
       isVeryFirstChunk ? 'This chunk opens the entire video — it must open with the strongest hook.' : '',
       isVeryLastChunk ? closingRecapNote : '',
+      midVideoEchoNote,
     ]
       .filter(Boolean)
       .join(' ');

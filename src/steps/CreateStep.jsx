@@ -66,6 +66,15 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isStaticBackground, channel?.id]);
 
+  // Seeds this video's channel-intro toggle from the channel's own default exactly once — same
+  // seed-once guard as the staticBackground effect above, so a later per-video override here is
+  // never silently clobbered by a channel change.
+  useEffect(() => {
+    if (settings.channelIntroEnabled !== undefined || !channel) return;
+    set('channelIntroEnabled', channel.automation_channel_intro === true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channel?.id]);
+
   // Preview for the background image — a freshly picked/generated Blob (not yet uploaded, no
   // videoId exists yet at this step) previews directly via an object URL; an untouched channel
   // default (already durable at its own Storage path) previews via a short-lived signed URL, same
@@ -442,6 +451,23 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
                 </option>
               ))}
             </select>
+          </div>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 16 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={
+                (settings.channelIntroEnabled !== undefined ? settings.channelIntroEnabled : channel?.automation_channel_intro) === true
+              }
+              onChange={(e) => set('channelIntroEnabled', e.target.checked)}
+            />
+            Include channel intro at video start
+          </label>
+          <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+            Pre-filled from this channel's default — override it for just this video here. When enabled, the video
+            opens with a brief welcome that introduces the channel's purpose (using its Niche description).
           </div>
         </div>
 
