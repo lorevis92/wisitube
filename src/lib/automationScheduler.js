@@ -185,6 +185,19 @@ export async function forceUnlock() {
 
 let timerId = null;
 
+// True once a tick has seen the configured interval elapse while another cycle still held the
+// lock — from that point on, every 60s tick retries regardless of the interval timer, instead of
+// waiting for intervalMs to elapse AGAIN from the same (by-then-stale) lastRunStartedAt, which
+// would mean sitting silent for up to the full configured interval even after the blocking cycle
+// had long since freed the lock. This used to happen implicitly, as a side effect of a blocked
+// runManagedCycle attempt never writing lastRunStartedAt (so intervalElapsed just happened to stay
+// true forever once it first became true) — correct in practice, but accidental: nothing made that
+// retry-every-tick behavior an explicit, intentional state, and a future change to runManagedCycle's
+// blocked branch could silently break it. This flag makes it explicit instead. Reset to false the
+// moment a cycle actually starts (or the scheduler is disabled), so the ordinary interval wait
+// resumes cleanly from the new lastRunStartedAt runManagedCycle just wrote.
+let awaitingLockRelease = false;
+
 async function tick({ userId, onUpdate, onProgress, onCycleEnd }) {
   let settings;
   try {
@@ -193,19 +206,30 @@ async function tick({ userId, onUpdate, onProgress, onCycleEnd }) {
     console.error('[automationScheduler] failed to read scheduler settings', err);
     return;
   }
-  if (!settings.enabled) return;
+  if (!settings.enabled) {
+    awaitingLockRelease = false;
+    return;
+  }
 
-  const due = !settings.lastRunStartedAt || Date.now() - settings.lastRunStartedAt >= intervalMs(settings);
-  if (!due) return;
+  const intervalElapsed = !settings.lastRunStartedAt || Date.now() - settings.lastRunStartedAt >= intervalMs(settings);
+
+  // Neither due on the ordinary interval schedule NOR mid-retry after an earlier block this cycle
+  // (see awaitingLockRelease above) — genuinely nothing to do yet.
+  if (!intervalElapsed && !awaitingLockRelease) return;
 
   const result = await runManagedCycle({ userId, onUpdate, onProgress });
   if (!result.started) {
+    // The interval has elapsed (or we were already retrying) and the lock is still held elsewhere —
+    // keep retrying every tick until it frees up, ignoring the interval timer from here on (see
+    // awaitingLockRelease's header comment).
+    awaitingLockRelease = true;
     // A global, not per-channel, diagnostic — see db.js's required "alter column channel_id drop
     // not null" note on wisitube_automation_log.
     await logAutomationStep(null, null, 'scheduler', 'blocked', result.reason).catch((err) =>
       console.error('[automationScheduler] failed to log a blocked scheduler tick', err)
     );
   } else {
+    awaitingLockRelease = false;
     // Only clear the mirror for a cycle that actually ran (and was therefore the one being
     // mirrored) — a blocked attempt never touched onProgress/currentAutomationRun in the first
     // place, so there's nothing of this run's to clear (and doing so anyway could wipe out a
