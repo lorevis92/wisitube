@@ -230,6 +230,31 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     }
   }
 
+  // Manual upload counterpart to generateBackgroundImage above — same immediate-upload-to-Storage
+  // behavior as ChannelDashboardStep.jsx's own handleUploadStaticBgImage (a real videoId already
+  // exists at this step, unlike CreateStep.jsx's version of this control, which has no video yet and
+  // so has to defer the actual Storage upload until one is created).
+  async function uploadBackgroundImage(file) {
+    setBgBusy(true);
+    setBgError('');
+    try {
+      const url = URL.createObjectURL(file);
+      const imageStoragePath = await uploadMedia(userId, videoId, 'static-background', 'bg', file);
+      setProject((p) => ({ ...p, staticBackground: { ...(p.staticBackground || {}), type: 'image', imageStoragePath, url, blob: file } }));
+    } catch (err) {
+      setBgError('Upload failed: ' + String(err.message || err));
+    } finally {
+      setBgBusy(false);
+    }
+  }
+
+  function handleUploadBackgroundImage(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow picking the same file again later
+    if (!file) return;
+    uploadBackgroundImage(file);
+  }
+
   // Standalone confirmation for the dedicated "Generate background" button — a plain window.confirm
   // (same pattern as other one-off paid actions in this codebase, e.g. ChannelDashboardStep.jsx's
   // channel/video deletions) rather than the shared costConfirm dialog, since that dialog's own
@@ -723,7 +748,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               onClick={() => setBackgroundType('image')}
               style={project.staticBackground?.type === 'image' ? btnPrimary : btnGhost}
             >
-              Generated image
+              Image
             </button>
           </div>
 
@@ -736,6 +761,17 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                   style={{ width: '100%', maxWidth: 320, borderRadius: 4, border: `1px solid ${T.border}`, marginBottom: 8, display: 'block' }}
                 />
               )}
+              <label style={{ ...btnGhost, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', opacity: bgBusy ? 0.6 : 1 }}>
+                Upload image
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleUploadBackgroundImage}
+                  disabled={bgBusy}
+                  style={{ display: 'none' }}
+                />
+              </label>
+              <div style={{ ...mono, fontSize: 10, color: T.textMuted, margin: '8px 0' }}>— or —</div>
               <input
                 value={bgPrompt}
                 onChange={(e) => setBgPrompt(e.target.value)}
@@ -747,7 +783,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                 disabled={bgBusy}
                 style={{ ...btnPrimary, marginTop: 8, opacity: bgBusy ? 0.6 : 1 }}
               >
-                {bgBusy ? 'Generating…' : project.staticBackground?.imageStoragePath ? '↻ Regenerate background' : 'Generate background'}
+                {bgBusy ? 'Working…' : project.staticBackground?.imageStoragePath ? '↻ Regenerate background' : 'Generate background'}
               </button>
               {bgError && <div style={{ marginTop: 8, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{bgError}</div>}
             </div>
