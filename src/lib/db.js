@@ -319,6 +319,46 @@ export async function deleteChannel(id) {
   unwrap(await supabase.from('wisitube_channels').delete().eq('id', id));
 }
 
+// Every video, across every one of this user's channels, whose project.pendingImageBatches (see
+// geminiBatchImageEngine.js's "submit" half / batchResumption.js's "resume" half) still holds at
+// least one entry — i.e. still waiting on Gemini Batch jobs, independent of whether an automation
+// cycle happens to be running right now (AutomationStep.jsx's persistent "Batches in flight" panel).
+// pendingImageBatches lives inside the jsonb `project` column, and filtering on a jsonb array's
+// length isn't a convenient PostgREST query — this fetches each channel's videos (already
+// RLS-scoped to the caller) and filters client-side instead, same as this file's other
+// read-then-filter helpers. userId isn't used for the query itself (RLS already scopes
+// listChannels/listVideosByChannel to the caller) — accepted anyway so the call site can pass it
+// explicitly rather than relying on that being obvious.
+export async function listVideosWithPendingBatches(userId) {
+  const channels = await listChannels();
+  const results = [];
+  for (const channel of channels) {
+    // eslint-disable-next-line no-await-in-loop
+    const videos = await listVideosByChannel(channel.id);
+    for (const v of videos) {
+      const pending = Array.isArray(v.pendingImageBatches) ? v.pendingImageBatches : [];
+      if (pending.length === 0) continue;
+      const readyImages = (v.scenes || []).reduce((n, s) => n + (s.images || []).filter((im) => im.status === 'ready').length, 0);
+      const totalImages = (v.scenes || []).reduce((n, s) => n + (s.images || []).length, 0);
+      const oldestSubmittedAt = pending.reduce(
+        (min, entry) => (entry.submittedAt && (min === null || entry.submittedAt < min) ? entry.submittedAt : min),
+        null
+      );
+      results.push({
+        videoId: v.id,
+        channelId: channel.id,
+        channelName: channel.name || 'Untitled channel',
+        displayTitle: v.displayTitle || v.topic || 'Untitled video',
+        readyImages,
+        totalImages,
+        oldestSubmittedAt,
+        pendingBatchCount: pending.length,
+      });
+    }
+  }
+  return results;
+}
+
 // ---- YouTube per-channel connection (see api/youtube.js, action=callback, which is the only source of
 // this data — there's no server-side storage, so the refresh token round-trips through the OAuth
 // redirect's query string and lands here on the client). ----
@@ -583,6 +623,25 @@ export async function saveSchedulerSettings(patch) {
   if ('currentlyRunning' in patch) row.currently_running = !!patch.currentlyRunning;
   if ('currentRunStartedAt' in patch)
     row.current_run_started_at = patch.currentRunStartedAt ? new Date(patch.currentRunStartedAt).toISOString() : null;
+
+  // TEMPORARY diagnostic — remove once the RLS 403 on this upsert is root-caused. Re-reads the
+  // session (not the one captured above) right at the point of the request, so this reflects
+  // exactly what the client believes it has THIS instant, not a few lines earlier.
+  const { data: { session: debugSession }, error: debugSessionError } = await supabase.auth.getSession();
+  console.warn('[scheduler-rls-debug] session at upsert time:', {
+    hasSession: !!debugSession,
+    userId: debugSession?.user?.id ?? null,
+    hasAccessToken: !!debugSession?.access_token,
+    accessTokenLength: debugSession?.access_token?.length ?? null,
+    expiresAt: debugSession?.expires_at ?? null,
+    expiresAtReadable: debugSession?.expires_at ? new Date(debugSession.expires_at * 1000).toISOString() : null,
+    nowReadable: new Date().toISOString(),
+    isExpired: debugSession?.expires_at ? debugSession.expires_at * 1000 < Date.now() : null,
+    tokenType: debugSession?.token_type ?? null,
+    getSessionError: debugSessionError ? String(debugSessionError.message || debugSessionError) : null,
+  });
+  console.warn('[scheduler-rls-debug] row about to be upserted:', row);
+
   const data = unwrap(await supabase.from('wisitube_scheduler_settings').upsert(row, { onConflict: 'user_id' }).select().single());
   return fromSchedulerRow(data);
 }
