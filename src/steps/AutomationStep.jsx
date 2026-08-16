@@ -215,11 +215,19 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         const s = await getSchedulerSettings();
         if (cancelled) return;
         setSchedulerCycleRunning(s.currentlyRunning);
-        // Keeps currentRunStartedAt fresh too, not just the enabled/interval fields loaded once on
-        // mount above — the "cycle currently running" indicator's elapsed-time display and the
-        // Force unlock button below both need this to stay live while a cycle (or a stuck lock) sits
-        // there for a while.
-        setSchedulerSettings((prev) => (prev ? { ...prev, currentlyRunning: s.currentlyRunning, currentRunStartedAt: s.currentRunStartedAt } : s));
+        // Keeps currentRunStartedAt/lastRunStartedAt fresh too, not just the enabled/interval
+        // fields loaded once on mount above — the "cycle currently running" indicator's elapsed-time
+        // display and the Force unlock button below both need currentRunStartedAt to stay live while
+        // a cycle (or a stuck lock) sits there for a while, and "Next check" needs lastRunStartedAt
+        // to stay current even when a cycle was started by the scheduler's own tick (or a manual run
+        // from a different tab) rather than this component's own "Run now"/"Run real cycle" click,
+        // which refreshes it directly the moment runManagedCycle resolves (see runCycle) — this poll
+        // is the fallback for every OTHER trigger path.
+        setSchedulerSettings((prev) =>
+          prev
+            ? { ...prev, currentlyRunning: s.currentlyRunning, currentRunStartedAt: s.currentRunStartedAt, lastRunStartedAt: s.lastRunStartedAt }
+            : s
+        );
       } catch (err) {
         console.error('[AutomationStep] failed to poll scheduler running state', err);
       }
@@ -420,6 +428,16 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         console.warn('[run-cycle-debug] runManagedCycle() returned', result);
         didStart = result.started;
         if (!result.started) window.alert(`Could not start a real cycle right now: ${result.reason}`);
+        // The 15s poll effect above only merges currentlyRunning/currentRunStartedAt, not
+        // lastRunStartedAt — without this, "Next check" would keep showing a countdown computed
+        // from the PREVIOUS run's lastRunStartedAt right after this one just wrote a new one
+        // (started successfully) or left it untouched (blocked), instead of reflecting reality
+        // immediately.
+        try {
+          setSchedulerSettings(await getSchedulerSettings());
+        } catch (err) {
+          console.error('[AutomationStep] failed to refresh scheduler settings after a cycle attempt', err);
+        }
       }
     } catch (err) {
       console.warn('[run-cycle-debug] runCycle() caught an exception — SILENTLY, only console.error below, no user-visible feedback', err);
@@ -678,6 +696,26 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
               </option>
             ))}
           </select>
+        </div>
+
+        <div style={{ marginTop: 14 }}>
+          {schedulerCycleRunning ? (
+            <button
+              disabled
+              title="Another cycle (started by the scheduler or a manual run, in this tab or another) is already using the shared lock"
+              style={{ ...btnGhost, opacity: 0.6, cursor: 'default' }}
+            >
+              ⏳ Cycle already running
+            </button>
+          ) : (
+            <button
+              onClick={runRealCycle}
+              disabled={running || channels.length === 0}
+              style={{ ...btnPrimary, opacity: running || channels.length === 0 ? 0.6 : 1 }}
+            >
+              ▶ Run now
+            </button>
+          )}
         </div>
 
         {schedulerSettings && (
