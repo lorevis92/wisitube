@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listChannels, saveChannel, listAutomationLog, getSchedulerSettings, saveSchedulerSettings } from '../lib/db';
 import { runAutomationCycle } from '../lib/automationEngine';
-import { runManagedCycle, requestStop, applyProgressToRun } from '../lib/automationScheduler';
+import { runManagedCycle, requestStop, applyProgressToRun, forceUnlock } from '../lib/automationScheduler';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
@@ -194,7 +194,13 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
     async function poll() {
       try {
         const s = await getSchedulerSettings();
-        if (!cancelled) setSchedulerCycleRunning(s.currentlyRunning);
+        if (cancelled) return;
+        setSchedulerCycleRunning(s.currentlyRunning);
+        // Keeps currentRunStartedAt fresh too, not just the enabled/interval fields loaded once on
+        // mount above — the "cycle currently running" indicator's elapsed-time display and the
+        // Force unlock button below both need this to stay live while a cycle (or a stuck lock) sits
+        // there for a while.
+        setSchedulerSettings((prev) => (prev ? { ...prev, currentlyRunning: s.currentlyRunning, currentRunStartedAt: s.currentRunStartedAt } : s));
       } catch (err) {
         console.error('[AutomationStep] failed to poll scheduler running state', err);
       }
@@ -206,6 +212,24 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       clearInterval(id);
     };
   }, []);
+
+  // Manual escape hatch for a lock that's stuck true with no cycle actually running anywhere (see
+  // automationScheduler.js's forceUnlock and its header comment on the residual case this covers) —
+  // resets currently_running directly, bypassing runManagedCycle entirely, since the whole point is
+  // that no in-memory runManagedCycle call may be left anywhere to release it normally.
+  async function forceUnlockScheduler() {
+    const ok = window.confirm(
+      'Force-unlock the scheduler?\n\nOnly do this if you are certain no cycle is genuinely running right now (in this tab, another tab, or another device) — forcing the lock open while one actually is risks two cycles running concurrently.'
+    );
+    if (!ok) return;
+    try {
+      const updated = await forceUnlock();
+      setSchedulerSettings(updated);
+      setSchedulerCycleRunning(updated.currentlyRunning);
+    } catch (err) {
+      window.alert(`Force unlock failed: ${String(err.message || err)}`);
+    }
+  }
 
   function saveSchedulerPatch(patch) {
     setSchedulerSettings((s) => ({ ...s, ...patch }));
@@ -511,7 +535,17 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
               </span>
             )}
             {schedulerCycleRunning && !running && (
-              <span style={{ color: T.yellow }}>⏳ A cycle is currently running in the background (started by the scheduler).</span>
+              <span style={{ color: T.yellow, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                ⏳ A cycle is currently running in the background
+                {schedulerSettings.currentRunStartedAt ? ` — locked ${timeAgo(schedulerSettings.currentRunStartedAt)}` : ''}.
+                <button
+                  onClick={forceUnlockScheduler}
+                  title="Only use this if you're certain no cycle is genuinely running right now — otherwise this risks a concurrent double-run"
+                  style={{ ...btnGhost, padding: '4px 10px', fontSize: 10, color: T.primary, borderColor: T.primaryBorder }}
+                >
+                  🔓 Force unlock
+                </button>
+              </span>
             )}
           </div>
         )}

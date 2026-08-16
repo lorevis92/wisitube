@@ -84,9 +84,9 @@ let claimedLocally = false;
  * shown from a blocked manual click — understands immediately why nothing happened, without having
  * to go dig through automation_daily_upload_count or query anything else themselves.
  *
- * Returns { started: true } once runAutomationCycle has finished (successfully, with an error, or
- * stopped) — the lock is always released in a finally, so an uncaught exception can never leave
- * currently_running stuck true forever.
+ * Returns { started: true } once runAutomationCycle has finished (successfully, with an error, an
+ * inProgress:true "still waiting on Gemini Batch" result, or stopped) — the lock is always released
+ * in a finally, so an uncaught exception can never leave currently_running stuck true forever.
  */
 export async function runManagedCycle({ userId, onUpdate, onProgress }) {
   if (claimedLocally) {
@@ -115,27 +115,56 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
     };
   }
 
+  // BUG FIX: claimedLocally = true and the initial "acquire the lock" write used to sit BEFORE this
+  // try/finally. If that write itself threw (a network drop, an expired session, anything) the
+  // exception propagated straight out of runManagedCycle — claimedLocally was left stuck true for
+  // the rest of this tab's lifetime (every later call, from the scheduler's own tick or a manual
+  // "Run real cycle" click, would immediately hit the branch above and return its hardcoded "a
+  // moment ago" message forever, regardless of how much real time had actually passed — that's
+  // exactly the stale-message symptom this fix addresses), and if the write had actually landed
+  // server-side despite the client-side failure (an ambiguous "committed but response lost" case),
+  // currently_running was left stuck true in the database too, since runAutomationCycle — and the
+  // finally that releases the DB lock — was never even reached. Wrapping the acquire itself in this
+  // try/finally guarantees claimedLocally always gets released, whatever fails.
   claimedLocally = true;
-  stopRequested = false;
-  const startedAt = Date.now();
-  await saveSchedulerSettings({ currentlyRunning: true, currentRunStartedAt: startedAt, lastRunStartedAt: startedAt });
   try {
-    await runAutomationCycle({
-      userId,
-      dryRun: false,
-      onUpdate,
-      onProgress,
-      shouldStop: () => stopRequested,
-    });
-    return { started: true };
+    stopRequested = false;
+    const startedAt = Date.now();
+    await saveSchedulerSettings({ currentlyRunning: true, currentRunStartedAt: startedAt, lastRunStartedAt: startedAt });
+    try {
+      await runAutomationCycle({
+        userId,
+        dryRun: false,
+        onUpdate,
+        onProgress,
+        shouldStop: () => stopRequested,
+      });
+      return { started: true };
+    } finally {
+      // Runs whether runAutomationCycle resolved normally (success, a per-channel error already
+      // caught internally, or a video left inProgress:true awaiting Gemini Batch — none of these are
+      // exceptions, they're all just different normal return paths) or, in the unlikely case
+      // something above it truly threw, on that exception too — inProgress:true never bypasses this.
+      try {
+        await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
+      } catch (err) {
+        console.error('[automationScheduler] failed to release currently_running lock', err);
+      }
+    }
   } finally {
     claimedLocally = false;
-    try {
-      await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
-    } catch (err) {
-      console.error('[automationScheduler] failed to release currently_running lock', err);
-    }
   }
+}
+
+// Manual escape hatch for a lock that's genuinely stuck (see AutomationStep.jsx's "Force unlock"
+// button) — only ever needed for the residual case the fix above can't fully close: the acquire
+// write's response was lost after it had already committed server-side, so the database is left
+// showing currently_running=true with no in-memory runManagedCycle call left anywhere to release it
+// (including in another tab/session entirely, which this module's own claimedLocally guard can't
+// see at all). Resets the DB lock only — never touches claimedLocally, which is scoped to whichever
+// tab actually holds it, if any.
+export async function forceUnlock() {
+  await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
 }
 
 let timerId = null;
