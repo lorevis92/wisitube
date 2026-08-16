@@ -288,8 +288,16 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   }
 
   async function runCycle(dryRun) {
-    if (running || !channels || channels.length === 0) return;
-    if (!dryRun && schedulerCycleRunning) return; // Run button below is disabled for this too — belt and suspenders
+    console.warn('[run-cycle-debug] runCycle() called', { dryRun, running, channelsLen: channels?.length, schedulerCycleRunning });
+    if (running || !channels || channels.length === 0) {
+      console.warn('[run-cycle-debug] runCycle() bailing out — running/channels guard', { running, channelsLen: channels?.length });
+      return;
+    }
+    if (!dryRun && schedulerCycleRunning) {
+      console.warn('[run-cycle-debug] runCycle() bailing out SILENTLY — schedulerCycleRunning guard fired (no alert, no log row!)', { schedulerCycleRunning });
+      return; // Run button below is disabled for this too — belt and suspenders
+    }
+    console.warn('[run-cycle-debug] runCycle() guards passed, proceeding');
     stopRequestedRef.current = false;
     setRunning(true);
     setProgress(null);
@@ -307,17 +315,21 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
           shouldStop: () => stopRequestedRef.current,
         });
       } else {
+        console.warn('[run-cycle-debug] about to call runManagedCycle()');
         const result = await runManagedCycle({
           userId,
           onUpdate: (p) => setProgress(p),
           onProgress: applyProgressToGlobalRun,
         });
+        console.warn('[run-cycle-debug] runManagedCycle() returned', result);
         didStart = result.started;
         if (!result.started) window.alert(`Could not start a real cycle right now: ${result.reason}`);
       }
     } catch (err) {
+      console.warn('[run-cycle-debug] runCycle() caught an exception — SILENTLY, only console.error below, no user-visible feedback', err);
       console.error(`[AutomationStep] ${dryRun ? 'dry-run' : 'real'} cycle failed`, err);
     } finally {
+      console.warn('[run-cycle-debug] runCycle() finally block — didStart:', didStart);
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
@@ -338,6 +350,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
   function runRealCycle() {
     const ok = window.confirm('This will generate real content and publish to YouTube. Continue?');
+    console.warn('[run-cycle-debug] "Run real cycle" confirm popup result:', ok);
     if (!ok) return;
     runCycle(false);
   }

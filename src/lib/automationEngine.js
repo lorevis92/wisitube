@@ -165,13 +165,17 @@ const DRY_RUN_STEPS = [
  * ends the whole cycle without starting another channel.
  */
 export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onProgress, shouldStop = () => false }) {
+  console.warn('[run-cycle-debug] runAutomationCycle() entered', { dryRun });
   const allChannels = await listChannels();
+  console.warn('[run-cycle-debug] runAutomationCycle() listChannels() returned', allChannels.length, 'channels');
   const channels = allChannels.filter((c) => c.automation_enabled === true);
+  console.warn('[run-cycle-debug] runAutomationCycle()', channels.length, 'channels have automation_enabled === true');
 
   for (let i = 0; i < channels.length; i++) {
     if (shouldStop()) break;
 
     let channel = channels[i];
+    console.warn('[run-cycle-debug] runAutomationCycle() processing channel', i + 1, '/', channels.length, channel.id, channel.name);
     const report = (status) => onUpdate?.({ channelId: channel.id, channelName: channel.name, index: i, total: channels.length, status });
 
     try {
@@ -179,6 +183,7 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
 
       const recipe = getRecipeForContentType(channel.content_type);
       if (!recipe) {
+        console.warn('[run-cycle-debug] runAutomationCycle() no recipe for content_type — skipping channel', channel.content_type);
         await logStep(channel.id, null, 'recipe', 'skipped', `no recipe for content_type "${channel.content_type || '(none)'}"`);
         report('skipped');
         continue;
@@ -186,6 +191,7 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
 
       const { ok, reason } = canRunChannelToday(channel);
       if (!ok) {
+        console.warn('[run-cycle-debug] runAutomationCycle() canRunChannelToday() said no — skipping channel', reason);
         await logStep(channel.id, null, 'eligibility', 'skipped', reason);
         report('skipped');
         continue;
@@ -221,12 +227,18 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
           }
 
           onProgress?.({ channelId: channel.id, channelName: channel.name, step: 'starting', message: 'Starting run…' });
+          console.warn('[run-cycle-debug] runAutomationCycle() about to call recipe() — the first real generation call', {
+            channelId: channel.id,
+            contentType: channel.content_type,
+            recipeName: recipe.name,
+          });
           // eslint-disable-next-line no-await-in-loop
           const result = await recipe(channel, {
             userId,
             logStep,
             onProgress: (evt) => onProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
           });
+          console.warn('[run-cycle-debug] runAutomationCycle() recipe() returned', result);
 
           if (result.inProgress) {
             // Gemini Batch jobs are still running for this video (see fullPipelineRecipe.js's
@@ -285,9 +297,11 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
         report('done');
       }
     } catch (err) {
+      console.warn('[run-cycle-debug] runAutomationCycle() channel try/catch caught an exception', channel?.id, err);
       console.error('[automationEngine] channel cycle failed', channel?.id, err);
       await logStep(channel?.id, null, 'cycle', 'error', String(err?.message || err));
       report('error');
     }
   }
+  console.warn('[run-cycle-debug] runAutomationCycle() finished — all channels processed (or shouldStop() fired)');
 }

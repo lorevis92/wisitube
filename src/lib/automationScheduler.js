@@ -89,12 +89,20 @@ let claimedLocally = false;
  * in a finally, so an uncaught exception can never leave currently_running stuck true forever.
  */
 export async function runManagedCycle({ userId, onUpdate, onProgress }) {
+  console.warn('[run-cycle-debug] runManagedCycle() entered, claimedLocally =', claimedLocally);
   if (claimedLocally) {
+    console.warn('[run-cycle-debug] runManagedCycle() bailing out — claimedLocally is already true in this tab');
     return { started: false, reason: 'another cycle claimed the lock in this same browser tab a moment ago — try again shortly' };
   }
 
+  console.warn('[run-cycle-debug] runManagedCycle() about to call getSchedulerSettings()');
   const settings = await getSchedulerSettings();
+  console.warn('[run-cycle-debug] getSchedulerSettings() returned', settings);
   if (settings.currentlyRunning) {
+    console.warn('[run-cycle-debug] runManagedCycle() bailing out — DB says currently_running is already true', {
+      currentRunStartedAt: settings.currentRunStartedAt,
+      elapsedMs: settings.currentRunStartedAt ? Date.now() - settings.currentRunStartedAt : null,
+    });
     const startedAt = settings.currentRunStartedAt;
     const elapsed = startedAt ? formatElapsed(Date.now() - startedAt) : 'an unknown amount of time';
     const startedAtText = startedAt ? new Date(startedAt).toLocaleString() : 'an unknown time';
@@ -126,11 +134,14 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
   // currently_running was left stuck true in the database too, since runAutomationCycle — and the
   // finally that releases the DB lock — was never even reached. Wrapping the acquire itself in this
   // try/finally guarantees claimedLocally always gets released, whatever fails.
+  console.warn('[run-cycle-debug] runManagedCycle() acquiring lock — claimedLocally = true');
   claimedLocally = true;
   try {
     stopRequested = false;
     const startedAt = Date.now();
+    console.warn('[run-cycle-debug] runManagedCycle() about to write currently_running=true to DB');
     await saveSchedulerSettings({ currentlyRunning: true, currentRunStartedAt: startedAt, lastRunStartedAt: startedAt });
+    console.warn('[run-cycle-debug] runManagedCycle() wrote currently_running=true, about to call runAutomationCycle()');
     try {
       await runAutomationCycle({
         userId,
@@ -139,6 +150,7 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
         onProgress,
         shouldStop: () => stopRequested,
       });
+      console.warn('[run-cycle-debug] runManagedCycle() runAutomationCycle() resolved normally');
       return { started: true };
     } finally {
       // Runs whether runAutomationCycle resolved normally (success, a per-channel error already
@@ -146,12 +158,16 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
       // exceptions, they're all just different normal return paths) or, in the unlikely case
       // something above it truly threw, on that exception too — inProgress:true never bypasses this.
       try {
+        console.warn('[run-cycle-debug] runManagedCycle() finally — releasing DB lock (currently_running=false)');
         await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
+        console.warn('[run-cycle-debug] runManagedCycle() DB lock released');
       } catch (err) {
+        console.warn('[run-cycle-debug] runManagedCycle() FAILED to release DB lock — see error below', err);
         console.error('[automationScheduler] failed to release currently_running lock', err);
       }
     }
   } finally {
+    console.warn('[run-cycle-debug] runManagedCycle() outer finally — claimedLocally = false');
     claimedLocally = false;
   }
 }

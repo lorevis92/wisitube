@@ -555,6 +555,25 @@ export async function getSchedulerSettings() {
 // upsert's ON CONFLICT (user_id) target matches against on every later call, so this never needs to
 // read the current user's id at all.
 export async function saveSchedulerSettings(patch) {
+  // Same race mediaStorage.js's uploadMedia already had to close for Storage inserts: neither
+  // saveChannel nor saveVideo send an explicit user_id either (both rely on the column's own
+  // `default auth.uid()`, same as this table), so that alone isn't what's different here. What IS
+  // different is WHEN this call tends to fire — this is very often the very first WRITE-type
+  // Supabase call of a session (clicking "Run real cycle" moments after opening the tab, or the
+  // scheduler's own background tick), whereas saveChannel/saveVideo are almost always preceded by
+  // several other successful requests that have already forced the client's session to finish
+  // hydrating/refreshing. A SELECT (getSchedulerSettings, listChannels, …) racing the same window
+  // just silently returns an empty/default result under RLS — an upsert instead gets a hard 403
+  // ("new row violates row-level security policy"), because auth.uid() resolves to null server-side
+  // and the WITH CHECK (user_id = auth.uid()) policy rejects the row outright. Explicitly awaiting
+  // getSession() here, right before the request, guarantees the session is attached before it goes out.
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) {
+    throw new Error('No authenticated Supabase session — cannot save scheduler settings (the request would be rejected by RLS as anonymous).');
+  }
+
   const row = { updated_at: new Date().toISOString() };
   if ('enabled' in patch) row.enabled = !!patch.enabled;
   if ('intervalValue' in patch) row.interval_value = patch.intervalValue;
