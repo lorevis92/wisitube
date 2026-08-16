@@ -188,12 +188,15 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       setVideos(list);
       setTotalSpent(costs.total);
       // Phase 3: the Blob itself never survives a reload (see stripBlobsForSync, src/lib/db.js) —
-      // storagePath is the Supabase Storage backup, sign a short-lived URL to preview it. Videos
-      // that never reached image generation (or whose backup failed) have no storagePath, and
-      // keep the "No preview" placeholder.
+      // storagePath is the Supabase Storage backup, sign a short-lived URL to preview it. A video's
+      // own thumbnail (generated to be representative of the whole video — see thumbnailEngine.js)
+      // wins over its first scene's first image whenever one exists, regardless of content_type: a
+      // thumbnail is a deliberate choice, a first scene image is just whatever happened to be scene
+      // 1. Videos that never reached either (or whose backup failed) have no storagePath, and keep
+      // the "No preview" placeholder.
       const urls = {};
       for (const v of list) {
-        const storagePath = v.scenes?.[0]?.images?.[0]?.storagePath;
+        const storagePath = v.thumbnailStoragePath || v.scenes?.[0]?.images?.[0]?.storagePath;
         if (!storagePath) continue;
         try {
           urls[v.id] = await getMediaUrl(storagePath);

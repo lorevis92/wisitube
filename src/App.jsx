@@ -853,7 +853,16 @@ export default function App() {
         )}
 
         {tab === 'editor' && project && (
-          <EditorStep project={project} setProject={setProject} settings={settings} onExport={() => setTab('export')} isMobile={isMobile} />
+          <EditorStep
+            project={project}
+            setProject={setProject}
+            settings={settings}
+            onExport={() => setTab('export')}
+            channelId={currentChannelId}
+            videoId={projectId}
+            userId={session.user?.id}
+            isMobile={isMobile}
+          />
         )}
 
         {tab === 'export' && project && (

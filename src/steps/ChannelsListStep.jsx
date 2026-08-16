@@ -26,10 +26,13 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
         if (cancelled) return;
         counts[c.id] = videos.length;
         // Phase 3: the Blob itself never survives a reload (see stripBlobsForSync, src/lib/db.js)
-        // — storagePath is the Supabase Storage backup, sign a short-lived URL to preview it.
-        // Videos that never reached image generation (or whose backup failed) have no
-        // storagePath, and keep the "No preview" placeholder.
-        const storagePath = videos[0]?.scenes?.[0]?.images?.[0]?.storagePath;
+        // — storagePath is the Supabase Storage backup, sign a short-lived URL to preview it. The
+        // most recent video's own thumbnail (generated to be representative of the whole video —
+        // see thumbnailEngine.js) wins over its first scene's first image whenever one exists,
+        // regardless of content_type: a thumbnail is a deliberate choice, a first scene image is
+        // just whatever happened to be scene 1. Videos that never reached either (or whose backup
+        // failed) have no storagePath, and keep the "No preview" placeholder.
+        const storagePath = videos[0]?.thumbnailStoragePath || videos[0]?.scenes?.[0]?.images?.[0]?.storagePath;
         if (storagePath) {
           try {
             urls[c.id] = await getMediaUrl(storagePath);

@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline, ANIMATION_LIST } from '../lib/engine';
+import BackgroundStyleSection from '../components/BackgroundStyleSection';
 
-export default function EditorStep({ project, setProject, settings, onExport, isMobile }) {
+export default function EditorStep({ project, setProject, settings, onExport, channelId, videoId, userId, isMobile }) {
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -282,6 +283,8 @@ export default function EditorStep({ project, setProject, settings, onExport, is
           </div>
         )}
       </div>
+
+      <BackgroundStyleSection project={project} setProject={setProject} settings={settings} channelId={channelId} videoId={videoId} userId={userId} />
 
       <button onClick={onExport} style={{ ...btnPrimary, padding: '14px 20px', fontSize: 13 }}>
         Looks good — go to export →
