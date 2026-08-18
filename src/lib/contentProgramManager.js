@@ -19,9 +19,23 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // existing `count` param usable as-is, no need for a "12-15" range string.
 const CANDIDATE_BATCH_SIZE = 14;
 
+// Reads the raw body via response.text() before parsing — never assumes a response is JSON just
+// because one was requested. A platform-level failure (most relevantly: this endpoint's own
+// maxDuration killing the request, which Vercel reports as a 504 with an HTML/plain-text body, not
+// JSON) would otherwise surface as a bare, context-free "Unexpected token '<'" SyntaxError from
+// res.json() itself. Throwing a message with the HTTP status and the first 150 chars of the actual
+// body instead means fetchSuggestions' catch (ChannelDashboardStep.jsx) — and the automation
+// recipes' own error logging — show something a person can actually act on.
 async function postJSON(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await res.json();
+  const rawText = await res.text();
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (err) {
+    console.error('[contentProgramManager] non-JSON response from', url, 'status=', res.status, 'body=', rawText.slice(0, 300));
+    throw new Error(`${url} returned a non-JSON response (HTTP ${res.status}): ${rawText.slice(0, 150) || '(empty body)'}`);
+  }
   return { ok: res.ok, data };
 }
 

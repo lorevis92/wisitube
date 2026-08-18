@@ -8,8 +8,14 @@
 // Every phase has its own try/catch so a failure anywhere (request validation, the outbound
 // fetch, reading the response body, parsing either layer of JSON) returns a clear JSON error with
 // a phase tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
-
-export const config = { maxDuration: 90 };
+//
+// maxDuration set near this plan's ceiling (280s), not the previous 90s: mode=suggest now proposes
+// a wider batch (14, not 6-8 — see src/lib/contentProgramManager.js) with web_search enabled, which
+// can run multiple search rounds well past 90s, and mode=synthesize is a second Claude call in the
+// same A→B→C pipeline. A function killed for exceeding maxDuration is a platform-level 504 with a
+// non-JSON body — none of the try/catches below can catch or soften that, so the fix has to be
+// giving Claude enough real time, not a nicer error message on this end.
+export const config = { maxDuration: 280 };
 
 // The "channel voice" half of the system prompt — editorial strategy, priorities, how to think
 // about what to suggest next. Safe to override per-channel (see creativeOverride below): nothing

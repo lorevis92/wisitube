@@ -16,8 +16,15 @@
 // Every phase has its own try/catch. A single topic's scoring failure never takes down the batch —
 // each topic call is isolated so trends/competition data missing for one topic still lets every
 // other topic return normally.
-
-export const config = { maxDuration: 90 };
+//
+// maxDuration set near this plan's ceiling (280s), not the previous 90s: Google Trends rate-limits
+// tend to hit correlated topics together (see api/trends-score.js's retry comments), so a burst
+// affecting several of the 14 candidates at once can mean several full 2-retry/~14s-each chains
+// stacking up even at concurrency 3 (worst case ~5 rounds × ~14s ≈ 70s on Trends alone, on top of
+// the concurrent-but-not-free youtube-competition calls) — comfortably under 90s on a good run, but
+// not with enough margin for a bad one. A function killed for exceeding maxDuration is a platform-
+// level 504 with a non-JSON body, which is what actually needs headroom here, not a code fix.
+export const config = { maxDuration: 280 };
 
 const APP_URL = process.env.APP_URL || 'https://wisitube.vercel.app';
 const CONCURRENCY_LIMIT = 3;
