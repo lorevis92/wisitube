@@ -28,6 +28,19 @@ const DEFAULT_CREATIVE_DIRECTION = `You are an expert YouTube content strategist
 const schemaInstructions = (suggestionCountText) =>
   `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [${suggestionCountText} objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low", "fulfills_promise_video_id": "the video id from the pending-promises list this suggestion fulfills, or null" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
 
+// ---- mode=synthesize ----
+//
+// Second half of the cached scoring pipeline (see src/lib/contentProgramManager.js): mode=suggest
+// (the default, everything above/below) proposes a broad, purely qualitative candidate batch with
+// no real data behind it yet. Those candidates then get scored against real Trends/YouTube data
+// (api/topic-scoring.js), and THIS mode takes that scored batch back and asks Claude to select and
+// rank the final shortlist — combining its own original editorial judgment with the now-available
+// real numbers, not a mechanical re-sort by score. No web_search tool here: this pass reasons over
+// data already gathered, it doesn't need to research anything new.
+const SYNTHESIZE_CREATIVE_DIRECTION = `You are an expert YouTube content strategist finishing a two-stage editorial process for a faceless channel. In stage one, a broad batch of candidate video topics was proposed for this channel based on qualitative judgment alone (niche fit, series continuity, pending promises, editorial directive). Those candidates have since been scored against real data: recent Google Trends growth (score is a 0-100 "favorability" blend of trend growth and low recent YouTube competition — higher is better; see each candidate's own reasoning string for the actual numbers behind it). Some candidates have signal_incomplete: true, meaning one or both real signals couldn't be computed (an API error, or too little Trends data for a niche keyword) — that is NOT the same as a bad score, treat those candidates on editorial judgment, don't penalize them for missing data. Your job: select and RANK the strongest candidates by combining your original editorial instincts with this real data. A candidate with weaker numbers can still rank highly for a good editorial reason (e.g. it completes an already-started series, or fulfills a pending promise) — a candidate with great numbers isn't automatically top pick if it's off-brand, redundant, or thin. This is a synthesis, not a mechanical re-sort by score — your rationale for each pick should show that reasoning, citing the real numbers when they support the decision.`;
+
+const SYNTHESIZE_SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "finalSuggestions": [6 to 8 objects, ordered BEST FIRST: { "title": "must exactly match one of the candidate titles given to you, verbatim", "priority": "high|medium|low", "rationale": "1-2 sentences on why this made the final cut — cite the real numbers when they support the decision, or state the editorial reason when overriding a weak or incomplete signal" }] }.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -46,9 +59,10 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, pendingPromises;
+    let mode, channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, pendingPromises, analysis, scoredCandidates;
     try {
       const body = req.body || {};
+      mode = body.mode === 'synthesize' ? 'synthesize' : 'suggest';
       channelName = typeof body.channelName === 'string' ? body.channelName.trim() : '';
       if (!channelName || channelName.length > 200) {
         return res.status(400).json({ error: 'Invalid channelName' });
@@ -101,44 +115,99 @@ export default async function handler(req, res) {
             }))
             .slice(0, 50)
         : [];
+      // mode=synthesize's own inputs — the stage-one holistic read and the scored candidate batch
+      // (see api/topic-scoring.js) it needs to select and rank from. Kept in the same try/catch as
+      // the suggest-mode fields above rather than a separate block: harmless to parse (and leave
+      // empty) regardless of which mode this request is actually using.
+      analysis = typeof body.analysis === 'string' ? body.analysis.trim() : '';
+      scoredCandidates = Array.isArray(body.scoredCandidates)
+        ? body.scoredCandidates
+            .filter((c) => c && typeof c === 'object' && typeof c.title === 'string' && c.title.trim())
+            .map((c) => ({
+              title: c.title.trim(),
+              angle: typeof c.angle === 'string' ? c.angle.trim() : '',
+              series: typeof c.series === 'string' && c.series.trim() ? c.series.trim() : null,
+              priority: typeof c.priority === 'string' ? c.priority.trim() : 'medium',
+              fulfills_promise_video_id: typeof c.fulfills_promise_video_id === 'string' && c.fulfills_promise_video_id ? c.fulfills_promise_video_id : null,
+              score: Number.isFinite(Number(c.score)) ? Number(c.score) : null,
+              signal_incomplete: !!c.signal_incomplete,
+              reasoning: typeof c.reasoning === 'string' ? c.reasoning.trim() : '',
+            }))
+            .slice(0, 30)
+        : [];
+      if (mode === 'synthesize' && scoredCandidates.length === 0) {
+        return res.status(400).json({ error: 'Invalid scoredCandidates' });
+      }
     } catch (err) {
       console.error('[program-manager] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    let systemPrompt = creativeOverride || DEFAULT_CREATIVE_DIRECTION;
-    if (activeDirective) {
-      systemPrompt += ` The channel owner has an active creative directive that takes priority over general suggestions: "${activeDirective}". Your suggestions must primarily serve this directive — check the existing videos list to see what's already been covered under it, and propose the logical next step, not a repeat or an unrelated idea. Only fall back to general channel-growth suggestions if the directive appears fully satisfied by existing content.`;
-    }
-    if (pendingPromises.length) {
-      const promiseList = pendingPromises
-        .map((p) => `- id "${p.videoId}"${p.videoTitle ? ` (from "${p.videoTitle}")` : ''}: ${p.promise}`)
-        .join('\n');
-      systemPrompt += ` The following videos on this channel made an explicit promise to cover something in a future video, not yet fulfilled — treat fulfilling these as HIGH priority in your suggestions, above generic growth ideas (unless a directive is active, which still takes precedence): ${promiseList}. When a suggestion fulfills one of these, set a new field fulfills_promise_video_id to that video's id.`;
-    }
-    if (existingPlaylists.length) {
-      const playlistList = existingPlaylists
-        .map((p) => `"${p.name}" (${p.videoCount} video${p.videoCount === 1 ? '' : 's'})`)
-        .join(', ');
-      systemPrompt += ` This channel already has these YouTube playlists: ${playlistList}. When a suggestion is part of a series, prefer continuing one of these existing playlists when relevant, rather than always inventing a brand new one — continuity keeps the channel's series coherent and bingeable.`;
-    }
-    if (avoidTitles.length) {
-      systemPrompt += ` Avoid suggesting anything substantially similar to these previously rejected or already-covered ideas: ${avoidTitles.join('; ')}`;
-    }
-    systemPrompt += ` ${schemaInstructions(count ? `exactly ${count}` : '6-8')}`;
+    let systemPrompt, userContent, maxTokens, tools;
+    if (mode === 'synthesize') {
+      // ---- mode=synthesize prompt ----
+      systemPrompt = creativeOverride || SYNTHESIZE_CREATIVE_DIRECTION;
+      if (activeDirective) {
+        systemPrompt += ` The channel owner has an active creative directive that takes priority: "${activeDirective}". Weigh this heavily in your final selection.`;
+      }
+      systemPrompt += ` ${SYNTHESIZE_SCHEMA_INSTRUCTIONS}`;
 
-    const userContent = [
-      `Channel name: ${channelName}`,
-      `Niche: ${niche || '(not specified)'}`,
-      editorialNotes ? `Editorial notes: ${editorialNotes}` : '',
-      videos.length
-        ? `Videos already made (${videos.length}):\n${videos.map((v) => `- "${v.title || v.topic}"${v.topic && v.title ? ` (topic: ${v.topic})` : ''}`).join('\n')}`
-        : 'No videos made yet — this is a brand new channel.',
-      refinement ? `Refinement instruction from the user — bias ALL suggestions toward this: ${refinement}` : '',
-      'Respond with JSON only.',
-    ]
-      .filter(Boolean)
-      .join('\n\n');
+      const candidateLines = scoredCandidates
+        .map((c, i) => {
+          const scoreText = c.score === null ? 'N/A' : c.score;
+          return `${i + 1}. "${c.title}"${c.series ? ` [series: ${c.series}]` : ''} — angle: ${c.angle || '(none)'}. Original priority guess: ${c.priority}${c.fulfills_promise_video_id ? '. Fulfills a pending promise.' : ''} Real signal score: ${scoreText}${c.signal_incomplete ? ' (incomplete)' : ''} — ${c.reasoning || 'no data'}`;
+        })
+        .join('\n');
+      userContent = [
+        `Channel name: ${channelName}`,
+        niche ? `Niche: ${niche}` : '',
+        editorialNotes ? `Editorial notes: ${editorialNotes}` : '',
+        analysis ? `Stage-one holistic analysis of this channel: ${analysis}` : '',
+        `Scored candidates:\n${candidateLines}`,
+        'Respond with JSON only.',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      maxTokens = 2000;
+      tools = undefined; // reasoning over already-gathered data — no need to research anything new
+    } else {
+      // ---- mode=suggest prompt (default, unchanged) ----
+      systemPrompt = creativeOverride || DEFAULT_CREATIVE_DIRECTION;
+      if (activeDirective) {
+        systemPrompt += ` The channel owner has an active creative directive that takes priority over general suggestions: "${activeDirective}". Your suggestions must primarily serve this directive — check the existing videos list to see what's already been covered under it, and propose the logical next step, not a repeat or an unrelated idea. Only fall back to general channel-growth suggestions if the directive appears fully satisfied by existing content.`;
+      }
+      if (pendingPromises.length) {
+        const promiseList = pendingPromises
+          .map((p) => `- id "${p.videoId}"${p.videoTitle ? ` (from "${p.videoTitle}")` : ''}: ${p.promise}`)
+          .join('\n');
+        systemPrompt += ` The following videos on this channel made an explicit promise to cover something in a future video, not yet fulfilled — treat fulfilling these as HIGH priority in your suggestions, above generic growth ideas (unless a directive is active, which still takes precedence): ${promiseList}. When a suggestion fulfills one of these, set a new field fulfills_promise_video_id to that video's id.`;
+      }
+      if (existingPlaylists.length) {
+        const playlistList = existingPlaylists
+          .map((p) => `"${p.name}" (${p.videoCount} video${p.videoCount === 1 ? '' : 's'})`)
+          .join(', ');
+        systemPrompt += ` This channel already has these YouTube playlists: ${playlistList}. When a suggestion is part of a series, prefer continuing one of these existing playlists when relevant, rather than always inventing a brand new one — continuity keeps the channel's series coherent and bingeable.`;
+      }
+      if (avoidTitles.length) {
+        systemPrompt += ` Avoid suggesting anything substantially similar to these previously rejected or already-covered ideas: ${avoidTitles.join('; ')}`;
+      }
+      systemPrompt += ` ${schemaInstructions(count ? `exactly ${count}` : '6-8')}`;
+
+      userContent = [
+        `Channel name: ${channelName}`,
+        `Niche: ${niche || '(not specified)'}`,
+        editorialNotes ? `Editorial notes: ${editorialNotes}` : '',
+        videos.length
+          ? `Videos already made (${videos.length}):\n${videos.map((v) => `- "${v.title || v.topic}"${v.topic && v.title ? ` (topic: ${v.topic})` : ''}`).join('\n')}`
+          : 'No videos made yet — this is a brand new channel.',
+        refinement ? `Refinement instruction from the user — bias ALL suggestions toward this: ${refinement}` : '',
+        'Respond with JSON only.',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      maxTokens = 4000;
+      tools = [{ type: 'web_search_20250305', name: 'web_search' }];
+    }
 
     // Phase 2: call Anthropic.
     let response;
@@ -152,9 +221,9 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
-          max_tokens: 4000,
+          max_tokens: maxTokens,
           system: systemPrompt,
-          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          ...(tools ? { tools } : {}),
           messages: [{ role: 'user', content: userContent }],
         }),
       });
@@ -216,7 +285,12 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
     }
 
-    if (!Array.isArray(plan.suggestions) || plan.suggestions.length === 0) {
+    if (mode === 'synthesize') {
+      if (!Array.isArray(plan.finalSuggestions) || plan.finalSuggestions.length === 0) {
+        console.error('[program-manager] phase=validate-plan missing/empty finalSuggestions, plan=', JSON.stringify(plan).slice(0, 300));
+        return res.status(502).json({ error: 'AI response missing finalSuggestions' });
+      }
+    } else if (!Array.isArray(plan.suggestions) || plan.suggestions.length === 0) {
       console.error('[program-manager] phase=validate-plan missing/empty suggestions, plan=', JSON.stringify(plan).slice(0, 300));
       return res.status(502).json({ error: 'AI response missing suggestions' });
     }

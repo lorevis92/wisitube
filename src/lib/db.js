@@ -158,6 +158,15 @@ export async function deleteVideo(id) {
 //   alter table wisitube_channels
 //     add column if not exists dismissed_suggestions jsonb not null default '[]'::jsonb;
 //
+// Required one-time setup for the shared Trends/YouTube-scored Content Program Manager cache (see
+// src/lib/contentProgramManager.js) — one 24h cache shared by ChannelDashboardStep.jsx's manual
+// panel and the automation recipes (fullPipelineRecipe.js/staticBackgroundRecipe.js), replacing
+// last_suggestions as the source of truth for what's currently suggested for this channel:
+//
+//   alter table wisitube_channels
+//     add column if not exists topic_scoring_cache jsonb,
+//     add column if not exists topic_scoring_cached_at timestamptz;
+//
 // Required one-time setup for content_type 'static_background' default background/text style:
 //
 //   alter table wisitube_channels
@@ -186,6 +195,15 @@ function fromChannelRow(row) {
     niche: row.niche || '',
     editorialNotes: row.editorial_notes || '',
     lastSuggestions: row.last_suggestions || null,
+    // The shared, 24h-cached Content Program Manager result — see src/lib/contentProgramManager.js.
+    // { analysis, finalSuggestions, scoredCandidates, usedTitles, generatedAt }. finalSuggestions is
+    // the currently-shown shortlist (both ChannelDashboardStep.jsx and the automation recipes read
+    // and consume from this same list, never their own copy); scoredCandidates is the full original
+    // scored batch, kept around as the cheap backfill pool for "Start this video"/"Not interested".
+    // topic_scoring_cached_at is a plain ISO string (not reparsed into a JS timestamp here) since
+    // it's only ever compared against Date.now() via isTopicCacheFresh, never displayed.
+    topic_scoring_cache: row.topic_scoring_cache || null,
+    topic_scoring_cached_at: row.topic_scoring_cached_at || null,
     // Titles the channel owner explicitly said "not interested" to (ChannelDashboardStep.jsx) — fed
     // back as avoidTitles on every future Content Program Manager call (a single replacement or a
     // full regeneration) so a dismissed idea doesn't keep resurfacing. Capped at the most recent 50
@@ -258,6 +276,8 @@ export async function saveChannel(channel) {
     niche: channel.niche || '',
     editorial_notes: channel.editorialNotes || '',
     last_suggestions: channel.lastSuggestions || null,
+    topic_scoring_cache: channel.topic_scoring_cache || null,
+    topic_scoring_cached_at: channel.topic_scoring_cached_at || null,
     dismissed_suggestions: Array.isArray(channel.dismissed_suggestions) ? channel.dismissed_suggestions : [],
     youtube_connected: !!channel.youtube_connected,
     youtube_channel_name: channel.youtube_channel_name || '',

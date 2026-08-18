@@ -8,7 +8,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel, listPendingPromises } from '../db';
+import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
 import { uploadMedia } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -17,7 +17,8 @@ import { resumePendingBatches } from '../batchResumption';
 import { rehydrateProjectMedia } from '../mediaRehydration';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
-import { publishToYoutube, listChannelPlaylists } from '../youtubePublishEngine';
+import { publishToYoutube } from '../youtubePublishEngine';
+import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
@@ -280,36 +281,17 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     try {
       suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
         const existingVideos = await listVideosByChannel(channelId);
-        // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
-        // and returns [] rather than throwing, so this never blocks the suggestion phase on its own.
-        const existingPlaylists = await listChannelPlaylists(channel);
-        const pendingPromises = await listPendingPromises(channelId).catch((err) => {
-          console.error('[fullPipelineRecipe] failed to load pending promises', err);
-          return [];
-        });
-        const res = await fetch('/api/program-manager', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            channelName: channel.name,
-            niche: channel.niche || '',
-            editorialNotes: channel.editorialNotes || '',
-            existingVideos: existingVideos.map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
-            refinement: '',
-            creativeOverride: channel.prompt_overrides?.programManager || null,
-            activeDirective: channel.automation_directive || '',
-            existingPlaylists,
-            pendingPromises,
-            // Ideas the channel owner explicitly dismissed from ChannelDashboardStep.jsx's Content
-            // Program Manager panel — a full automated regeneration must not resurface them either.
-            avoidTitles: channel.dismissed_suggestions || [],
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Content Program Manager request failed');
-        const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
-        if (!suggestions.length) throw new Error('Content Program Manager returned no suggestions');
-        return suggestions.find((s) => s.priority === 'high') || suggestions[0];
+        // Same cached, scored suggestion pool ChannelDashboardStep.jsx's panel reads from (see
+        // src/lib/contentProgramManager.js) — within the 24h cache window this is a free read, no
+        // new Claude/Trends/YouTube calls at all.
+        const { channel: scoredChannel, finalSuggestions } = await getTopicSuggestions(channel, { videos: existingVideos });
+        if (!finalSuggestions.length) throw new Error('Content Program Manager returned no suggestions');
+        const picked = finalSuggestions.find((s) => s.priority === 'high') || finalSuggestions[0];
+        // Same mechanism as ChannelDashboardStep.jsx's "Start this video" — removes `picked` from
+        // the shared cached list and backfills it, so the dashboard stops showing an idea this
+        // automation cycle just committed to as a real video.
+        await startTopicSuggestion(scoredChannel, picked, existingVideos);
+        return picked;
       });
       await logStep(
         channelId,

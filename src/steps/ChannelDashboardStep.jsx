@@ -14,10 +14,10 @@ import {
   savePromptVersion,
   listPromptVersions,
   recordCost,
-  listPendingPromises,
 } from '../lib/db';
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
+import { getTopicSuggestions, startTopicSuggestion, dismissTopicSuggestion } from '../lib/contentProgramManager';
 import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
 import { generateImage } from '../lib/sceneOrchestrator';
 import { priceForImage } from '../lib/imageProviders';
@@ -304,41 +304,19 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     setHistoryOpenStage(null);
   }
 
-  // Refining never edits a single suggestion — it relaunches the whole holistic pass with the
-  // extra instruction folded in, replacing the entire list at once.
+  // Fetches (or, within the 24h cache window, simply reads) the shared Content Program Manager
+  // result — see src/lib/contentProgramManager.js. A refinement note always forces a fresh pass
+  // (it needs new reasoning), everything else respects the cache as-is.
   async function fetchSuggestions(refinementText) {
     if (!channel) return;
     setSuggestionsLoading(true);
     setSuggestionsError('');
     try {
-      // Enrichment, not a required step — listChannelPlaylists already swallows its own failures
-      // and returns [] rather than throwing, so this never blocks getting suggestions.
-      const existingPlaylists = await listChannelPlaylists(channel);
-      const pendingPromises = await listPendingPromises(channel.id).catch((err) => {
-        console.error('[ChannelDashboardStep] failed to load pending promises', err);
-        return [];
+      const { channel: updated } = await getTopicSuggestions(channel, {
+        videos,
+        forceRefresh: !!refinementText,
+        refinementText: refinementText || '',
       });
-      const res = await fetch('/api/program-manager', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          channelName: channel.name,
-          niche: channel.niche || '',
-          editorialNotes: channel.editorialNotes || '',
-          existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
-          refinement: refinementText || '',
-          creativeOverride: channel.prompt_overrides?.programManager || null,
-          existingPlaylists,
-          pendingPromises,
-          // A full regeneration must not resurface ideas already explicitly dismissed as
-          // "not interested" (see dismissSuggestion below).
-          avoidTitles: channel.dismissed_suggestions || [],
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to generate suggestions');
-      const lastSuggestions = { analysis: data.analysis || '', suggestions: data.suggestions || [], generatedAt: Date.now() };
-      const updated = await saveChannel({ ...channel, lastSuggestions });
       setChannel(updated);
       onChannelChange?.(updated);
       setRefiningIndex(null);
@@ -350,68 +328,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     }
   }
 
-  // Fetches exactly one replacement suggestion and appends it to whatever's currently on the list
-  // (simpler and just as correct as reinserting at the original slot, since by the time this
-  // resolves other suggestions may have been started/dismissed too, making "the original slot"
-  // ambiguous). baseChannel is the freshest known channel object at the moment this was kicked off
-  // (see startSuggestion) — used to build avoidTitles, not re-read from the (possibly stale) closure.
-  async function replaceSuggestionInBackground(baseChannel) {
-    setAwaitingReplacement(true);
-    try {
-      const existingPlaylists = await listChannelPlaylists(baseChannel);
-      const pendingPromises = await listPendingPromises(baseChannel.id).catch((err) => {
-        console.error('[ChannelDashboardStep] failed to load pending promises', err);
-        return [];
-      });
-      const remainingTitles = (baseChannel.lastSuggestions?.suggestions || []).map((s) => s.title).filter(Boolean);
-      const existingVideoTitles = (videos || []).map((v) => v.displayTitle || v.topic || '').filter(Boolean);
-      const avoidTitles = [...remainingTitles, ...existingVideoTitles, ...(baseChannel.dismissed_suggestions || [])];
-      const res = await fetch('/api/program-manager', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          channelName: baseChannel.name,
-          niche: baseChannel.niche || '',
-          editorialNotes: baseChannel.editorialNotes || '',
-          existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
-          refinement: '',
-          creativeOverride: baseChannel.prompt_overrides?.programManager || null,
-          existingPlaylists,
-          pendingPromises,
-          count: 1,
-          avoidTitles,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch a replacement suggestion');
-      const newSuggestion = (data.suggestions || [])[0];
-      if (!newSuggestion) return;
-
-      // Functional update to read the truly-latest channel state (something else may have changed
-      // it while this fetch was in flight, e.g. another suggestion started or dismissed) — captured
-      // into a local var so the subsequent saveChannel call has the exact object just applied.
-      let latestChannel;
-      setChannel((prev) => {
-        if (!prev) return prev;
-        const suggestions = [...(prev.lastSuggestions?.suggestions || []), newSuggestion];
-        latestChannel = { ...prev, lastSuggestions: { ...prev.lastSuggestions, suggestions } };
-        return latestChannel;
-      });
-      if (!latestChannel) return;
-      const updated = await saveChannel(latestChannel);
-      setChannel(updated);
-      onChannelChange?.(updated);
-    } catch (err) {
-      console.error('[ChannelDashboardStep] failed to fetch/save a replacement suggestion', err);
-    } finally {
-      setAwaitingReplacement(false);
-    }
-  }
-
-  // "Start this video" — removes the suggestion immediately (before the replacement round-trip
-  // even begins) so the list never keeps showing an idea that's already being turned into a video,
-  // even if the user navigates back here before the background replacement arrives.
-  function startSuggestion(s, i) {
+  // "Start this video" — removes the suggestion immediately (before the backfill round-trip even
+  // begins) so the list never keeps showing an idea that's already being turned into a video, even
+  // if the user navigates back here before the background backfill arrives. Same shared
+  // remove-and-backfill mechanics the automation recipes use (startTopicSuggestion) — a video
+  // started from either surface disappears from both.
+  function startSuggestion(s) {
     onStartVideoFromSuggestion?.(s.title, s.series || null);
     // This suggestion is api/program-manager.js's answer to a pending promise from an earlier
     // video's closing CTA — mark that ORIGINAL video as fulfilled now, so it stops showing up in
@@ -425,43 +347,71 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     let latestChannel;
     setChannel((prev) => {
       if (!prev) return prev;
-      const remaining = (prev.lastSuggestions?.suggestions || []).filter((_, idx) => idx !== i);
-      latestChannel = { ...prev, lastSuggestions: { ...prev.lastSuggestions, suggestions: remaining } };
+      const finalSuggestions = (prev.topic_scoring_cache?.finalSuggestions || []).filter((x) => x.title !== s.title);
+      latestChannel = { ...prev, topic_scoring_cache: { ...prev.topic_scoring_cache, finalSuggestions } };
       return latestChannel;
     });
     if (!latestChannel) return;
-    saveChannel(latestChannel)
+    setAwaitingReplacement(true);
+    startTopicSuggestion(latestChannel, s, videos)
       .then((updated) => {
         setChannel(updated);
         onChannelChange?.(updated);
-        replaceSuggestionInBackground(updated);
       })
-      .catch((err) => console.error('[ChannelDashboardStep] failed to remove started suggestion', err));
+      .catch((err) => console.error('[ChannelDashboardStep] failed to start/backfill suggestion', err))
+      .finally(() => setAwaitingReplacement(false));
   }
 
-  // "Not interested" — removes the suggestion with no replacement (the list simply gets shorter)
-  // and remembers the title so it never resurfaces in a future single replacement or full
-  // regeneration (see avoidTitles above and in fetchSuggestions) — capped at the most recent 50.
-  function dismissSuggestion(s, i) {
+  // "Not interested" — same remove-and-backfill mechanics as startSuggestion, plus remembering the
+  // title (dismissed_suggestions) so it never resurfaces in a future backfill or full regeneration.
+  function dismissSuggestion(s) {
     let latestChannel;
     setChannel((prev) => {
       if (!prev) return prev;
-      const remaining = (prev.lastSuggestions?.suggestions || []).filter((_, idx) => idx !== i);
-      const dismissed = [...(prev.dismissed_suggestions || []), s.title].filter(Boolean).slice(-50);
+      const finalSuggestions = (prev.topic_scoring_cache?.finalSuggestions || []).filter((x) => x.title !== s.title);
+      const dismissed_suggestions = [...(prev.dismissed_suggestions || []), s.title].filter(Boolean).slice(-50);
       latestChannel = {
         ...prev,
-        lastSuggestions: { ...prev.lastSuggestions, suggestions: remaining },
-        dismissed_suggestions: dismissed,
+        topic_scoring_cache: { ...prev.topic_scoring_cache, finalSuggestions },
+        dismissed_suggestions,
       };
       return latestChannel;
     });
     if (!latestChannel) return;
-    saveChannel(latestChannel)
+    setAwaitingReplacement(true);
+    dismissTopicSuggestion(latestChannel, s, videos)
       .then((updated) => {
         setChannel(updated);
         onChannelChange?.(updated);
       })
-      .catch((err) => console.error('[ChannelDashboardStep] failed to save dismissed suggestion', err));
+      .catch((err) => console.error('[ChannelDashboardStep] failed to dismiss/backfill suggestion', err))
+      .finally(() => setAwaitingReplacement(false));
+  }
+
+  // Compact "📈 Trending +34% (7d) · 12 recent videos, avg 340 views" badge line for a suggestion
+  // card — built straight from the real Trends/YouTube data api/topic-scoring.js attached to it, so
+  // it's absent (not fabricated) for fallback ideas that were never scored (see
+  // src/lib/contentProgramManager.js's fetchFallbackSuggestion). Returns null when there's nothing
+  // real to show.
+  function formatSignalSummary(s) {
+    const parts = [];
+    const trends = s?.trends;
+    const d7 = trends?.deltas?.d7;
+    if (trends && !trends.error && d7 && d7.delta_pct !== null && d7.delta_pct !== undefined) {
+      const pct = Math.round(d7.delta_pct);
+      parts.push(`${pct >= 0 ? '📈 Trending +' : '📉 Trending '}${pct}% (7d)`);
+    } else if (trends?.error) {
+      parts.push('📈 Trend data unavailable');
+    }
+    const competition = s?.competition;
+    if (competition && !competition.error) {
+      const { video_count, avg_views } = competition.summary || {};
+      parts.push(video_count ? `${video_count} recent videos, avg ${Math.round(avg_views || 0).toLocaleString()} views` : 'no recent videos found');
+    } else if (competition?.error) {
+      parts.push('competition data unavailable');
+    }
+    if (!parts.length) return null;
+    return parts.join(' · ') + (s.signal_incomplete ? ' (partial data)' : '');
   }
 
   async function togglePlaylists() {
@@ -1140,8 +1090,8 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
         >
           <div>
             <div style={label}>Content Program Manager</div>
-            {channel?.lastSuggestions?.generatedAt && (
-              <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>generated {timeAgo(channel.lastSuggestions.generatedAt)}</div>
+            {channel?.topic_scoring_cache?.generatedAt && (
+              <div style={{ ...mono, fontSize: 11, color: T.textMuted, marginTop: 4 }}>generated {timeAgo(channel.topic_scoring_cache.generatedAt)}</div>
             )}
           </div>
           <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
@@ -1153,7 +1103,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           <>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
           <button onClick={() => fetchSuggestions('')} disabled={suggestionsLoading} style={{ ...btnPrimary, opacity: suggestionsLoading ? 0.6 : 1 }}>
-            {suggestionsLoading ? 'Working…' : channel?.lastSuggestions ? 'Refresh suggestions' : 'Suggest next videos'}
+            {suggestionsLoading ? 'Working…' : channel?.topic_scoring_cache ? 'Refresh suggestions' : 'Suggest next videos'}
           </button>
         </div>
 
@@ -1167,9 +1117,9 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 14 }}>{suggestionsError}</div>
         )}
 
-        {channel?.lastSuggestions && !suggestionsLoading && (
+        {channel?.topic_scoring_cache && !suggestionsLoading && (
           <div style={{ marginTop: 16 }}>
-            {channel.lastSuggestions.analysis && (
+            {channel.topic_scoring_cache.analysis && (
               <div
                 style={{
                   fontFamily: FONT.ui,
@@ -1183,12 +1133,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                   marginBottom: 14,
                 }}
               >
-                {channel.lastSuggestions.analysis}
+                {channel.topic_scoring_cache.analysis}
               </div>
             )}
 
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
-              {(channel.lastSuggestions.suggestions || []).map((s, i) => (
+              {(channel.topic_scoring_cache.finalSuggestions || []).map((s, i) => (
                 <div
                   key={i}
                   style={{
@@ -1236,10 +1186,16 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                   </div>
                   <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{s.title}</div>
                   <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, lineHeight: 1.5 }}>{s.angle}</div>
+                  {formatSignalSummary(s) && (
+                    <div style={{ ...mono, fontSize: 11, color: T.textMuted, lineHeight: 1.4 }}>{formatSignalSummary(s)}</div>
+                  )}
+                  {s.rationale && (
+                    <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, lineHeight: 1.5, fontStyle: 'italic' }}>{s.rationale}</div>
+                  )}
 
                   <div style={{ display: 'flex', gap: 6, marginTop: 'auto', flexWrap: 'wrap' }}>
                     <button
-                      onClick={() => startSuggestion(s, i)}
+                      onClick={() => startSuggestion(s)}
                       style={{ ...btnPrimary, flex: 1, padding: '8px 12px', fontSize: 10 }}
                     >
                       Start this video
@@ -1251,7 +1207,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                       Refine
                     </button>
                     <button
-                      onClick={() => dismissSuggestion(s, i)}
+                      onClick={() => dismissSuggestion(s)}
                       title="Not interested"
                       style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '8px 12px', fontSize: 10 }}
                     >
