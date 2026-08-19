@@ -105,6 +105,9 @@ function statusColor(status) {
   if (status === 'error') return T.primary;
   if (status === 'dry_run') return T.yellow;
   if (status === 'retrying') return T.yellow;
+  // Recovering an abandoned lock (automationScheduler.js's runManagedCycle) — notable, not a
+  // failure, but deliberately not the same green as an ordinary successful step either.
+  if (status === 'stale_lock_released') return T.yellow;
   if (status === 'skipped') return T.textMuted;
   return T.green;
 }

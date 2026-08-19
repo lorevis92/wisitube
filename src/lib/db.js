@@ -542,6 +542,23 @@ export async function listAutomationLog({ channelId, limit = 50 } = {}) {
   return (data || []).map(fromAutomationLogRow);
 }
 
+// Same table as listAutomationLog, but excludes this module's own step:'scheduler' diagnostic rows
+// (the 'blocked' messages runManagedCycle below writes when the lock is already held) — used
+// specifically to find the last REAL cycle-step log line when diagnosing a stuck lock.
+// listAutomationLog({ limit: 1 }) there would, once the lock is stuck, keep finding its own most
+// recent 'blocked' entry instead of genuine cycle activity — and since that entry's message quotes
+// THIS same "last known log line" text, each tick would embed the previous tick's message inside
+// the new one, growing without bound. Filtering step != 'scheduler' at the database level (not by
+// fetching N rows and filtering in memory, which would need a limit larger than however many
+// blocked ticks have already accumulated) keeps this correct and cheap no matter how long the lock
+// has been stuck.
+export async function getLastRealAutomationLogEntry() {
+  const data = unwrap(
+    await supabase.from('wisitube_automation_log').select('*').neq('step', 'scheduler').order('created_at', { ascending: false }).limit(1)
+  );
+  return data?.[0] ? fromAutomationLogRow(data[0]) : null;
+}
+
 // ---- Unattended scheduler settings — see src/lib/automationScheduler.js and AutomationStep.jsx's
 // "Automatic scheduling" panel. One row per user (user_id is the primary key itself, defaulting to
 // auth.uid() — there's nothing to key on except the user, unlike channels/videos which have their

@@ -13,11 +13,18 @@
 // "Stop" always has something real to stop regardless of which one started it. Dry runs never go
 // through here — they don't spend money or touch automation_daily_upload_count, so they have no
 // need for the lock and keep using AutomationStep.jsx's own local stop ref exactly as before.
-import { getSchedulerSettings, saveSchedulerSettings, logAutomationStep, listAutomationLog } from './db';
+import { getSchedulerSettings, saveSchedulerSettings, logAutomationStep, getLastRealAutomationLogEntry } from './db';
 import { runAutomationCycle } from './automationEngine';
 
 const TICK_MS = 60 * 1000;
 const UNIT_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
+
+// A cycle stuck this long is presumed dead, not still legitimately working — see runManagedCycle's
+// stale-lock recovery below. Well above how long a real cycle should ever sit on one channel (even
+// the slowest Gemini Batch jobs rarely run past a couple hours, and a healthy cycle moves on to the
+// next channel rather than blocking on one), so this only ever fires for a genuinely abandoned lock.
+const STALE_LOCK_MS = 4 * 60 * 60 * 1000;
+const STALE_LOCK_HOURS = STALE_LOCK_MS / (60 * 60 * 1000);
 
 function intervalMs(settings) {
   const unitMs = UNIT_MS[settings.intervalUnit] || UNIT_MS.hours;
@@ -78,15 +85,25 @@ let claimedLocally = false;
  * regardless of which one is in flight.
  *
  * Returns { started: false, reason } immediately, without calling runAutomationCycle at all, when
- * another cycle is already in flight — reason is a full, human-readable diagnostic (how long the
- * blocking cycle has been running, and its most recent known log line if one can be found) so
- * whoever reads it — the 'scheduler'/'blocked' log row this function's caller writes, or an alert
- * shown from a blocked manual click — understands immediately why nothing happened, without having
- * to go dig through automation_daily_upload_count or query anything else themselves.
+ * another cycle is already in flight AND it's been running less than STALE_LOCK_HOURS — reason is a
+ * full, human-readable diagnostic (how long the blocking cycle has been running, and its most
+ * recent known log line if one can be found) so whoever reads it — the 'scheduler'/'blocked' log
+ * row this function's caller writes, or an alert shown from a blocked manual click — understands
+ * immediately why nothing happened, without having to go dig through automation_daily_upload_count
+ * or query anything else themselves.
+ *
+ * When the blocking cycle has been running longer than STALE_LOCK_HOURS, the lock is instead
+ * presumed abandoned — most likely the tab/computer that held it went away (closed, slept, crashed,
+ * lost network) mid-cycle, before the finally below that normally releases it ever got to run —
+ * auto-released (logged as 'stale_lock_released', never as an ordinary success), and this same call
+ * falls through to acquire the lock fresh and actually run, rather than waiting for a later tick to
+ * separately notice the lock is free.
  *
  * Returns { started: true } once runAutomationCycle has finished (successfully, with an error, an
  * inProgress:true "still waiting on Gemini Batch" result, or stopped) — the lock is always released
- * in a finally, so an uncaught exception can never leave currently_running stuck true forever.
+ * in a finally, so an uncaught exception can never leave currently_running stuck true forever. The
+ * remaining gap this can't close is the tab going away entirely (see the stale-lock recovery
+ * above), not an exception — nothing throws in that case, there's nothing for a finally to catch.
  */
 export async function runManagedCycle({ userId, onUpdate, onProgress }) {
   console.warn('[run-cycle-debug] runManagedCycle() entered, claimedLocally =', claimedLocally);
@@ -104,12 +121,18 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
       elapsedMs: settings.currentRunStartedAt ? Date.now() - settings.currentRunStartedAt : null,
     });
     const startedAt = settings.currentRunStartedAt;
-    const elapsed = startedAt ? formatElapsed(Date.now() - startedAt) : 'an unknown amount of time';
+    const elapsedMs = startedAt ? Date.now() - startedAt : null;
+    const elapsed = startedAt ? formatElapsed(elapsedMs) : 'an unknown amount of time';
     const startedAtText = startedAt ? new Date(startedAt).toLocaleString() : 'an unknown time';
     let lastLineText = 'no recent automation log entry found to diagnose further';
     try {
-      const recent = await listAutomationLog({ limit: 1 });
-      const l = recent[0];
+      // Deliberately NOT listAutomationLog({ limit: 1 }) — that's a global "most recent row"
+      // query, which once this branch itself starts writing step:'scheduler'/'blocked' rows every
+      // tick would just keep finding its own last message (see getLastRealAutomationLogEntry's own
+      // comment for the runaway-recursion bug that caused). This excludes those rows at the query
+      // level so it always finds genuine cycle activity, regardless of how many blocked ticks have
+      // piled up since.
+      const l = await getLastRealAutomationLogEntry();
       if (l) {
         const ago = l.createdAt ? formatElapsed(Date.now() - l.createdAt) : 'an unknown time';
         lastLineText = `last known log line: channel ${l.channelId || '—'}, step "${l.step}" → ${l.status}${l.message ? ` ("${l.message}")` : ''}, ${ago} ago`;
@@ -117,10 +140,37 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
     } catch (err) {
       lastLineText = `could not read the automation log to diagnose further: ${String(err.message || err)}`;
     }
-    return {
-      started: false,
-      reason: `a cycle has been running for ${elapsed} (started ${startedAtText}) — ${lastLineText}`,
-    };
+
+    // A lock only ever known to be this old is presumed abandoned (see STALE_LOCK_MS above), not
+    // still legitimately in progress — auto-release it and fall through to the ordinary
+    // acquire-and-run path below instead of returning blocked, so this same tick recovers
+    // immediately rather than leaving the scheduler sitting idle until someone notices and clicks
+    // "Force unlock" (potentially days, exactly what actually happened here once already).
+    if (elapsedMs !== null && elapsedMs > STALE_LOCK_MS) {
+      const staleMessage = `stale lock auto-released after ${elapsed} (started ${startedAtText}, past the ${STALE_LOCK_HOURS}h threshold) — ${lastLineText}`;
+      console.warn('[automationScheduler] auto-releasing stale lock:', staleMessage);
+      try {
+        // A distinct status, never 'success' or 'blocked' — this must stay visibly different in the
+        // history from an ordinary cycle outcome, since it's recovering from an abnormal shutdown,
+        // not reporting one.
+        await logAutomationStep(null, null, 'scheduler', 'stale_lock_released', staleMessage);
+      } catch (err) {
+        console.error('[automationScheduler] failed to log the stale-lock release', err);
+      }
+      try {
+        await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
+      } catch (err) {
+        console.error('[automationScheduler] failed to release the stale lock', err);
+        return { started: false, reason: `${staleMessage} — but releasing the lock itself failed: ${String(err.message || err)}` };
+      }
+      // Falls through — settings.currentlyRunning is now stale, not current, so the acquire-and-run
+      // logic below proceeds exactly as if this had been a normal, unlocked tick.
+    } else {
+      return {
+        started: false,
+        reason: `a cycle has been running for ${elapsed} (started ${startedAtText}) — ${lastLineText}`,
+      };
+    }
   }
 
   // BUG FIX: claimedLocally = true and the initial "acquire the lock" write used to sit BEFORE this
@@ -173,12 +223,13 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
 }
 
 // Manual escape hatch for a lock that's genuinely stuck (see AutomationStep.jsx's "Force unlock"
-// button) — only ever needed for the residual case the fix above can't fully close: the acquire
-// write's response was lost after it had already committed server-side, so the database is left
-// showing currently_running=true with no in-memory runManagedCycle call left anywhere to release it
-// (including in another tab/session entirely, which this module's own claimedLocally guard can't
-// see at all). Resets the DB lock only — never touches claimedLocally, which is scoped to whichever
-// tab actually holds it, if any.
+// button) — for a lock under STALE_LOCK_HOURS old that's stuck for a reason the automatic
+// recovery above doesn't cover yet, or simply when someone doesn't want to wait out the threshold
+// (e.g. the acquire write's response was lost after it had already committed server-side, leaving
+// currently_running=true with no in-memory runManagedCycle call left anywhere to release it,
+// including in another tab/session entirely, which this module's own claimedLocally guard can't see
+// at all). Resets the DB lock only — never touches claimedLocally, which is scoped to whichever tab
+// actually holds it, if any.
 export async function forceUnlock() {
   await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
 }
