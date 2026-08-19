@@ -5,11 +5,18 @@
 // video record at each checkpoint, so a failure partway leaves a resumable record behind for manual
 // review in the regular Storyboard/Editor/Export UI instead of vanishing.
 //
+// A video interrupted partway (browser tab closed, computer slept, any crash — not just Gemini
+// Batch's own async turnaround) is picked back up from wherever it actually left off — suggestion/
+// outline, scenes, media, render, or thumbnail — via findResumableVideo + determineResumePhase (see
+// src/lib/videoResumption.js), NOT restarted from scratch. YouTube publish is the one phase never
+// auto-resumed (see the 'youtube' phase below for why), and a video stuck failing the same phase
+// MAX_RESUME_ATTEMPTS times in a row is marked permanently stuck rather than retried forever.
+//
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
 import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
-import { uploadMedia } from '../mediaStorage';
+import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
 import { generateAllMediaViaBatch } from '../geminiBatchImageEngine';
@@ -19,27 +26,27 @@ import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
+import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
-// A channel using the Gemini Batch image provider can have a video whose batch jobs are still
-// running (turnaround up to a few hours) — this is how long such a video stays eligible to be
-// resumed instead of the automation cycle starting yet another one from scratch. Past this window,
-// listVideosByChannel would no longer surface it as resumable (it's likely stuck/abandoned) — a
-// video that old is left for the completeness/recovery ceiling in batchResumption.js to eventually
-// give up on, not silently retried forever here too.
-const RESUMABLE_VIDEO_WINDOW_MS = 48 * 60 * 60 * 1000;
-
-// Finds the most recent video on this channel that still has Gemini Batch jobs outstanding —
-// created within the resumable window. Only relevant for the 'nanobanana-batch' provider: every
-// other provider's media phase is fully synchronous (generateAllMedia either finishes or throws
-// within the same call), so a video from one of those never has anything left in
-// pendingImageBatches to resume in the first place.
+// Finds the most recent video on this channel that isn't in a terminal state — published
+// (youtubeVideoId set) or explicitly abandoned (stuckError set, see the resume-attempt tracking
+// below) — and that still has an automation-safe phase left to resume (determineResumePhase !==
+// null; see src/lib/videoResumption.js for what that excludes, namely YouTube publish). Used to be
+// Gemini-Batch-only (only ever found something via pendingImageBatches); now covers a video
+// interrupted at any phase, since the same "browser tab must stay open" constraint that scheduler
+// resumption has to work around applies here too.
 async function findResumableVideo(channelId) {
   const videos = await listVideosByChannel(channelId);
   const cutoff = Date.now() - RESUMABLE_VIDEO_WINDOW_MS;
   return (
-    videos.find((v) => Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0 && (v.createdAt || 0) >= cutoff) || null
+    videos.find((v) => {
+      if ((v.createdAt || 0) < cutoff) return false;
+      if (v.youtubeVideoId) return false; // already published — terminal
+      if (v.stuckError) return false; // explicitly abandoned after MAX_RESUME_ATTEMPTS — terminal
+      return determineResumePhase(v, v.outline) !== null;
+    }) || null
   );
 }
 
@@ -217,11 +224,17 @@ function buildAutomationSettings(channel) {
  * ends with Gemini Batch jobs still outstanding for this video's images (nothing failed, there's
  * just nothing left to do until Google finishes them — see automationEngine.js, which treats this
  * as neither a completed video nor an error). inProgress is false (the pre-existing contract) once
- * a video is genuinely done, whether that took one call or several resumed ones.
+ * a video is genuinely done, whether that took one call or several resumed ones. youtubeVideoId is
+ * null both when auto-publish is off AND when the video was resumed from an earlier interruption
+ * (see the YouTube phase below) — check project.stuckError separately for "gave up after
+ * MAX_RESUME_ATTEMPTS", which throws rather than returning normally (see below).
  *
- * Throws on the first phase failure that ISN'T "batch jobs still running"; whatever was saved via
- * saveVideo up to that point stays on the record for manual review in the regular
- * Storyboard/Editor/Export UI — nothing is rolled back or deleted.
+ * Throws on the first phase failure that ISN'T "batch jobs still running", INCLUDING a resumed
+ * video that's failed the exact same phase MAX_RESUME_ATTEMPTS times in a row (marked with
+ * project.stuckError first, so findResumableVideo excludes it from now on — see
+ * src/lib/videoResumption.js). Whatever was saved via saveVideo up to that point stays on the
+ * record for manual review in the regular Storyboard/Editor/Export UI — nothing is rolled back or
+ * deleted.
  */
 export async function runFullPipeline(channel, { userId, onProgress, logStep }) {
   const channelId = channel.id;
@@ -251,20 +264,22 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     });
 
   // ---- Resume check ----
-  // Only ever finds something for the 'nanobanana-batch' provider — every other provider's media
-  // phase is fully synchronous, so a video made with one never has anything left in
-  // pendingImageBatches to resume. Skips suggestion/video-record/outline/scenes entirely: those
-  // already happened on whichever earlier cycle first created this video.
+  // Covers a video interrupted at ANY phase (suggestion/outline, scenes, media, render, thumbnail —
+  // see src/lib/videoResumption.js), not just Gemini Batch's own pending jobs. resumePhase drives
+  // which of the phase blocks below actually run: 'suggestion' means "nothing usable saved yet, run
+  // everything" — a brand-new (non-resumed) video takes that exact same path by default below.
   const resumable = await findResumableVideo(channelId);
+  let resumePhase = 'suggestion';
+  const wasResumed = !!resumable;
 
   if (resumable) {
     videoId = resumable.id;
     createdAt = resumable.createdAt || Date.now();
-    // blob: URLs never survive a reload — a beat/audio that finished on an earlier cycle (in a
-    // browser session that's since closed) has a storagePath but a dead url/audioUrl string.
-    // Rehydrating here, before anything below checks readiness or touches render/thumbnail/
-    // YouTube, means those phases always see valid, loadable media regardless of which session
-    // each piece was actually completed in.
+    // blob: URLs never survive a reload — a beat/audio/rendered-video that finished on an earlier
+    // cycle (in a browser session that's since closed) has a storagePath but a dead url/blob.
+    // Rehydrating here, before anything below checks readiness or touches media/render/thumbnail/
+    // YouTube, means those phases always see valid, loadable media regardless of which session each
+    // piece was actually completed in.
     project = await rehydrateProjectMedia(resumable);
     plan = {
       title: resumable.displayTitle || resumable.topic || '',
@@ -272,11 +287,45 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
       tags: resumable.tags || [],
       thumbnails: resumable.thumbnails || [],
       characterBible: resumable.characterBible || [],
+      references: resumable.references || [],
+      outline: resumable.outline || [],
+      totalScenes: resumable.totalScenes || 0,
     };
     suggestion = { title: resumable.topic || plan.title, series: resumable.series || null };
-    await logStep(channelId, videoId, 'resume', 'success', `resuming incomplete video "${plan.title}"`);
-    report('resume', `Resuming "${plan.title}" — checking batch jobs`);
-  } else {
+    resumePhase = determineResumePhase(project, plan.outline);
+
+    // Safety net: determineResumePhase says render/thumbnail already happened based on a storage
+    // path being present, but the actual Storage download (rehydrateProjectMedia above) can itself
+    // fail — never proceed past render as if a usable video blob exists when it doesn't.
+    if ((resumePhase === 'thumbnail' || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
+
+    // A video stuck failing the exact same phase over and over (a systematic problem — a bad
+    // prompt, a persistently failing provider, corrupted state) would otherwise retry forever,
+    // quietly burning quota/spend every cycle. Recorded and checked BEFORE this attempt actually
+    // runs, so a crash during this very attempt still gets counted correctly on the next resume.
+    const { attempts, stuck } = trackResumeAttempt(project, resumePhase);
+    project = { ...project, resumeAttempts: attempts, lastResumePhase: resumePhase };
+
+    if (stuck) {
+      const stuckMessage = `⚠ Stuck after ${MAX_RESUME_ATTEMPTS} automatic resume attempts in the "${resumePhase}" phase — needs manual review`;
+      project = { ...project, stuckError: stuckMessage };
+      await persist();
+      await logStep(channelId, videoId, resumePhase, 'error', stuckMessage);
+      throw new Error(stuckMessage);
+    }
+
+    await persist();
+    await logStep(
+      channelId,
+      videoId,
+      'resume',
+      'success',
+      `resuming incomplete video "${plan.title}" from the "${resumePhase}" phase (attempt ${attempts}/${MAX_RESUME_ATTEMPTS})`
+    );
+    report('resume', `Resuming "${plan.title}" — continuing from ${resumePhase}`);
+  }
+
+  if (shouldRunPhase(resumePhase, 'suggestion')) {
     // ---- Phase: suggestion ----
     try {
       suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
@@ -392,6 +441,11 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
           characterBible: plan.characterBible,
           scenes: [],
           series: suggestion.series || null,
+          // Persisted (not just kept on the in-memory `plan`) specifically so a resumed session can
+          // reconstruct what the scenes phase needs to continue from — see determineResumePhase and
+          // the resume-aware scenes phase below, which read these back via plan.outline/totalScenes.
+          outline: plan.outline,
+          totalScenes: plan.totalScenes,
         };
 
         await persist();
@@ -402,7 +456,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
       await logStep(channelId, videoId, 'outline', 'error', String(err?.message || err));
       throw err;
     }
+  }
 
+  if (shouldRunPhase(resumePhase, 'scenes')) {
     // ---- Phase: scenes ----
     try {
       await withPhaseNetworkResilience('scenes', channelId, videoId, logStep, async () => {
@@ -420,13 +476,32 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
           niche: channel.niche || '',
         };
 
-        const { scenes: rawScenes, promisedFollowUp } = await generateAllScenes(plan.outline, context, (soFar, total) => {
-          report('scenes', `${soFar.length}/${total} scenes written`);
-          project = { ...project, scenes: buildScenesFromRaw(soFar) };
-          persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
-        });
+        // Resuming mid-scenes: whatever's already in project.scenes (from an earlier, interrupted
+        // attempt) is kept as-is and only the REMAINING chapters/chunks are generated — see
+        // sceneOrchestrator.js's resumeFrom param. previousTail seeds narrative continuity from the
+        // last already-written scene, same as the continuity between chunks within one call.
+        const existingScenes = resumePhase === 'scenes' ? project.scenes || [] : [];
+        const resumeFrom = existingScenes.length
+          ? { alreadyGeneratedCount: existingScenes.length, previousTail: existingScenes[existingScenes.length - 1]?.narration || null }
+          : null;
 
-        project = { ...project, scenes: buildScenesFromRaw(rawScenes), promisedFollowUp: promisedFollowUp || null };
+        const { scenes: newRawScenes, promisedFollowUp } = await generateAllScenes(
+          plan.outline,
+          context,
+          (soFarNew, total) => {
+            const combined = [...existingScenes, ...buildScenesFromRaw(soFarNew)];
+            report('scenes', `${combined.length}/${total} scenes written`);
+            project = { ...project, scenes: combined };
+            persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
+          },
+          resumeFrom
+        );
+
+        project = {
+          ...project,
+          scenes: [...existingScenes, ...buildScenesFromRaw(newRawScenes)],
+          promisedFollowUp: promisedFollowUp || project.promisedFollowUp || null,
+        };
         await persist();
       });
       await logStep(channelId, videoId, 'scenes', 'success', `${project.scenes.length} scenes generated`);
@@ -444,6 +519,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   const usesGeminiBatch = settings.imageProvider === 'nanobanana-batch';
   let mediaStillInProgress = false;
 
+  if (shouldRunPhase(resumePhase, 'media')) {
   try {
     await withPhaseNetworkResilience('media', channelId, videoId, logStep, async () => {
       const mediaOnProgress = (evt) => {
@@ -536,6 +612,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     await logStep(channelId, videoId, 'media', 'error', String(err?.message || err));
     throw err;
   }
+  }
 
   if (mediaStillInProgress) {
     // Not a failure — this video will be picked up again by the resume check on a later cycle.
@@ -545,13 +622,22 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   }
 
   // ---- Phase: render ----
-  let videoBlob;
+  // videoBlob defaults to whatever rehydrateProjectMedia already restored from
+  // renderedVideoStoragePath (see the resume check above) — only actually re-rendered when
+  // shouldRunPhase says this phase hasn't happened yet.
+  let videoBlob = project.renderedVideoBlob || null;
+  if (shouldRunPhase(resumePhase, 'render')) {
   try {
     await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
       videoBlob = await renderVideoForExport(project, settings, {
         onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
       });
-      project = { ...project, renderedVideoBlob: videoBlob };
+      // Backed up to Storage (same pattern as the thumbnail phase below) — a video the automation
+      // publishes right after this in the same call never needs to read it back, but a resumed
+      // session interrupted anywhere after this point (thumbnail, YouTube) can skip re-rendering
+      // entirely instead of redoing this potentially slow, CPU-heavy phase from scratch.
+      const renderedVideoStoragePath = await uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob);
+      project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
       await persist();
     });
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');
@@ -563,9 +649,11 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     await logStep(channelId, videoId, 'render', 'error', String(err?.message || err));
     throw err;
   }
+  }
 
   // ---- Phase: thumbnail ----
   let thumbnailBlob;
+  if (shouldRunPhase(resumePhase, 'thumbnail')) {
   try {
     await withPhaseNetworkResilience('thumbnail', channelId, videoId, logStep, async () => {
       const concept = plan.thumbnails[0];
@@ -589,6 +677,16 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     await logStep(channelId, videoId, 'thumbnail', 'error', String(err?.message || err));
     throw err;
   }
+  } else {
+    // Already done on an earlier attempt — read the backed-up thumbnail back rather than
+    // regenerating it, since it's about to be needed for the YouTube phase below.
+    try {
+      thumbnailBlob = await downloadMediaAsBlob(project.thumbnailStoragePath);
+    } catch (err) {
+      console.error('[fullPipelineRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
+      throw err;
+    }
+  }
 
   // ---- Phase: YouTube ----
   // Deliberately NOT wrapped in withPhaseNetworkResilience, unlike every other phase: a network
@@ -598,6 +696,14 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // cycle, so this phase fails immediately on any error (network or not) and asks for a manual
   // check instead of an automatic retry.
   let youtubeVideoId = null;
+  // wasResumed: this video existed BEFORE this call (it came back through the resume check above),
+  // meaning it had at least one earlier interrupted attempt somewhere. Publish is never auto-
+  // retried for a resumed video reaching this point, regardless of which phase it was actually
+  // resumed from: nothing persisted distinguishes "that earlier attempt never reached YouTube" from
+  // "it died mid-upload, after the bytes already reached Google" (see determineResumePhase's own
+  // comment in src/lib/videoResumption.js) — a duplicate public upload is a worse outcome than one
+  // video sitting for manual review. A video produced start-to-finish in ONE uninterrupted call
+  // (wasResumed false) is unaffected: that's always definitely a first attempt.
   if (channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
@@ -606,6 +712,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
     // automationEngine.js after this returns — it counts videos *produced*, not videos published.
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
+  } else if (wasResumed) {
+    const message = 'video ready for manual review — resumed after an earlier interruption, publish is not auto-retried to avoid a possible duplicate upload';
+    await logStep(channelId, videoId, 'youtube', 'success', message);
+    report('youtube', 'Resumed video — ready for manual review, not auto-published');
   } else {
     try {
       const metadata = {

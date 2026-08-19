@@ -2,30 +2,50 @@
 // narration over one unchanging background, no per-scene images). Same overall shape as
 // fullPipelineRecipe.js (suggestion → video record → outline → scenes → media → render →
 // thumbnail → YouTube), composing the same existing engine modules, but with the per-scene image
-// phases removed entirely and a single background-setup phase in their place. No resume-across-
-// sessions mechanism like fullPipelineRecipe.js's Gemini-Batch-specific one: every phase here is
-// fully synchronous within one call (audio, one background image, render), so there's no async gap
-// spanning browser sessions to resume across — a mid-run failure still leaves a resumable, reviewable
-// video record behind (same persist-every-checkpoint principle), just not a "pick this exact video
-// back up automatically" mechanism.
+// phases removed entirely and a single background-setup phase in their place.
+//
+// A video interrupted partway (browser tab closed, computer slept, any crash) is picked back up
+// from wherever it actually left off — suggestion/outline, scenes, media, render, or thumbnail —
+// via findResumableVideo + determineResumePhase (see src/lib/videoResumption.js, shared with
+// fullPipelineRecipe.js), NOT restarted from scratch. YouTube publish is the one phase never auto-
+// resumed (see the 'youtube' phase below for why), and a video stuck failing the same phase
+// MAX_RESUME_ATTEMPTS times in a row is marked permanently stuck rather than retried forever.
 //
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
 import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
-import { uploadMedia } from '../mediaStorage';
+import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
+import { rehydrateProjectMedia } from '../mediaRehydration';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
+import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
 async function totalCostForVideo(channelId, videoId) {
   const { items: costItems } = await getCostsByChannel(channelId);
   return costItems.filter((c) => c.videoId === videoId).reduce((sum, c) => sum + (c.amountUsd || 0), 0);
+}
+
+// Same as fullPipelineRecipe.js's own findResumableVideo — see there for the full reasoning.
+// Duplicated rather than shared, same controlled-duplication convention already used between these
+// two recipe files for isNetworkError/waitForOnline/etc.
+async function findResumableVideo(channelId) {
+  const videos = await listVideosByChannel(channelId);
+  const cutoff = Date.now() - RESUMABLE_VIDEO_WINDOW_MS;
+  return (
+    videos.find((v) => {
+      if ((v.createdAt || 0) < cutoff) return false;
+      if (v.youtubeVideoId) return false;
+      if (v.stuckError) return false;
+      return determineResumePhase(v, v.outline) !== null;
+    }) || null
+  );
 }
 
 let sceneIdCounter = 1;
@@ -147,8 +167,12 @@ function buildStaticBackgroundFromChannel(channel) {
 
 /**
  * channel/userId/onProgress/logStep: same contract as fullPipelineRecipe.js's runFullPipeline.
- * Returns { videoId, youtubeVideoId, costUsd } — no `inProgress` case (see header comment: nothing
- * in this recipe is ever left mid-flight across a resume boundary).
+ * Returns { videoId, youtubeVideoId, costUsd } — no `inProgress` case (unlike fullPipelineRecipe.js's
+ * Gemini Batch handling, every phase here is fully synchronous within one call, so a call to this
+ * function either finishes the video or throws — it never returns "still working, check back
+ * later"). youtubeVideoId is null both when auto-publish is off AND when the video was resumed from
+ * an earlier interruption (see the YouTube phase below). Throws (after marking project.stuckError)
+ * when a resumed video has failed the same phase MAX_RESUME_ATTEMPTS times in a row.
  */
 export async function runStaticBackgroundPipeline(channel, { userId, onProgress, logStep }) {
   const channelId = channel.id;
@@ -157,7 +181,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   let project = null;
   let plan = null;
   let suggestion = null;
-  const createdAt = Date.now();
+  let createdAt = Date.now();
   const report = (step, message) => onProgress?.({ step, message, videoId, project });
 
   const persist = () =>
@@ -172,6 +196,55 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       displayTitle: plan?.title || suggestion?.title,
     });
 
+  // ---- Resume check ----
+  // See fullPipelineRecipe.js's identical block for the full reasoning — duplicated rather than
+  // shared, same controlled-duplication convention already used between these two files.
+  const resumable = await findResumableVideo(channelId);
+  let resumePhase = 'suggestion';
+  const wasResumed = !!resumable;
+
+  if (resumable) {
+    videoId = resumable.id;
+    createdAt = resumable.createdAt || Date.now();
+    project = await rehydrateProjectMedia(resumable);
+    plan = {
+      title: resumable.displayTitle || resumable.topic || '',
+      description: resumable.description || '',
+      tags: resumable.tags || [],
+      thumbnails: resumable.thumbnails || [],
+      characterBible: resumable.characterBible || [],
+      references: resumable.references || [],
+      outline: resumable.outline || [],
+      totalScenes: resumable.totalScenes || 0,
+    };
+    suggestion = { title: resumable.topic || plan.title, series: resumable.series || null };
+    resumePhase = determineResumePhase(project, plan.outline);
+
+    if ((resumePhase === 'thumbnail' || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
+
+    const { attempts, stuck } = trackResumeAttempt(project, resumePhase);
+    project = { ...project, resumeAttempts: attempts, lastResumePhase: resumePhase };
+
+    if (stuck) {
+      const stuckMessage = `⚠ Stuck after ${MAX_RESUME_ATTEMPTS} automatic resume attempts in the "${resumePhase}" phase — needs manual review`;
+      project = { ...project, stuckError: stuckMessage };
+      await persist();
+      await logStep(channelId, videoId, resumePhase, 'error', stuckMessage);
+      throw new Error(stuckMessage);
+    }
+
+    await persist();
+    await logStep(
+      channelId,
+      videoId,
+      'resume',
+      'success',
+      `resuming incomplete video "${plan.title}" from the "${resumePhase}" phase (attempt ${attempts}/${MAX_RESUME_ATTEMPTS})`
+    );
+    report('resume', `Resuming "${plan.title}" — continuing from ${resumePhase}`);
+  }
+
+  if (shouldRunPhase(resumePhase, 'suggestion')) {
   // ---- Phase: suggestion ----
   try {
     suggestion = await withPhaseNetworkResilience('suggestion', channelId, null, logStep, async () => {
@@ -282,6 +355,11 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         series: suggestion.series || null,
         staticBackground,
         staticTextStyle,
+        // Persisted (not just kept on the in-memory `plan`) specifically so a resumed session can
+        // reconstruct what the scenes phase needs to continue from — see determineResumePhase and
+        // the resume-aware scenes phase below, which read these back via plan.outline/totalScenes.
+        outline: plan.outline,
+        totalScenes: plan.totalScenes,
       };
 
       await persist();
@@ -292,7 +370,9 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await logStep(channelId, videoId, 'outline', 'error', String(err?.message || err));
     throw err;
   }
+  }
 
+  if (shouldRunPhase(resumePhase, 'scenes')) {
   // ---- Phase: scenes ----
   try {
     await withPhaseNetworkResilience('scenes', channelId, videoId, logStep, async () => {
@@ -311,13 +391,31 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         niche: channel.niche || '',
       };
 
-      const { scenes: rawScenes, promisedFollowUp } = await generateAllScenes(plan.outline, context, (soFar, total) => {
-        report('scenes', `${soFar.length}/${total} scenes written`);
-        project = { ...project, scenes: buildScenesFromRaw(soFar) };
-        persist().catch((err) => console.error('[staticBackgroundRecipe] partial scene save failed', err));
-      });
+      // Resuming mid-scenes: whatever's already in project.scenes (from an earlier, interrupted
+      // attempt) is kept as-is and only the REMAINING chapters/chunks are generated — see
+      // sceneOrchestrator.js's resumeFrom param.
+      const existingScenes = resumePhase === 'scenes' ? project.scenes || [] : [];
+      const resumeFrom = existingScenes.length
+        ? { alreadyGeneratedCount: existingScenes.length, previousTail: existingScenes[existingScenes.length - 1]?.narration || null }
+        : null;
 
-      project = { ...project, scenes: buildScenesFromRaw(rawScenes), promisedFollowUp: promisedFollowUp || null };
+      const { scenes: newRawScenes, promisedFollowUp } = await generateAllScenes(
+        plan.outline,
+        context,
+        (soFarNew, total) => {
+          const combined = [...existingScenes, ...buildScenesFromRaw(soFarNew)];
+          report('scenes', `${combined.length}/${total} scenes written`);
+          project = { ...project, scenes: combined };
+          persist().catch((err) => console.error('[staticBackgroundRecipe] partial scene save failed', err));
+        },
+        resumeFrom
+      );
+
+      project = {
+        ...project,
+        scenes: [...existingScenes, ...buildScenesFromRaw(newRawScenes)],
+        promisedFollowUp: promisedFollowUp || project.promisedFollowUp || null,
+      };
       await persist();
     });
     await logStep(channelId, videoId, 'scenes', 'success', `${project.scenes.length} scenes generated`);
@@ -325,8 +423,10 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await logStep(channelId, videoId, 'scenes', 'error', String(err?.message || err));
     throw err;
   }
+  }
 
   // ---- Phase: media (voice only — no per-scene images for this content type) ----
+  if (shouldRunPhase(resumePhase, 'media')) {
   try {
     await withPhaseNetworkResilience('media', channelId, videoId, logStep, async () => {
       const mediaOnProgress = (evt) => {
@@ -349,15 +449,20 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await logStep(channelId, videoId, 'media', 'error', String(err?.message || err));
     throw err;
   }
+  }
 
   // ---- Phase: render ----
-  let videoBlob;
+  let videoBlob = project.renderedVideoBlob || null;
+  if (shouldRunPhase(resumePhase, 'render')) {
   try {
     await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
       videoBlob = await renderVideoForExport(project, settings, {
         onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
       });
-      project = { ...project, renderedVideoBlob: videoBlob };
+      // Backed up to Storage (same pattern as the thumbnail phase below) so a resumed session
+      // interrupted anywhere after this point can skip re-rendering entirely.
+      const renderedVideoStoragePath = await uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob);
+      project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
       await persist();
     });
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');
@@ -369,6 +474,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await logStep(channelId, videoId, 'render', 'error', String(err?.message || err));
     throw err;
   }
+  }
 
   // ---- Phase: thumbnail ----
   // A YouTube listing thumbnail is a distinct thing from the in-video static background — every
@@ -376,6 +482,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // identical to fullPipelineRecipe.js's (thumbnailEngine.js never looks at project.scenes[].images
   // at all — it works from project.thumbnails[thumbIdx], the outline's own thumbnail concepts).
   let thumbnailBlob;
+  if (shouldRunPhase(resumePhase, 'thumbnail')) {
   try {
     await withPhaseNetworkResilience('thumbnail', channelId, videoId, logStep, async () => {
       const concept = plan.thumbnails[0];
@@ -399,14 +506,30 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await logStep(channelId, videoId, 'thumbnail', 'error', String(err?.message || err));
     throw err;
   }
+  } else {
+    // Already done on an earlier attempt — read the backed-up thumbnail back rather than
+    // regenerating it, since it's about to be needed for the YouTube phase below.
+    try {
+      thumbnailBlob = await downloadMediaAsBlob(project.thumbnailStoragePath);
+    } catch (err) {
+      console.error('[staticBackgroundRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
+      throw err;
+    }
+  }
 
   // ---- Phase: YouTube ----
   // Deliberately NOT wrapped in withPhaseNetworkResilience — same duplicate-upload risk reasoning
   // as fullPipelineRecipe.js's identical phase.
   let youtubeVideoId = null;
+  // wasResumed: see fullPipelineRecipe.js's identical YouTube-phase comment for the full reasoning
+  // — a resumed video's publish is never auto-retried, regardless of which phase it resumed from.
   if (channel.automation_auto_publish === false) {
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
+  } else if (wasResumed) {
+    const message = 'video ready for manual review — resumed after an earlier interruption, publish is not auto-retried to avoid a possible duplicate upload';
+    await logStep(channelId, videoId, 'youtube', 'success', message);
+    report('youtube', 'Resumed video — ready for manual review, not auto-published');
   } else {
     try {
       const metadata = {

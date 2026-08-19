@@ -370,6 +370,20 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         </div>
       )}
 
+      {/* project.stuckError is set by fullPipelineRecipe.js/staticBackgroundRecipe.js's resume
+          tracking (see src/lib/videoResumption.js) once a video has failed the exact same automated
+          resume phase MAX_RESUME_ATTEMPTS times in a row — automation has given up retrying it, so
+          it just sits here until a person looks at it and fixes/retries manually from this page. */}
+      {project.stuckError && (
+        <div style={{ ...card, border: `1px solid ${T.primary}`, marginBottom: 16 }}>
+          <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.primary }}>{project.stuckError}</div>
+          <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6, lineHeight: 1.5 }}>
+            Automation stopped retrying this video and moved on to other channels. Review and fix whatever's failing below, then use the
+            controls on this page to continue manually — automation won't pick this video back up on its own.
+          </div>
+        </div>
+      )}
+
       {/* Gemini Batch jobs in flight for this video replace the normal generation control + grid
           entirely — same card design as AutomationMirrorStep.jsx's mirror of the same state, so a
           batch-provider video looks the same whether it's being watched from automation or here.
