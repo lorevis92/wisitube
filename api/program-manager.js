@@ -4,6 +4,14 @@
 //
 // Looks at a channel holistically (niche, editorial notes, every video already made) and asks
 // Claude — with web search enabled, same as api/generate.js — to propose what to produce next.
+// Three modes, dispatched by body.mode, all sharing this one file rather than three separate
+// functions — Vercel Hobby caps a deployment at 12 Serverless Functions (see api/youtube.js's own
+// header comment), and this project is already at that limit:
+//   mode=suggest (default)  — the original behavior above/below: a broad qualitative candidate batch.
+//   mode=synthesize         — see the SYNTHESIZE_* constants: selects/ranks a scored batch.
+//   mode=chat               — see CHAT_SYSTEM_PROMPT: a conversation with the channel owner about
+//                              this assistant's own suggestion behavior, which can end in a proposed
+//                              creative-direction update (see src/components/ProgramManagerChat.jsx).
 //
 // Every phase has its own try/catch so a failure anywhere (request validation, the outbound
 // fetch, reading the response body, parsing either layer of JSON) returns a clear JSON error with
@@ -47,6 +55,21 @@ const SYNTHESIZE_CREATIVE_DIRECTION = `You are an expert YouTube content strateg
 
 const SYNTHESIZE_SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "finalSuggestions": [6 to 8 objects, ordered BEST FIRST: { "title": "must exactly match one of the candidate titles given to you, verbatim", "priority": "high|medium|low", "rationale": "1-2 sentences on why this made the final cut — cite the real numbers when they support the decision, or state the editorial reason when overriding a weak or incomplete signal" }] }.`;
 
+// ---- mode=chat ----
+//
+// Conversational counterpart to the suggest/synthesize modes above — same Content Program Manager
+// "persona," but talking directly to the channel owner about its own behavior instead of producing
+// a batch of suggestions. Plain-text reply, not JSON: skips the schema/brace-parsing phases entirely
+// (see the handler below). No web_search tool: this is a conversation about context already given,
+// not a research task.
+//
+// Ends with a machine-parseable <PROPOSED_UPDATE>...</PROPOSED_UPDATE> block only when the owner has
+// explicitly agreed to a change — src/components/ProgramManagerChat.jsx extracts that block and, on
+// confirmation, saves it through the exact same channel.prompt_overrides.programManager path the
+// Prompt Lab already uses (including its version history) — this endpoint itself never writes
+// anything, it only ever proposes text.
+const CHAT_SYSTEM_PROMPT = `You are this channel's Content Program Manager, having a direct conversation with the channel owner about your own suggestion behavior. Explain your past reasoning honestly when asked, using the real context provided — never invent justifications. When the owner explicitly agrees on a change to how you should operate going forward, propose the updated creative direction as a complete replacement text, wrapped in a clearly delimited block: <PROPOSED_UPDATE>full updated creative direction text here</PROPOSED_UPDATE>. Only propose an update when there's clear agreement on a specific change — casual discussion doesn't need one. Never propose changes to the technical JSON schema, only to editorial/creative guidance.`;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -65,10 +88,10 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let mode, channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, pendingPromises, analysis, scoredCandidates;
+    let mode, channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, pendingPromises, analysis, scoredCandidates, chatMessages, recentSuggestions;
     try {
       const body = req.body || {};
-      mode = body.mode === 'synthesize' ? 'synthesize' : 'suggest';
+      mode = body.mode === 'synthesize' ? 'synthesize' : body.mode === 'chat' ? 'chat' : 'suggest';
       channelName = typeof body.channelName === 'string' ? body.channelName.trim() : '';
       if (!channelName || channelName.length > 200) {
         return res.status(400).json({ error: 'Invalid channelName' });
@@ -144,13 +167,54 @@ export default async function handler(req, res) {
       if (mode === 'synthesize' && scoredCandidates.length === 0) {
         return res.status(400).json({ error: 'Invalid scoredCandidates' });
       }
+
+      // mode=chat's own inputs — the full conversation so far, and (for context, not validation)
+      // the channel's most recently scored/synthesized suggestions with their real reasoning, so
+      // the assistant can honestly explain past behavior instead of guessing at it.
+      chatMessages = Array.isArray(body.messages)
+        ? body.messages
+            .filter((m) => m && typeof m === 'object' && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+            .map((m) => ({ role: m.role, content: m.content.trim().slice(0, 8000) }))
+            .slice(-40)
+        : [];
+      recentSuggestions = Array.isArray(body.recentSuggestions)
+        ? body.recentSuggestions
+            .filter((s) => s && typeof s === 'object' && typeof s.title === 'string' && s.title.trim())
+            .map((s) => ({
+              title: s.title.trim(),
+              priority: typeof s.priority === 'string' ? s.priority.trim() : 'medium',
+              rationale: typeof s.rationale === 'string' ? s.rationale.trim() : '',
+              reasoning: typeof s.reasoning === 'string' ? s.reasoning.trim() : '',
+            }))
+            .slice(0, 20)
+        : [];
+      if (mode === 'chat' && chatMessages.length === 0) {
+        return res.status(400).json({ error: 'Invalid messages' });
+      }
     } catch (err) {
       console.error('[program-manager] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    let systemPrompt, userContent, maxTokens, tools;
-    if (mode === 'synthesize') {
+    let systemPrompt, userContent, maxTokens, tools, anthropicMessages;
+    if (mode === 'chat') {
+      // ---- mode=chat prompt ----
+      systemPrompt = CHAT_SYSTEM_PROMPT;
+      systemPrompt += `\n\nChannel: ${channelName}. Niche: ${niche || '(not specified)'}.`;
+      if (editorialNotes) systemPrompt += ` Editorial notes: ${editorialNotes}`;
+      systemPrompt += `\n\nYour current creative direction — this is what actually governs your suggestion behavior right now (the channel owner's custom override if they've set one, otherwise your own default):\n${creativeOverride || DEFAULT_CREATIVE_DIRECTION}`;
+      if (videos.length) {
+        systemPrompt += `\n\nRecent videos on this channel:\n${videos.map((v) => `- "${v.title || v.topic}"`).join('\n')}`;
+      }
+      if (recentSuggestions.length) {
+        systemPrompt += `\n\nYour most recent suggestions and the real reasoning behind them:\n${recentSuggestions
+          .map((s) => `- "${s.title}" [${s.priority}]: ${s.rationale || s.reasoning || '(no rationale recorded)'}`)
+          .join('\n')}`;
+      }
+      anthropicMessages = chatMessages;
+      maxTokens = 1500;
+      tools = undefined; // a conversation about context already given, not a research task
+    } else if (mode === 'synthesize') {
       // ---- mode=synthesize prompt ----
       systemPrompt = creativeOverride || SYNTHESIZE_CREATIVE_DIRECTION;
       if (activeDirective) {
@@ -214,6 +278,9 @@ export default async function handler(req, res) {
       maxTokens = 4000;
       tools = [{ type: 'web_search_20250305', name: 'web_search' }];
     }
+    // suggest/synthesize both send a single user turn built above; chat sends the real multi-turn
+    // history instead (already assigned in its own branch).
+    if (!anthropicMessages) anthropicMessages = [{ role: 'user', content: userContent }];
 
     // Phase 2: call Anthropic.
     let response;
@@ -230,7 +297,7 @@ export default async function handler(req, res) {
           max_tokens: maxTokens,
           system: systemPrompt,
           ...(tools ? { tools } : {}),
-          messages: [{ role: 'user', content: userContent }],
+          messages: anthropicMessages,
         }),
       });
     } catch (err) {
@@ -272,6 +339,16 @@ export default async function handler(req, res) {
     } catch (err) {
       console.error('[program-manager] phase=extract-text-blocks', err?.message, err?.stack);
       return res.status(502).json({ error: 'Could not read Anthropic response content', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    // mode=chat replies in plain conversational text, not JSON — nothing left to parse, the raw
+    // text (optionally containing a <PROPOSED_UPDATE> block the client extracts) IS the response.
+    if (mode === 'chat') {
+      if (!raw.trim()) {
+        console.error('[program-manager] phase=validate-chat-reply empty reply');
+        return res.status(502).json({ error: 'AI returned an empty reply' });
+      }
+      return res.status(200).json({ reply: raw.trim() });
     }
 
     const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();

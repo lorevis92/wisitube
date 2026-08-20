@@ -18,6 +18,7 @@ import {
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
 import { getTopicSuggestions, startTopicSuggestion, dismissTopicSuggestion } from '../lib/contentProgramManager';
+import ProgramManagerChat from '../components/ProgramManagerChat';
 import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/promptDefaults';
 import { generateImage } from '../lib/sceneOrchestrator';
 import { priceForImage } from '../lib/imageProviders';
@@ -110,6 +111,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [channelInfoOpen, setChannelInfoOpen] = useState(false);
   const [programManagerOpen, setProgramManagerOpen] = useState(false);
   const [videoGridOpen, setVideoGridOpen] = useState(true);
+  const [showProgramManagerChat, setShowProgramManagerChat] = useState(false);
   // Local in-progress edits per stage, keyed by stage — undefined means "not yet touched this
   // session, fall back to channel.prompt_overrides[stage] or the stage's default text". Kept
   // separate from channel state so typing doesn't need a round-trip through saveChannel on every
@@ -1101,7 +1103,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
         {programManagerOpen && (
           <>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+          <button onClick={() => setShowProgramManagerChat(true)} style={btnGhost}>
+            💬 Talk to your Content Manager
+          </button>
           <button onClick={() => fetchSuggestions('')} disabled={suggestionsLoading} style={{ ...btnPrimary, opacity: suggestionsLoading ? 0.6 : 1 }}>
             {suggestionsLoading ? 'Working…' : channel?.topic_scoring_cache ? 'Refresh suggestions' : 'Suggest next videos'}
           </button>
@@ -1482,6 +1487,15 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           })}
         </div>
       ))}
+
+      {showProgramManagerChat && (
+        <ProgramManagerChat
+          channel={channel}
+          videos={videos}
+          onApplyUpdate={(text) => savePromptOverride('programManager', text)}
+          onClose={() => setShowProgramManagerChat(false)}
+        />
+      )}
     </div>
   );
 }
