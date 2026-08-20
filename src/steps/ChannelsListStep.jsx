@@ -70,6 +70,30 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Static external links only — no API calls, so there's no error state to handle here. */}
+      <div style={{ ...card, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={label}>Check your balances</div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <a
+            href="https://fal.ai/dashboard/billing"
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...btnGhost, textDecoration: 'none', display: 'inline-block' }}
+          >
+            💰 fal.ai balance →
+          </a>
+          <a
+            href="https://console.cloud.google.com/billing"
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...btnGhost, textDecoration: 'none', display: 'inline-block' }}
+          >
+            💰 Google Cloud billing →
+          </a>
+        </div>
+        <div style={{ ...mono, fontSize: 11, color: T.textMuted }}>May require one extra click to select the right billing account/project</div>
+      </div>
+
       <div style={{ ...mono, fontSize: 12, color: T.textSecondary }}>
         💰 Total spent across all channels: ${totalSpent.toFixed(2)}
       </div>
