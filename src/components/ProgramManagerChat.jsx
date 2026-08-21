@@ -1,17 +1,40 @@
 // Conversational interface to the Content Program Manager (api/program-manager.js, mode=chat) —
 // lets the channel owner ask why it suggested what it did and, on explicit agreement, propose an
-// update to its own creative direction. History is kept in local component state only for this
-// first version — not persisted across sessions/reloads, same as any other in-progress draft in
-// this app that hasn't been explicitly saved yet.
+// update to its own creative direction. Persisted as channel.program_manager_chat — a plain array
+// of { role, content } turns, the same shape sent to/from the API — so reopening this panel resumes
+// the same conversation instead of starting blank. Only "the current one" is ever kept: no history
+// of past conversations, "New conversation" just clears it.
 //
 // onApplyUpdate(text): pre-bound by the caller (ChannelDashboardStep.jsx) to save through the exact
 // same channel.prompt_overrides.programManager path the Prompt Lab already uses (including its
-// version history) — this component never touches Supabase directly, it only ever asks the parent
-// to apply text it already showed the user.
+// version history) — this component never touches Supabase directly for that. onSaveChat(history):
+// also pre-bound by the caller, persists this conversation (or null to clear it) through the same
+// safe functional-setChannel pattern the rest of that page uses — this component never calls
+// saveChannel directly either, only ever asks the parent to persist what it already has.
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 
 const PROPOSED_UPDATE_RE = /<PROPOSED_UPDATE>([\s\S]*?)<\/PROPOSED_UPDATE>/;
+
+// Reconstructs { text, proposal } from a stored/raw assistant content string — same splitReply
+// logic used right after a live API reply, reused here so a reloaded conversation renders
+// identically to how it looked live. `applied` can't be recovered this way (it's UI-only history,
+// not part of the { role, content } shape this is persisted in) — a reloaded proposal always
+// starts un-applied, even if it already was in an earlier session; re-clicking Apply on it is a
+// harmless no-op (savePromptOverride skips the write when the text already matches).
+function toDisplayMessage(m) {
+  if (m.role !== 'assistant') return { role: 'user', text: m.content || '' };
+  const { text, proposal } = splitReply(m.content || '');
+  return { role: 'assistant', text, proposal, applied: false };
+}
+
+// Inverse of toDisplayMessage — reconstructs a raw content string (tag included) so a later reload
+// can split it apart the same way again.
+function toStoredMessage(m) {
+  if (m.role === 'user') return { role: 'user', content: m.text };
+  const content = m.proposal ? `${m.text}\n\n<PROPOSED_UPDATE>\n${m.proposal}\n</PROPOSED_UPDATE>` : m.text;
+  return { role: 'assistant', content };
+}
 
 // Same defensive pattern as src/lib/contentProgramManager.js's postJSON — reads the raw body before
 // parsing, so a platform-level failure (e.g. this endpoint's own maxDuration killing the request,
@@ -39,13 +62,25 @@ function splitReply(text) {
   return { text: remaining, proposal: match[1].trim() };
 }
 
-export default function ProgramManagerChat({ channel, videos, onApplyUpdate, onClose }) {
-  const [messages, setMessages] = useState([]); // [{ role, text, proposal, applied }]
+export default function ProgramManagerChat({ channel, videos, onApplyUpdate, onSaveChat, onClose }) {
+  // Lazy initializer — reads channel.program_manager_chat once, at mount, rather than on every
+  // render; this panel is only ever mounted fresh (see ChannelDashboardStep.jsx's
+  // {showProgramManagerChat && <ProgramManagerChat .../>}), so there's no later prop change to
+  // react to here.
+  const [messages, setMessages] = useState(() =>
+    Array.isArray(channel?.program_manager_chat) ? channel.program_manager_chat.map(toDisplayMessage) : []
+  ); // [{ role, text, proposal, applied }]
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [applyingIndex, setApplyingIndex] = useState(null);
   const listRef = useRef(null);
+
+  // Fire-and-forget — a failed persist shouldn't block the conversation from continuing locally,
+  // just logged so it's not silently lost.
+  function persistHistory(nextMessages) {
+    onSaveChat?.(nextMessages.map(toStoredMessage)).catch((err) => console.error('[ProgramManagerChat] failed to save chat history', err));
+  }
 
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -86,7 +121,9 @@ export default function ProgramManagerChat({ channel, videos, onApplyUpdate, onC
       });
       if (!ok) throw new Error(data.error || 'Content Program Manager chat request failed');
       const { text: replyText, proposal } = splitReply(data.reply || '');
-      setMessages((prev) => [...prev, { role: 'assistant', text: replyText, proposal, applied: false }]);
+      const withReply = [...history, { role: 'assistant', text: replyText, proposal, applied: false }];
+      setMessages(withReply);
+      persistHistory(withReply);
     } catch (err) {
       setError(String(err.message || err));
     } finally {
@@ -100,16 +137,26 @@ export default function ProgramManagerChat({ channel, videos, onApplyUpdate, onC
     setApplyingIndex(index);
     try {
       await onApplyUpdate(msg.proposal);
-      setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, applied: true } : m)));
-      setMessages((prev) => [
-        ...prev,
+      const withConfirmation = [
+        ...messages.map((m, i) => (i === index ? { ...m, applied: true } : m)),
         { role: 'assistant', text: '✅ Applied — this is now your creative direction for future suggestions.', proposal: null },
-      ]);
+      ];
+      setMessages(withConfirmation);
+      persistHistory(withConfirmation);
     } catch (err) {
       setError(`Could not apply the update: ${String(err.message || err)}`);
     } finally {
       setApplyingIndex(null);
     }
+  }
+
+  // "New conversation" — no history of past conversations is kept (see the header comment), so
+  // this is a hard clear, both locally and on the channel record, not an archive-and-start-fresh.
+  function newConversation() {
+    setMessages([]);
+    setInput('');
+    setError('');
+    onSaveChat?.(null).catch((err) => console.error('[ProgramManagerChat] failed to clear chat history', err));
   }
 
   function onInputKeyDown(e) {
@@ -156,13 +203,18 @@ export default function ProgramManagerChat({ channel, videos, onApplyUpdate, onC
           }}
         >
           <div style={label}>💬 Talk to your Content Manager</div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            style={{ background: 'none', border: 'none', color: T.textSecondary, fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
-          >
-            ✕
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <button onClick={newConversation} disabled={messages.length === 0} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: messages.length === 0 ? 0.5 : 1 }}>
+              🆕 New conversation
+            </button>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              style={{ background: 'none', border: 'none', color: T.textSecondary, fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <div ref={listRef} style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>

@@ -283,6 +283,26 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     onChannelChange?.(updated);
   }
 
+  // Persists the Content Program Manager chat (ProgramManagerChat.jsx) — a functional setChannel
+  // update rather than spreading the `channel` closed over by this callback, same reasoning as
+  // startSuggestion/dismissSuggestion below: ProgramManagerChat.jsx's own onApplyUpdate call
+  // (savePromptOverride) can land a prompt_overrides change moments before this fires, and reading
+  // the LATEST state here (not a possibly-stale `channel` prop snapshot) is what keeps that change
+  // from being silently clobbered by this save. history is null to clear the chat ("New
+  // conversation"), or the array of { role, content } turns to persist otherwise.
+  async function saveProgramManagerChat(history) {
+    let latestChannel;
+    setChannel((prev) => {
+      if (!prev) return prev;
+      latestChannel = { ...prev, program_manager_chat: history };
+      return latestChannel;
+    });
+    if (!latestChannel) return;
+    const updated = await saveChannel(latestChannel);
+    setChannel(updated);
+    onChannelChange?.(updated);
+  }
+
   async function toggleHistory(stage) {
     if (historyOpenStage === stage) {
       setHistoryOpenStage(null);
@@ -1493,6 +1513,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           channel={channel}
           videos={videos}
           onApplyUpdate={(text) => savePromptOverride('programManager', text)}
+          onSaveChat={saveProgramManagerChat}
           onClose={() => setShowProgramManagerChat(false)}
         />
       )}

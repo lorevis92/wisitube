@@ -185,6 +185,13 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists automation_channel_intro boolean not null default false;
+//
+// Required one-time setup for the persistent Content Program Manager chat (see
+// src/components/ProgramManagerChat.jsx) — one conversation per channel, no history of past
+// conversations kept, just "the current one":
+//
+//   alter table wisitube_channels
+//     add column if not exists program_manager_chat jsonb;
 
 function fromChannelRow(row) {
   return {
@@ -204,6 +211,11 @@ function fromChannelRow(row) {
     // it's only ever compared against Date.now() via isTopicCacheFresh, never displayed.
     topic_scoring_cache: row.topic_scoring_cache || null,
     topic_scoring_cached_at: row.topic_scoring_cached_at || null,
+    // The current Content Program Manager chat (see src/components/ProgramManagerChat.jsx) — a
+    // plain array of { role, content } turns, the same shape sent to/from api/program-manager.js's
+    // mode=chat. null when there's no conversation yet, or after "New conversation" resets it — no
+    // history of past conversations is kept, only ever "the current one."
+    program_manager_chat: Array.isArray(row.program_manager_chat) ? row.program_manager_chat : null,
     // Titles the channel owner explicitly said "not interested" to (ChannelDashboardStep.jsx) — fed
     // back as avoidTitles on every future Content Program Manager call (a single replacement or a
     // full regeneration) so a dismissed idea doesn't keep resurfacing. Capped at the most recent 50
@@ -278,6 +290,7 @@ export async function saveChannel(channel) {
     last_suggestions: channel.lastSuggestions || null,
     topic_scoring_cache: channel.topic_scoring_cache || null,
     topic_scoring_cached_at: channel.topic_scoring_cached_at || null,
+    program_manager_chat: Array.isArray(channel.program_manager_chat) ? channel.program_manager_chat : null,
     dismissed_suggestions: Array.isArray(channel.dismissed_suggestions) ? channel.dismissed_suggestions : [],
     youtube_connected: !!channel.youtube_connected,
     youtube_channel_name: channel.youtube_channel_name || '',
