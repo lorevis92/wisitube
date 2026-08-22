@@ -1,18 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import {
-  listChannels,
-  saveChannel,
-  listAutomationLog,
-  getSchedulerSettings,
-  saveSchedulerSettings,
-  listVideosWithPendingBatches,
-  loadVideo,
-  saveVideo,
-} from '../lib/db';
+import { listChannels, saveChannel, listAutomationLog, getSchedulerSettings, saveSchedulerSettings } from '../lib/db';
 import { runAutomationCycle } from '../lib/automationEngine';
 import { runManagedCycle, requestStop, applyProgressToRun, forceUnlock } from '../lib/automationScheduler';
-import { resumePendingBatches } from '../lib/batchResumption';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
@@ -20,7 +10,6 @@ import { STYLES } from '../lib/pollinations';
 import ExpandableTextarea from '../components/ExpandableTextarea';
 
 const SCHEDULER_POLL_MS = 15000;
-const PENDING_BATCHES_POLL_MS = 30000;
 const INTERVAL_UNITS = [
   { value: 'minutes', label: 'minutes' },
   { value: 'hours', label: 'hours' },
@@ -138,14 +127,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   // started) isn't enough to drive the Run/Stop buttons.
   const [schedulerCycleRunning, setSchedulerCycleRunning] = useState(false);
 
-  // "Batches in flight" panel — every video (across every channel) still waiting on Gemini Batch
-  // jobs, independent of whether a cycle is actively running right now (see db.js's
-  // listVideosWithPendingBatches). checkingVideoId tracks which single video's "Check for updates"
-  // button is mid-request (disables just that button); checkingAll tracks the header's "Check all".
-  const [pendingBatchVideos, setPendingBatchVideos] = useState([]);
-  const [checkingVideoId, setCheckingVideoId] = useState(null);
-  const [checkingAll, setCheckingAll] = useState(false);
-
   // Gemini Batch API isolated test panel (api/gemini-batch.js) — entirely separate from the
   // channels/cycle state above; not read by runAutomationCycle or fullPipelineRecipe.js in any way.
   const [batchPromptsText, setBatchPromptsText] = useState('');
@@ -242,83 +223,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       clearInterval(id);
     };
   }, []);
-
-  async function loadPendingBatchVideos() {
-    try {
-      const items = await listVideosWithPendingBatches(userId);
-      setPendingBatchVideos(items);
-    } catch (err) {
-      console.error('[AutomationStep] failed to load pending-batch videos', err);
-    }
-  }
-
-  // Independent of `running`/`schedulerCycleRunning` on purpose — a video can still be sitting on
-  // Gemini Batch jobs whether or not a cycle is active right now (batches resolve on Google's own
-  // schedule, over hours), so this panel has to stay populated and refresh on its own timer rather
-  // than only appearing during a live cycle.
-  useEffect(() => {
-    loadPendingBatchVideos();
-    const id = setInterval(loadPendingBatchVideos, PENDING_BATCHES_POLL_MS);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
-
-  // Same buildAutomationSettings shape fullPipelineRecipe.js's own copy builds — trimmed down to
-  // only the fields buildImagePrompt (mediaGenerationEngine.js, via geminiBatchImageEngine.js's
-  // collectPendingBeatItems) actually reads: style and imageProvider. Only matters if this check
-  // triggers a completeness-driven recovery batch (batchResumption.js) — the ordinary "download
-  // whatever's ready" path doesn't need it at all.
-  function imageSettingsForChannel(channelId) {
-    const channel = (channels || []).find((c) => c.id === channelId);
-    return {
-      style: channel?.automation_style || 'facestick',
-      imageProvider: channel?.automation_image_provider || 'pollinations',
-    };
-  }
-
-  // Re-loads the full video record (the summary list only carries display fields, not the whole
-  // scenes/pendingImageBatches payload), checks its Gemini Batch jobs for anything newly ready, and
-  // persists whatever resumePendingBatches downloaded — same call fullPipelineRecipe.js's resume
-  // branch and App.jsx's own video-open path already use, just triggered from here instead of an
-  // open video or a whole cycle. `video` (from loadVideo) is already flattened to exactly the shape
-  // saveVideo expects back (id/channelId/topic/settings/displayTitle plus every project field, see
-  // db.js's fromVideoRow) — resumePendingBatches only ever reads/patches project-level fields and
-  // threads the rest through untouched via spread, so persist can save its output directly.
-  async function checkVideoForUpdates(item) {
-    setCheckingVideoId(item.videoId);
-    try {
-      const video = await loadVideo(item.videoId);
-      if (!video) return;
-      await resumePendingBatches(video, {
-        userId,
-        videoId: item.videoId,
-        channelId: item.channelId,
-        settings: imageSettingsForChannel(item.channelId),
-        persist: (p) => saveVideo(p),
-      });
-    } catch (err) {
-      console.error('[AutomationStep] failed to check batch updates for video', item.videoId, err);
-      window.alert(`Could not check for updates on "${item.displayTitle}": ${String(err.message || err)}`);
-    } finally {
-      setCheckingVideoId(null);
-      loadPendingBatchVideos();
-    }
-  }
-
-  // Sequential, not parallel — same reasoning as batchResumption.js's own per-entry loop: several
-  // videos' worth of status/results/upload calls firing at once is exactly the kind of burst that
-  // trips Gemini's rate limits (see geminiBatchImageEngine.js's submission stagger).
-  async function checkAllForUpdates() {
-    setCheckingAll(true);
-    try {
-      for (const item of pendingBatchVideos) {
-        // eslint-disable-next-line no-await-in-loop
-        await checkVideoForUpdates(item);
-      }
-    } finally {
-      setCheckingAll(false);
-    }
-  }
 
   // Manual escape hatch for a lock that's stuck true with no cycle actually running anywhere (see
   // automationScheduler.js's forceUnlock and its header comment on the residual case this covers) —
@@ -612,56 +516,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         </div>
       </div>
 
-      {pendingBatchVideos.length > 0 && (
-        <div style={card}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-            <div style={label}>Batches in flight</div>
-            <button
-              onClick={checkAllForUpdates}
-              disabled={checkingAll || checkingVideoId !== null}
-              style={{ ...btnGhost, padding: '6px 12px', fontSize: 11, opacity: checkingAll || checkingVideoId !== null ? 0.6 : 1 }}
-            >
-              {checkingAll ? 'Checking…' : '🔄 Check all'}
-            </button>
-          </div>
-          <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 8, lineHeight: 1.6, maxWidth: 620 }}>
-            Videos still waiting on Gemini Batch image jobs to finish on Google's side — persists regardless of whether a cycle is
-            actively running. Batches can take hours; check back here or click "Check for updates" any time.
-          </div>
-          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {pendingBatchVideos.map((item) => (
-              <div
-                key={item.videoId}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 12,
-                  flexWrap: 'wrap',
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 4,
-                  padding: 10,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{item.displayTitle}</div>
-                  <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
-                    {item.channelName} · {item.readyImages}/{item.totalImages} images ready
-                    {item.oldestSubmittedAt ? ` · submitted ${timeAgo(item.oldestSubmittedAt)}` : ''}
-                  </div>
-                </div>
-                <button
-                  onClick={() => checkVideoForUpdates(item)}
-                  disabled={checkingVideoId !== null || checkingAll}
-                  style={{ ...btnGhost, padding: '6px 12px', fontSize: 11, flexShrink: 0, opacity: checkingVideoId !== null || checkingAll ? 0.6 : 1 }}
-                >
-                  {checkingVideoId === item.videoId ? 'Checking…' : '🔄 Check for updates'}
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       <div style={card}>
         <div style={label}>Automatic scheduling</div>

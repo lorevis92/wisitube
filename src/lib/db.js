@@ -6,6 +6,7 @@
 // memory/IndexedDB for the current session only, stripped out before every write to wisitube_videos
 // (see stripBlobsForSync below). Real Blob persistence is Phase 3.
 import { supabase } from './supabase';
+import { determineResumePhase } from './videoResumption';
 
 export function createId() {
   return crypto.randomUUID();
@@ -352,44 +353,117 @@ export async function deleteChannel(id) {
   unwrap(await supabase.from('wisitube_channels').delete().eq('id', id));
 }
 
-// Every video, across every one of this user's channels, whose project.pendingImageBatches (see
-// geminiBatchImageEngine.js's "submit" half / batchResumption.js's "resume" half) still holds at
-// least one entry — i.e. still waiting on Gemini Batch jobs, independent of whether an automation
-// cycle happens to be running right now (AutomationStep.jsx's persistent "Batches in flight" panel).
-// pendingImageBatches lives inside the jsonb `project` column, and filtering on a jsonb array's
-// length isn't a convenient PostgREST query — this fetches each channel's videos (already
-// RLS-scoped to the caller) and filters client-side instead, same as this file's other
-// read-then-filter helpers. userId isn't used for the query itself (RLS already scopes
-// listChannels/listVideosByChannel to the caller) — accepted anyway so the call site can pass it
-// explicitly rather than relying on that being obvious.
-export async function listVideosWithPendingBatches(userId) {
+// Human-readable "where it's stuck" label for one incomplete video, given the phase
+// determineResumePhase (src/lib/videoResumption.js) already computed for it — used by
+// listIncompleteVideos below, the permanent status dashboard's "Videos in progress" section (see
+// AutomationMirrorStep.jsx). A separate, explicitly-abandoned video (project.stuckError set) is
+// labeled with that message instead, by the caller — this only ever describes ordinary progress.
+function describeIncompletePhase(project, phase) {
+  if (phase === 'suggestion') return 'Writing outline';
+
+  if (phase === 'scenes') {
+    const outline = Array.isArray(project.outline) ? project.outline : [];
+    const scenesSoFar = (project.scenes || []).length;
+    // Same cumulative-scene-count walk sceneOrchestrator.js's own resumeFrom logic uses to find a
+    // job boundary — here just to report "which chapter is it currently writing", not to resume.
+    let cumulative = 0;
+    let chaptersDone = 0;
+    for (const chapter of outline) {
+      cumulative += Number(chapter.scene_count) || 0;
+      if (scenesSoFar >= cumulative) chaptersDone++;
+      else break;
+    }
+    if (!outline.length) return 'Writing scenes';
+    return `Writing scenes: chapter ${Math.min(chaptersDone + 1, outline.length)}/${outline.length}`;
+  }
+
+  if (phase === 'media') {
+    const scenes = project.scenes || [];
+    if (project.staticBackground) {
+      const readyScenes = scenes.filter((s) => s.audioStatus === 'ready').length;
+      return `Generating voiceover: ${readyScenes}/${scenes.length} scenes ready`;
+    }
+    const allImages = scenes.flatMap((s) => s.images || []);
+    const readyImages = allImages.filter((im) => im.status === 'ready').length;
+    const hasPendingBatches = Array.isArray(project.pendingImageBatches) && project.pendingImageBatches.length > 0;
+    return hasPendingBatches
+      ? `Awaiting Gemini Batch: ${readyImages}/${allImages.length} images`
+      : `Generating media: ${readyImages}/${allImages.length} images ready`;
+  }
+
+  if (phase === 'render') return 'Rendering';
+  if (phase === 'thumbnail') return 'Creating thumbnail';
+  return phase || 'In progress';
+}
+
+// Every video, across every one of this user's channels, that hasn't reached a terminal state —
+// published (youtubeVideoId set) or fully produced-but-unpublished (determineResumePhase returns
+// null, meaning render+thumbnail are both done; see listRecentCompletedVideos below for that
+// bucket) — for the permanent status dashboard's "Videos in progress" section (see
+// AutomationMirrorStep.jsx). Reuses determineResumePhase (src/lib/videoResumption.js), the exact
+// same logic the automation recipes use to decide where to resume a video from, so this dashboard
+// can never show a phase that disagrees with what automation would actually do next.
+// userId isn't used for the query itself (RLS already scopes listChannels/listVideosByChannel to
+// the caller) — accepted anyway so the call site can pass it explicitly rather than relying on
+// that being obvious.
+export async function listIncompleteVideos(userId) {
   const channels = await listChannels();
   const results = [];
   for (const channel of channels) {
     // eslint-disable-next-line no-await-in-loop
     const videos = await listVideosByChannel(channel.id);
     for (const v of videos) {
-      const pending = Array.isArray(v.pendingImageBatches) ? v.pendingImageBatches : [];
-      if (pending.length === 0) continue;
-      const readyImages = (v.scenes || []).reduce((n, s) => n + (s.images || []).filter((im) => im.status === 'ready').length, 0);
-      const totalImages = (v.scenes || []).reduce((n, s) => n + (s.images || []).length, 0);
-      const oldestSubmittedAt = pending.reduce(
-        (min, entry) => (entry.submittedAt && (min === null || entry.submittedAt < min) ? entry.submittedAt : min),
-        null
-      );
+      if (v.youtubeVideoId) continue; // published — terminal
+      const phase = determineResumePhase(v, v.outline);
+      if (phase === null) continue; // render+thumbnail done — that's "completed", not "in progress"
       results.push({
         videoId: v.id,
         channelId: channel.id,
         channelName: channel.name || 'Untitled channel',
         displayTitle: v.displayTitle || v.topic || 'Untitled video',
-        readyImages,
-        totalImages,
-        oldestSubmittedAt,
-        pendingBatchCount: pending.length,
+        createdAt: v.createdAt,
+        phase,
+        // A video explicitly given up on (see videoResumption.js's MAX_RESUME_ATTEMPTS) shows that
+        // message instead of an ordinary progress label — it isn't "in progress" the same way, it's
+        // stuck, and this dashboard is the one place that fact needs to stay visible.
+        phaseLabel: v.stuckError || describeIncompletePhase(v, phase),
+        stuck: !!v.stuckError,
+        hasPendingBatches: Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0,
+        // Needed by the "Check for updates" button's resumePendingBatches call (settings.style/
+        // imageProvider) — carried here so the dashboard never needs the full channel record just
+        // for this one button.
+        imageProvider: channel.automation_image_provider || 'pollinations',
+        style: channel.automation_style || 'facestick',
       });
     }
   }
-  return results;
+  return results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+// Every video, across every one of this user's channels, whose generation is genuinely finished —
+// render AND thumbnail both done (determineResumePhase returns null) — regardless of whether it's
+// been published to YouTube yet, most-recent first, capped at `limit`. For the permanent status
+// dashboard's collapsible "Recently completed" section (see AutomationMirrorStep.jsx).
+export async function listRecentCompletedVideos(userId, limit = 10) {
+  const channels = await listChannels();
+  const results = [];
+  for (const channel of channels) {
+    // eslint-disable-next-line no-await-in-loop
+    const videos = await listVideosByChannel(channel.id);
+    for (const v of videos) {
+      const phase = determineResumePhase(v, v.outline);
+      if (phase !== null) continue; // not done yet — belongs in listIncompleteVideos instead
+      results.push({
+        videoId: v.id,
+        channelId: channel.id,
+        channelName: channel.name || 'Untitled channel',
+        displayTitle: v.displayTitle || v.topic || 'Untitled video',
+        createdAt: v.createdAt,
+        youtubeVideoId: v.youtubeVideoId || null,
+      });
+    }
+  }
+  return results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, limit);
 }
 
 // ---- YouTube per-channel connection (see api/youtube.js, action=callback, which is the only source of

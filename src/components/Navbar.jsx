@@ -89,19 +89,21 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
     </div>
   );
 
-  // Small, always-present-when-relevant badge — only rendered while an automation run is actually
-  // active (see App.jsx's currentAutomationRun), and disappears on its own the moment the run ends
-  // or is stopped, since it's driven straight off that same piece of state.
-  const returnBadge = hasActiveAutomation && (
+  // Always visible now — this is the entry point to the permanent automation status dashboard
+  // (AutomationMirrorStep.jsx: live mirror when a run is active, plus the always-present "Videos in
+  // progress"/"Recently completed" sections regardless). The pulse animation is the only thing still
+  // gated on hasActiveAutomation (see App.jsx's currentAutomationRun) — a purely visual "something's
+  // happening right now" accent, not a presence/absence toggle for the button itself.
+  const returnBadge = (
     <button
       onClick={onReturnToAutomation}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 6,
-        background: T.yellow,
-        color: '#FFFFFF',
-        border: 'none',
+        background: hasActiveAutomation ? T.yellow : T.surface,
+        color: hasActiveAutomation ? '#FFFFFF' : T.textSecondary,
+        border: hasActiveAutomation ? 'none' : `1px solid ${T.border}`,
         borderRadius: 3,
         padding: '7px 12px',
         fontSize: 11,
@@ -111,10 +113,10 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
         fontFamily: FONT.ui,
         cursor: 'pointer',
         whiteSpace: 'nowrap',
-        animation: 'wisiPulse 1.6s infinite',
+        animation: hasActiveAutomation ? 'wisiPulse 1.6s infinite' : 'none',
       }}
     >
-      👁 Return to current generation
+      {hasActiveAutomation ? '👁 Return to current generation' : '👁 Automation status'}
     </button>
   );
 
