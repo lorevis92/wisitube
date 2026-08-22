@@ -41,6 +41,27 @@ export const RESUMABLE_VIDEO_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * strictly worse outcome than one video sitting for manual review.
  */
 export function determineResumePhase(project, outline) {
+  // Shortcut #1, checked before any phase-order logic below: a published video, or one whose
+  // thumbnail has already been created, is done — full stop — regardless of what's missing or
+  // malformed further upstream (outline, scenes: typically because this is an older video created
+  // before this function started depending on those fields). thumbnailStoragePath is checked
+  // ALONE, deliberately not alongside renderedVideoStoragePath: the thumbnail phase has always run
+  // strictly after render in both the manual (ExportStep.jsx) and automated pipelines, so its
+  // presence alone already proves render succeeded too. renderedVideoStoragePath is a newer field
+  // (added later so a resumed session can skip re-rendering) that simply doesn't exist on any video
+  // finished before that change, even though those videos are just as complete — requiring both
+  // fields here would misclassify exactly that older population as still stuck in "render".
+  if (project?.youtubeVideoId || project?.thumbnailStoragePath) return null;
+
+  // Shortcut #2, same reasoning: a non-empty pendingImageBatches is unambiguous, strong evidence of
+  // genuinely being mid-media-phase (Gemini Batch jobs submitted, not yet resolved) — checked
+  // before the outline/scenes checks below so an older video missing those fields still correctly
+  // reports "waiting on a batch job" instead of being misrouted all the way back to "suggestion"
+  // (which, for the automation recipes calling this same function to decide where to resume from,
+  // would otherwise mean silently restarting outline/scenes on a video that's actually fine and
+  // just waiting on Google).
+  if (Array.isArray(project?.pendingImageBatches) && project.pendingImageBatches.length > 0) return 'media';
+
   const totalScenes = Number(project?.totalScenes) || 0;
   const hasOutline = Array.isArray(outline) && outline.length > 0 && totalScenes > 0;
   if (!hasOutline) return 'suggestion';
