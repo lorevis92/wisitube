@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { T, FONT } from '../theme';
 
-export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut, hasActiveAutomation, onReturnToAutomation }) {
+export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut, hasActiveAutomation, idleVideoCount, onReturnToAutomation }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const hamburger = (
@@ -98,6 +98,7 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
     <button
       onClick={onReturnToAutomation}
       style={{
+        position: 'relative',
         display: 'flex',
         alignItems: 'center',
         gap: 6,
@@ -117,6 +118,34 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
       }}
     >
       {hasActiveAutomation ? '👁 Return to current generation' : '👁 Automation status'}
+      {/* Messaging-app-style notification badge — count of videos genuinely idle (waitingReason
+          'idle' from src/lib/db.js's listIncompleteVideos, polled in App.jsx), NOT videos
+          legitimately waiting on Gemini Batch — those aren't stuck, there's nothing to flag. */}
+      {idleVideoCount > 0 && (
+        <span
+          style={{
+            position: 'absolute',
+            top: -6,
+            right: -6,
+            minWidth: 16,
+            height: 16,
+            padding: '0 4px',
+            borderRadius: 8,
+            background: T.primary,
+            color: '#FFFFFF',
+            fontSize: 10,
+            fontWeight: 700,
+            fontFamily: FONT.ui,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            lineHeight: 1,
+            border: '1.5px solid #FFFFFF',
+          }}
+        >
+          {idleVideoCount > 99 ? '99+' : idleVideoCount}
+        </span>
+      )}
     </button>
   );
 

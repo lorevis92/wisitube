@@ -27,7 +27,10 @@ const PHASE_LABELS = {
 
 const LOG_PHASES = new Set(['starting', 'suggestion', 'video-record', 'outline', 'scenes']);
 
-const INCOMPLETE_POLL_MS = 30000;
+// Exported so App.jsx's Navbar idle-video-count badge polls listIncompleteVideos at the exact same
+// cadence this page's own "Videos in progress" list does — one shared constant, never two numbers
+// that could quietly drift apart.
+export const INCOMPLETE_POLL_MS = 30000;
 
 // Same status-dot logic as StoryboardStep.jsx's own statusDot, minus the title tooltip (there's no
 // error text worth surfacing here since this view has no retry button to act on it anyway).

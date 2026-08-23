@@ -9,11 +9,11 @@ import StoryboardStep from './steps/StoryboardStep';
 import EditorStep from './steps/EditorStep';
 import ExportStep from './steps/ExportStep';
 import AutomationStep from './steps/AutomationStep';
-import AutomationMirrorStep from './steps/AutomationMirrorStep';
+import AutomationMirrorStep, { INCOMPLETE_POLL_MS } from './steps/AutomationMirrorStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost } from './theme';
-import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings, loadChannel } from './lib/db';
+import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
@@ -91,6 +91,13 @@ export default function App() {
   // real (non-dry-run) automation cycle is currently running. Shape: { channelId, channelName,
   // videoId, phase, phaseDetail, project, log }.
   const [currentAutomationRun, setCurrentAutomationRun] = useState(null);
+  // Count of videos across every channel that are genuinely just sitting there — waitingReason
+  // 'idle' from src/lib/db.js's listIncompleteVideos, NOT 'awaiting_batch' (those are legitimately
+  // waiting on Google, not stuck) — drives Navbar.jsx's notification-style badge on the automation
+  // status button. Polled at the same INCOMPLETE_POLL_MS cadence AutomationMirrorStep.jsx's own
+  // "Videos in progress" list already uses, so the badge and that list can never disagree about
+  // what "right now" means.
+  const [idleVideoCount, setIdleVideoCount] = useState(0);
   // Whether the unattended background scheduler (src/lib/automationScheduler.js) should be
   // ticking right now — read once from Supabase on mount/sign-in, then kept in sync by
   // AutomationStep.jsx's "Automatic scheduling" panel via onSchedulerEnabledChange below every time
@@ -214,6 +221,31 @@ export default function App() {
     });
     return () => stopSchedulerTimer();
   }, [schedulerEnabled, session?.user?.id]);
+
+  // Navbar's idle-video-count badge — independent of whether the scheduler is enabled or a cycle is
+  // live (an idle video is, by definition, NOT part of anything currently running), so this polls on
+  // its own rather than piggybacking on either of the effects above.
+  useEffect(() => {
+    if (!session?.user?.id) {
+      setIdleVideoCount(0);
+      return;
+    }
+    let cancelled = false;
+    async function poll() {
+      try {
+        const items = await listIncompleteVideos(session.user.id);
+        if (!cancelled) setIdleVideoCount(items.filter((v) => v.waitingReason === 'idle').length);
+      } catch (err) {
+        console.error('[App] failed to poll idle video count', err);
+      }
+    }
+    poll();
+    const id = setInterval(poll, INCOMPLETE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [session?.user?.id]);
 
   // Ask the browser to exempt this origin from automatic eviction under storage pressure — WisiTube
   // keeps rendered video/image/audio Blobs in IndexedDB (see src/lib/db.js) with no server-side
@@ -722,6 +754,7 @@ export default function App() {
         userEmail={session.user?.email}
         onSignOut={() => supabase.auth.signOut()}
         hasActiveAutomation={!!currentAutomationRun}
+        idleVideoCount={idleVideoCount}
         onReturnToAutomation={() => setTab('automation-mirror')}
       />
 
