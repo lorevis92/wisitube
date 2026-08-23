@@ -173,8 +173,12 @@ function buildStaticBackgroundFromChannel(channel) {
  * later"). youtubeVideoId is null both when auto-publish is off AND when the video was resumed from
  * an earlier interruption (see the YouTube phase below). Throws (after marking project.stuckError)
  * when a resumed video has failed the same phase MAX_RESUME_ATTEMPTS times in a row.
+ *
+ * targetVideoId: optional — see fullPipelineRecipe.js's identical param for the full reasoning
+ * (AutomationMirrorStep.jsx's "Resume now" button, bypasses findResumableVideo's channel-wide
+ * search and the 7-day window, never touches the scheduler lock).
  */
-export async function runStaticBackgroundPipeline(channel, { userId, onProgress, logStep }) {
+export async function runStaticBackgroundPipeline(channel, { userId, onProgress, logStep, targetVideoId } = {}) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
   let videoId = null;
@@ -199,7 +203,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // ---- Resume check ----
   // See fullPipelineRecipe.js's identical block for the full reasoning — duplicated rather than
   // shared, same controlled-duplication convention already used between these two files.
-  const resumable = await findResumableVideo(channelId);
+  const resumable = targetVideoId ? await loadVideo(targetVideoId) : await findResumableVideo(channelId);
   let resumePhase = 'suggestion';
   const wasResumed = !!resumable;
 

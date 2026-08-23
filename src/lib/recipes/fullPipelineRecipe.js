@@ -236,7 +236,13 @@ function buildAutomationSettings(channel) {
  * record for manual review in the regular Storyboard/Editor/Export UI — nothing is rolled back or
  * deleted.
  */
-export async function runFullPipeline(channel, { userId, onProgress, logStep }) {
+// targetVideoId: optional — set by AutomationMirrorStep.jsx's "Resume now" button to resume this
+// EXACT video instead of letting findResumableVideo pick whichever resumable one it finds for the
+// channel. Skips the 7-day RESUMABLE_VIDEO_WINDOW_MS cutoff too (that's a safety net for the blind,
+// automatic search — an explicit human choosing a specific video from the dashboard doesn't need
+// it) and, since this is a single-video action rather than a whole cycle, is never routed through
+// runManagedCycle/the currently_running lock — the caller invokes this recipe directly.
+export async function runFullPipeline(channel, { userId, onProgress, logStep, targetVideoId } = {}) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
   // Declared here (rather than at their original spot further down) so report()/persist() can
@@ -268,7 +274,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep }) 
   // see src/lib/videoResumption.js), not just Gemini Batch's own pending jobs. resumePhase drives
   // which of the phase blocks below actually run: 'suggestion' means "nothing usable saved yet, run
   // everything" — a brand-new (non-resumed) video takes that exact same path by default below.
-  const resumable = await findResumableVideo(channelId);
+  const resumable = targetVideoId ? await loadVideo(targetVideoId) : await findResumableVideo(channelId);
   let resumePhase = 'suggestion';
   const wasResumed = !!resumable;
 

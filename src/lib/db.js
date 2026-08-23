@@ -353,42 +353,57 @@ export async function deleteChannel(id) {
   unwrap(await supabase.from('wisitube_channels').delete().eq('id', id));
 }
 
+// Concrete progress counts for one video — how many scenes are written, images ready, and audio
+// tracks ready, out of the relevant totals — shared by describeIncompletePhase below (the
+// one-line phase label) and listIncompleteVideos' own `counts` field (the dashboard's more
+// detailed per-phase readout, see AutomationMirrorStep.jsx). Computed once per video and passed
+// around rather than recomputed in each place that needs a number from it.
+function computeVideoCounts(project) {
+  const outline = Array.isArray(project.outline) ? project.outline : [];
+  const scenes = Array.isArray(project.scenes) ? project.scenes : [];
+  const scenesTotal = Number(project.totalScenes) || outline.reduce((a, c) => a + (Number(c.scene_count) || 0), 0);
+  const isStaticBackground = !!project.staticBackground;
+  const allImages = isStaticBackground ? [] : scenes.flatMap((s) => s.images || []);
+  return {
+    scenesWritten: scenes.length,
+    scenesTotal,
+    imagesReady: allImages.filter((im) => im.status === 'ready').length,
+    imagesTotal: allImages.length,
+    audioReady: scenes.filter((s) => s.audioStatus === 'ready').length,
+    audioTotal: scenes.length,
+  };
+}
+
 // Human-readable "where it's stuck" label for one incomplete video, given the phase
-// determineResumePhase (src/lib/videoResumption.js) already computed for it — used by
-// listIncompleteVideos below, the permanent status dashboard's "Videos in progress" section (see
-// AutomationMirrorStep.jsx). A separate, explicitly-abandoned video (project.stuckError set) is
-// labeled with that message instead, by the caller — this only ever describes ordinary progress.
-function describeIncompletePhase(project, phase) {
+// determineResumePhase (src/lib/videoResumption.js) and computeVideoCounts (above) already
+// computed for it — used by listIncompleteVideos below, the permanent status dashboard's "Videos
+// in progress" section (see AutomationMirrorStep.jsx). A separate, explicitly-abandoned video
+// (project.stuckError set) is labeled with that message instead, by the caller — this only ever
+// describes ordinary progress.
+function describeIncompletePhase(project, phase, counts) {
   if (phase === 'suggestion') return 'Writing outline';
 
   if (phase === 'scenes') {
     const outline = Array.isArray(project.outline) ? project.outline : [];
-    const scenesSoFar = (project.scenes || []).length;
+    if (!outline.length) return 'Writing scenes';
     // Same cumulative-scene-count walk sceneOrchestrator.js's own resumeFrom logic uses to find a
     // job boundary — here just to report "which chapter is it currently writing", not to resume.
     let cumulative = 0;
     let chaptersDone = 0;
     for (const chapter of outline) {
       cumulative += Number(chapter.scene_count) || 0;
-      if (scenesSoFar >= cumulative) chaptersDone++;
+      if (counts.scenesWritten >= cumulative) chaptersDone++;
       else break;
     }
-    if (!outline.length) return 'Writing scenes';
     return `Writing scenes: chapter ${Math.min(chaptersDone + 1, outline.length)}/${outline.length}`;
   }
 
   if (phase === 'media') {
-    const scenes = project.scenes || [];
-    if (project.staticBackground) {
-      const readyScenes = scenes.filter((s) => s.audioStatus === 'ready').length;
-      return `Generating voiceover: ${readyScenes}/${scenes.length} scenes ready`;
-    }
-    const allImages = scenes.flatMap((s) => s.images || []);
-    const readyImages = allImages.filter((im) => im.status === 'ready').length;
+    if (project.staticBackground) return `Generating voiceover: ${counts.audioReady}/${counts.audioTotal} scenes ready`;
     const hasPendingBatches = Array.isArray(project.pendingImageBatches) && project.pendingImageBatches.length > 0;
     return hasPendingBatches
-      ? `Awaiting Gemini Batch: ${readyImages}/${allImages.length} images`
-      : `Generating media: ${readyImages}/${allImages.length} images ready`;
+      ? `Awaiting Gemini Batch: ${counts.imagesReady}/${counts.imagesTotal} images`
+      : `Generating media: ${counts.imagesReady}/${counts.imagesTotal} images ready`;
   }
 
   if (phase === 'render') return 'Rendering';
@@ -403,6 +418,13 @@ function describeIncompletePhase(project, phase) {
 // AutomationMirrorStep.jsx). Reuses determineResumePhase (src/lib/videoResumption.js), the exact
 // same logic the automation recipes use to decide where to resume a video from, so this dashboard
 // can never show a phase that disagrees with what automation would actually do next.
+//
+// waitingReason explains WHY a video isn't progressing right now, distinct from `phase` (WHERE it
+// is): 'awaiting_batch' (a real Gemini Batch job is outstanding — nothing to do but wait on
+// Google, or check), 'stuck' (failed the same phase MAX_RESUME_ATTEMPTS times in a row — see
+// videoResumption.js — automation has given up on it), or 'idle' (simply not part of any cycle
+// running right now — the ordinary, unremarkable case for most videos most of the time).
+//
 // userId isn't used for the query itself (RLS already scopes listChannels/listVideosByChannel to
 // the caller) — accepted anyway so the call site can pass it explicitly rather than relying on
 // that being obvious.
@@ -416,6 +438,9 @@ export async function listIncompleteVideos(userId) {
       if (v.youtubeVideoId) continue; // published — terminal
       const phase = determineResumePhase(v, v.outline);
       if (phase === null) continue; // render+thumbnail done — that's "completed", not "in progress"
+      const counts = computeVideoCounts(v);
+      const hasPendingBatches = Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0;
+      const stuck = !!v.stuckError;
       results.push({
         videoId: v.id,
         channelId: channel.id,
@@ -426,9 +451,13 @@ export async function listIncompleteVideos(userId) {
         // A video explicitly given up on (see videoResumption.js's MAX_RESUME_ATTEMPTS) shows that
         // message instead of an ordinary progress label — it isn't "in progress" the same way, it's
         // stuck, and this dashboard is the one place that fact needs to stay visible.
-        phaseLabel: v.stuckError || describeIncompletePhase(v, phase),
-        stuck: !!v.stuckError,
-        hasPendingBatches: Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0,
+        phaseLabel: v.stuckError || describeIncompletePhase(v, phase, counts),
+        counts,
+        isStaticBackground: !!v.staticBackground,
+        stuck,
+        stuckMessage: v.stuckError || null,
+        waitingReason: hasPendingBatches ? 'awaiting_batch' : stuck ? 'stuck' : 'idle',
+        hasPendingBatches,
         // Needed by the "Check for updates" button's resumePendingBatches call (settings.style/
         // imageProvider) — carried here so the dashboard never needs the full channel record just
         // for this one button.
@@ -438,6 +467,18 @@ export async function listIncompleteVideos(userId) {
     }
   }
   return results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+// "Reset & retry" — see AutomationMirrorStep.jsx's per-video action row. Clears the stuck marker
+// and its failure count so the video is eligible for automatic resumption again (findResumableVideo
+// excludes anything with stuckError set) and so "Resume now" is enabled for it — leaves
+// lastResumePhase untouched: the next attempt will naturally compare against it and, if it's
+// already at the phase that was stuck, simply start counting from 1 again, which is correct either
+// way.
+export async function resetStuckVideo(id) {
+  const video = await loadVideo(id);
+  if (!video) return null;
+  return saveVideo({ ...video, resumeAttempts: 0, stuckError: null });
 }
 
 // Every video, across every one of this user's channels, whose generation is genuinely finished —

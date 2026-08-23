@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { T, FONT, card, label, btnGhost, mono } from '../theme';
-import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, saveVideo } from '../lib/db';
+import { T, FONT, card, label, btnPrimary, btnGhost, mono } from '../theme';
+import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, saveVideo, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
 import { resumePendingBatches } from '../lib/batchResumption';
+import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 
 // Permanent status dashboard for automation — no longer just a temporary mirror that appears while
 // a run is active. Three parts, in order:
@@ -52,11 +53,41 @@ function formatDateTime(ts) {
   return ts ? new Date(ts).toLocaleString() : 'unknown time';
 }
 
-export default function AutomationMirrorStep({ run, userId, isMobile }) {
+// Concrete progress readout for one row, built from listIncompleteVideos' `counts` — only the
+// counts relevant to the video's CURRENT phase are meaningful (e.g. image counts mean nothing while
+// still writing scenes), so this only ever shows something for the two phases that have real
+// sub-progress to report. Returns null for the others (suggestion/render/thumbnail — phaseLabel
+// alone already says everything there is to say).
+function formatCountsDetail(item) {
+  const c = item.counts;
+  if (!c) return null;
+  if (item.phase === 'scenes') return `${c.scenesWritten}/${c.scenesTotal} scenes written`;
+  if (item.phase === 'media') {
+    if (item.isStaticBackground) return `${c.audioReady}/${c.audioTotal} scenes with audio ready`;
+    const audioPart = c.audioTotal > 0 && c.audioReady === c.audioTotal ? 'audio complete' : `${c.audioReady}/${c.audioTotal} audio ready`;
+    return `${c.imagesReady}/${c.imagesTotal} images ready · ${audioPart}`;
+  }
+  return null;
+}
+
+// Explains WHY a video isn't moving right now (waitingReason, see db.js's listIncompleteVideos),
+// distinct from WHERE it is (phaseLabel above it).
+function formatWaitingReason(item) {
+  if (item.waitingReason === 'awaiting_batch') return "⏳ Waiting on Google's batch processing";
+  if (item.waitingReason === 'stuck') return item.stuckMessage || '⚠ Stuck — needs manual review';
+  return '⏸ Idle — not part of an active cycle right now';
+}
+
+export default function AutomationMirrorStep({ run, userId, onResume, isMobile }) {
   const [incompleteVideos, setIncompleteVideos] = useState(null); // null = still loading
   const [completedVideos, setCompletedVideos] = useState(null);
   const [completedOpen, setCompletedOpen] = useState(false);
-  const [checkingVideoId, setCheckingVideoId] = useState(null);
+  // One busy slot for the whole panel, not per-action — every per-video action (check/resume/
+  // reset/delete) is mutually exclusive with every other action on that SAME row anyway (they all
+  // end by reloading the list), and only ever disables that row's own buttons (see the disabled
+  // checks below, all gated on `busyVideoId === item.videoId`), never other rows.
+  const [busyVideoId, setBusyVideoId] = useState(null);
+  const [busyLabel, setBusyLabel] = useState('');
 
   async function loadIncomplete() {
     try {
@@ -94,7 +125,8 @@ export default function AutomationMirrorStep({ run, userId, isMobile }) {
   // scenes/pendingImageBatches payload), checks its Gemini Batch jobs for anything newly ready, and
   // persists whatever resumePendingBatches downloaded.
   async function checkVideoForUpdates(item) {
-    setCheckingVideoId(item.videoId);
+    setBusyVideoId(item.videoId);
+    setBusyLabel('Checking…');
     try {
       const video = await loadVideo(item.videoId);
       if (!video) return;
@@ -109,7 +141,78 @@ export default function AutomationMirrorStep({ run, userId, isMobile }) {
       console.error('[AutomationMirrorStep] failed to check batch updates for video', item.videoId, err);
       window.alert(`Could not check for updates on "${item.displayTitle}": ${String(err.message || err)}`);
     } finally {
-      setCheckingVideoId(null);
+      setBusyVideoId(null);
+      loadIncomplete();
+    }
+  }
+
+  // "Resume now" — runs just this one video's next phase (and however many follow, in the same
+  // call — see the recipes' shouldRunPhase gating) directly, via the channel's own recipe function
+  // with targetVideoId set. Deliberately NOT routed through runManagedCycle/automationScheduler.js:
+  // this is a single-video action the owner explicitly asked for, not a cycle, and must never
+  // contend with (or be blocked by) the currently_running lock a real cycle holds.
+  async function resumeVideoNow(item) {
+    setBusyVideoId(item.videoId);
+    setBusyLabel('Resuming…');
+    try {
+      const channel = await loadChannel(item.channelId);
+      if (!channel) throw new Error('Channel not found');
+      const recipe = getRecipeForContentType(channel.content_type);
+      if (!recipe) throw new Error(`No recipe available for content_type "${channel.content_type || '(none)'}"`);
+      await recipe(channel, { userId, logStep, targetVideoId: item.videoId });
+    } catch (err) {
+      console.error('[AutomationMirrorStep] failed to resume video', item.videoId, err);
+      window.alert(`Could not resume "${item.displayTitle}": ${String(err.message || err)}`);
+    } finally {
+      setBusyVideoId(null);
+      loadIncomplete();
+      loadCompleted();
+    }
+  }
+
+  // "Reset & retry" — clears the stuck marker (db.js's resetStuckVideo) so this video is eligible
+  // for automatic resumption again and "Resume now" stops being disabled for it.
+  async function resetAndRetry(item) {
+    setBusyVideoId(item.videoId);
+    setBusyLabel('Resetting…');
+    try {
+      await resetStuckVideo(item.videoId);
+    } catch (err) {
+      console.error('[AutomationMirrorStep] failed to reset stuck video', item.videoId, err);
+      window.alert(`Could not reset "${item.displayTitle}": ${String(err.message || err)}`);
+    } finally {
+      setBusyVideoId(null);
+      loadIncomplete();
+    }
+  }
+
+  // "Open in Storyboard" — same onResume(record) mechanism ChannelDashboardStep.jsx's own "Resume"
+  // button already uses (App.jsx's handleResume), just fed a freshly-loaded full record here since
+  // the dashboard list only carries display fields.
+  async function openInStoryboard(item) {
+    try {
+      const video = await loadVideo(item.videoId);
+      if (!video) throw new Error('Video not found');
+      onResume?.(video);
+    } catch (err) {
+      console.error('[AutomationMirrorStep] failed to open video', item.videoId, err);
+      window.alert(`Could not open "${item.displayTitle}": ${String(err.message || err)}`);
+    }
+  }
+
+  // "Delete" — same confirm text and deleteVideo call as ChannelDashboardStep.jsx's own
+  // handleDeleteVideo.
+  async function deleteVideoRow(item) {
+    if (!window.confirm('Delete this video? This cannot be undone.')) return;
+    setBusyVideoId(item.videoId);
+    setBusyLabel('Deleting…');
+    try {
+      await deleteVideo(item.videoId);
+    } catch (err) {
+      console.error('[AutomationMirrorStep] failed to delete video', item.videoId, err);
+      window.alert(`Could not delete "${item.displayTitle}": ${String(err.message || err)}`);
+    } finally {
+      setBusyVideoId(null);
       loadIncomplete();
     }
   }
@@ -301,39 +404,88 @@ export default function AutomationMirrorStep({ run, userId, isMobile }) {
           <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 10 }}>Nothing in progress right now.</div>
         ) : (
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {incompleteVideos.map((item) => (
-              <div
-                key={item.videoId}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 12,
-                  flexWrap: 'wrap',
-                  border: `1px solid ${item.stuck ? T.primaryBorder : T.border}`,
-                  background: item.stuck ? T.primaryLight : 'transparent',
-                  borderRadius: 4,
-                  padding: 10,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{item.displayTitle}</div>
-                  <div style={{ ...mono, fontSize: 11, color: item.stuck ? T.primary : T.textSecondary, marginTop: 4 }}>
-                    {item.channelName} · {item.phaseLabel}
+            {incompleteVideos.map((item) => {
+              const rowBusy = busyVideoId === item.videoId;
+              const anyBusy = busyVideoId !== null;
+              const countsDetail = formatCountsDetail(item);
+              return (
+                <div
+                  key={item.videoId}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                    border: `1px solid ${item.stuck ? T.primaryBorder : T.border}`,
+                    background: item.stuck ? T.primaryLight : 'transparent',
+                    borderRadius: 4,
+                    padding: 10,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{item.displayTitle}</div>
+                    <div style={{ ...mono, fontSize: 11, color: item.stuck ? T.primary : T.textSecondary, marginTop: 4 }}>
+                      {item.channelName} · {item.phaseLabel}
+                    </div>
+                    {countsDetail && <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 2 }}>{countsDetail}</div>}
+                    <div style={{ fontFamily: FONT.ui, fontSize: 11, color: item.waitingReason === 'stuck' ? T.primary : T.textSecondary, marginTop: 4 }}>
+                      {formatWaitingReason(item)}
+                    </div>
+                    <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 4 }}>started {formatDateTime(item.createdAt)}</div>
                   </div>
-                  <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 2 }}>started {formatDateTime(item.createdAt)}</div>
+
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button
+                      onClick={() => openInStoryboard(item)}
+                      disabled={anyBusy}
+                      style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                    >
+                      Open in Storyboard
+                    </button>
+
+                    {item.waitingReason === 'awaiting_batch' && (
+                      <button
+                        onClick={() => checkVideoForUpdates(item)}
+                        disabled={anyBusy}
+                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                      >
+                        🔄 Check for updates
+                      </button>
+                    )}
+
+                    {item.waitingReason !== 'awaiting_batch' && (
+                      <button
+                        onClick={() => resumeVideoNow(item)}
+                        disabled={anyBusy || item.waitingReason === 'stuck'}
+                        title={item.waitingReason === 'stuck' ? 'Reset & retry first — this video has failed the same phase too many times in a row' : undefined}
+                        style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, opacity: anyBusy || item.waitingReason === 'stuck' ? 0.6 : 1 }}
+                      >
+                        ▶ Resume now
+                      </button>
+                    )}
+
+                    {item.waitingReason === 'stuck' && (
+                      <button
+                        onClick={() => resetAndRetry(item)}
+                        disabled={anyBusy}
+                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                      >
+                        🔁 Reset &amp; retry
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => deleteVideoRow(item)}
+                      disabled={anyBusy}
+                      style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                    >
+                      🗑 Delete
+                    </button>
+
+                    {rowBusy && <span style={{ ...mono, fontSize: 10, color: T.textMuted }}>{busyLabel}</span>}
+                  </div>
                 </div>
-                {item.hasPendingBatches && (
-                  <button
-                    onClick={() => checkVideoForUpdates(item)}
-                    disabled={checkingVideoId !== null}
-                    style={{ ...btnGhost, padding: '6px 12px', fontSize: 11, flexShrink: 0, opacity: checkingVideoId !== null ? 0.6 : 1 }}
-                  >
-                    {checkingVideoId === item.videoId ? 'Checking…' : '🔄 Check for updates'}
-                  </button>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

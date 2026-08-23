@@ -777,7 +777,7 @@ export default function App() {
         )}
 
         {tab === 'automation-mirror' && (
-          <AutomationMirrorStep run={currentAutomationRun} userId={session.user?.id} isMobile={isMobile} />
+          <AutomationMirrorStep run={currentAutomationRun} userId={session.user?.id} onResume={handleResume} isMobile={isMobile} />
         )}
 
         {tab === 'create' && (
