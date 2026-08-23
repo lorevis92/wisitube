@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { loadImage, decodeAudio } from '../lib/pollinations';
+import { loadImage, decodeAudio, createSilentBuffer } from '../lib/pollinations';
 import { playTimeline, ANIMATION_LIST } from '../lib/engine';
 import BackgroundStyleSection from '../components/BackgroundStyleSection';
 
@@ -29,18 +29,59 @@ export default function EditorStep({ project, setProject, settings, onExport, ch
   // buildScenesFromRaw) — same guard every other item-builder in this codebase uses.
   const isStaticBackground = settings.contentType === 'static_background';
 
+  // Isolates a bad beat/scene (lost image or narration — see mediaRehydration.js) instead of
+  // letting one dead url crash the whole Promise.all: a beat with no url/status 'error' gets
+  // img: null (engine.js's drawBeat draws a black placeholder frame for it) and lost narration
+  // gets a silent buffer of the same duration, so the rest of the video still plays and the
+  // playhead/sync stay correct. `skipped` collects human-readable "Scene N beat M" labels so the
+  // caller can tell the user exactly what to regenerate.
   async function buildItems(fromIdx = 0) {
     const slice = scenes.slice(fromIdx);
-    return Promise.all(
-      slice.map(async (s) => ({
-        images: isStaticBackground
+    const skipped = [];
+    const items = await Promise.all(
+      slice.map(async (s, sliceIdx) => {
+        const sceneNum = fromIdx + sliceIdx + 1;
+        const images = isStaticBackground
           ? []
-          : await Promise.all((s.images || []).map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))),
-        buffer: await decodeAudio(s.audioUrl),
-        duration: (s.audioDuration || 0) + s.pad,
-        narration: s.narration,
-      }))
+          : await Promise.all(
+              (s.images || []).map(async (beat, b) => {
+                if (!beat.url || beat.status === 'error') {
+                  skipped.push(`Scene ${sceneNum} beat ${b + 1}`);
+                  return { img: null, animation: beat.animation };
+                }
+                try {
+                  return { img: await loadImage(beat.url), animation: beat.animation };
+                } catch (err) {
+                  console.error('[EditorStep] beat image failed to load, using placeholder', beat.url, err);
+                  skipped.push(`Scene ${sceneNum} beat ${b + 1}`);
+                  return { img: null, animation: beat.animation };
+                }
+              })
+            );
+
+        let buffer;
+        if (!s.audioUrl || s.audioStatus === 'error') {
+          skipped.push(`Scene ${sceneNum} narration`);
+          buffer = createSilentBuffer((s.audioDuration || 0) + s.pad);
+        } else {
+          try {
+            buffer = await decodeAudio(s.audioUrl);
+          } catch (err) {
+            console.error('[EditorStep] scene narration failed to decode, using silence', s.audioUrl, err);
+            skipped.push(`Scene ${sceneNum} narration`);
+            buffer = createSilentBuffer((s.audioDuration || 0) + s.pad);
+          }
+        }
+
+        return {
+          images,
+          buffer,
+          duration: (s.audioDuration || 0) + s.pad,
+          narration: s.narration,
+        };
+      })
     );
+    return { items, skipped };
   }
 
   async function buildStaticBackground() {
@@ -53,10 +94,13 @@ export default function EditorStep({ project, setProject, settings, onExport, ch
     stop();
     setError('');
     try {
-      const items = await buildItems(fromIdx);
+      const { items, skipped } = await buildItems(fromIdx);
       const staticBackground = await buildStaticBackground();
       const offset = durations.slice(0, fromIdx).reduce((a, b) => a + b, 0);
       setPlaying(true);
+      if (skipped.length) {
+        setError(`Playing with placeholders for: ${skipped.join(', ')} — lost media, regenerate in Storyboard before exporting.`);
+      }
       controllerRef.current = await playTimeline({
         canvas: canvasRef.current,
         items,

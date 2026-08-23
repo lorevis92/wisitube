@@ -128,3 +128,13 @@ export function decodeAudio(blobUrl) {
   p.catch(() => bufferCache.delete(blobUrl));
   return p;
 }
+
+// Stand-in for a scene whose narration audio was lost (see mediaRehydration.js — audioUrl: null
+// after a failed Storage backup with no in-memory blob left to fall back on). Keeps the timeline's
+// per-scene duration/sync intact for the rest of the video instead of the whole preview crashing on
+// decodeAudio(null) — used by EditorStep.jsx's per-scene isolation in buildItems.
+export function createSilentBuffer(durationSeconds) {
+  const ctx = decodeCtx();
+  const frames = Math.max(1, Math.round(Math.max(0.1, durationSeconds || 0.1) * ctx.sampleRate));
+  return ctx.createBuffer(1, frames, ctx.sampleRate);
+}

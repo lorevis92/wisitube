@@ -484,20 +484,48 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
                 {!isStaticBackground &&
                   scene.images.map((im, b) => (
                     <span key={im.id} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                      {statusDot(im.status)} img{b + 1}
+                      {statusDot(im.status, im.status === 'error' ? im.errorMessage : undefined)} img{b + 1}
                       {im.backupFailed && (
-                        <span title="Upload to Supabase Storage failed — will be lost on refresh unless retried" style={{ color: T.primary }}>
-                          ⚠ not backed up
-                        </span>
+                        <button
+                          onClick={() => genImage(scene.id, b, true)}
+                          disabled={running}
+                          title="Upload to Supabase Storage failed — will be lost on refresh unless retried. Click to regenerate this beat now."
+                          style={{
+                            color: T.primary,
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            font: 'inherit',
+                            textTransform: 'inherit',
+                            textDecoration: 'underline',
+                            cursor: running ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          ⚠ not backed up — click to fix
+                        </button>
                       )}
                     </span>
                   ))}
                 <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                   {statusDot(scene.audioStatus, scene.audioStatus === 'error' ? scene.audioError : undefined)} voice
                   {scene.audioBackupFailed && (
-                    <span title="Upload to Supabase Storage failed — will be lost on refresh unless retried" style={{ color: T.primary }}>
-                      ⚠ not backed up
-                    </span>
+                    <button
+                      onClick={() => genAudio(scene)}
+                      disabled={running}
+                      title="Upload to Supabase Storage failed — will be lost on refresh unless retried. Click to regenerate this narration now."
+                      style={{
+                        color: T.primary,
+                        background: 'none',
+                        border: 'none',
+                        padding: 0,
+                        font: 'inherit',
+                        textTransform: 'inherit',
+                        textDecoration: 'underline',
+                        cursor: running ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      ⚠ not backed up — click to fix
+                    </button>
                   )}
                 </span>
                 {scene.audioDuration ? <span style={mono}>{scene.audioDuration.toFixed(1)}s</span> : null}

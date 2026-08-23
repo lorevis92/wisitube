@@ -24,6 +24,24 @@ export async function renderVideoForExport(project, settings, { onProgress, sign
   // either (see src/lib/engine.js), so it's simply never built.
   const isStaticBackground = settings.contentType === 'static_background';
 
+  // Unlike EditorStep.jsx's preview (which skips a bad beat/scene with a placeholder so the rest
+  // stays watchable), an actual export must not silently ship missing media — block up front with
+  // exactly which scene(s)/beat(s) are unusable (lost to a failed Storage backup, see
+  // mediaRehydration.js, or a hard generation failure) instead of failing deep inside loadImage with
+  // a generic error once the expensive render has already started.
+  if (!isStaticBackground) {
+    const missing = [];
+    project.scenes.forEach((s, si) => {
+      (s.images || []).forEach((beat, b) => {
+        if (!beat.url || beat.status === 'error') missing.push(`Scene ${si + 1} beat ${b + 1}`);
+      });
+      if (!s.audioUrl || s.audioStatus === 'error') missing.push(`Scene ${si + 1} narration`);
+    });
+    if (missing.length) {
+      throw new Error(`Cannot export: ${missing.length} item(s) need regeneration before rendering — ${missing.join(', ')}.`);
+    }
+  }
+
   const items = await Promise.all(
     project.scenes.map(async (s) => ({
       images: isStaticBackground

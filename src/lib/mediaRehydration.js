@@ -17,34 +17,57 @@ import { downloadMediaAsBlob } from './mediaStorage';
  * For each image beat: if it still has its in-memory Blob (same-session, never actually reloaded),
  * only fills in `url` if that's somehow missing. Otherwise, if it has a storagePath, downloads
  * fresh and rebuilds both blob and url — this is the path every field actually takes right after a
- * real reload, since blob is always null by then. A beat with neither is left untouched (nothing to
- * rebuild — it was never generated, or never backed up).
+ * real reload, since blob is always null by then. A beat with neither is left untouched UNLESS its
+ * status still says 'ready' — mediaGenerationEngine.js's generateBeatImage/generateSceneAudio set
+ * status/audioStatus to 'ready' as soon as the in-memory blob exists, then attempt a Storage backup
+ * as a separate, non-blocking step; if that backup fails (backupFailed/audioBackupFailed: true) no
+ * storagePath is ever written, so a beat/scene that claims to be 'ready' but has neither a live blob
+ * nor a storagePath to rebuild from is really carrying a dead blob: URL string that only looks fine
+ * until something actually tries to load it. That case is downgraded to status/audioStatus: 'error'
+ * with url/audioUrl: null and an explicit message, so every consumer (Storyboard, Editor, Export)
+ * sees the same 'needs regeneration' signal it already knows how to handle for a hard generation
+ * failure, instead of each having to separately guard against a URL that silently doesn't work.
+ * A beat/scene that's still 'idle' (never attempted) or already 'error' or 'loading' is left as-is —
+ * only the "looks ready but isn't" case is rewritten.
  * Same logic for each scene's narration audio (audioBlob/audioUrl/audioStoragePath), and for
- * reference photos (file/storagePath).
+ * reference photos (file/storagePath) — reference photos are untouched here since they don't carry a
+ * status field consumers branch on the same way.
  *
  * Never throws — a single failed download is logged and that one item is left as-is (its status
- * stays whatever it already was; this function only ever touches url/blob fields, never status).
+ * stays whatever it already was; this function only downgrades status for the no-storagePath case
+ * above, never on a download error, since that could just be a transient network blip against a
+ * backup that's actually fine).
  * Returns a new project object; the input is never mutated.
  */
+const LOST_IMAGE_MESSAGE = 'Lost — never backed up, regenerate this beat';
+const LOST_AUDIO_MESSAGE = 'Lost — never backed up, regenerate this narration';
+
 export async function rehydrateProjectMedia(project) {
   const scenes = await Promise.all(
     (project.scenes || []).map(async (s) => {
       const images = await Promise.all(
         (s.images || []).map(async (im) => {
           if (im.blob) return { ...im, url: im.url || URL.createObjectURL(im.blob) };
-          if (!im.storagePath) return im;
-          try {
-            const blob = await downloadMediaAsBlob(im.storagePath);
-            return { ...im, blob, url: URL.createObjectURL(blob) };
-          } catch (err) {
-            console.error('[mediaRehydration] could not restore scene image from storage', im.storagePath, err);
-            return im;
+          if (im.storagePath) {
+            try {
+              const blob = await downloadMediaAsBlob(im.storagePath);
+              return { ...im, blob, url: URL.createObjectURL(blob) };
+            } catch (err) {
+              console.error('[mediaRehydration] could not restore scene image from storage', im.storagePath, err);
+              return im;
+            }
           }
+          if (im.status === 'ready') {
+            return { ...im, status: 'error', url: null, blob: null, errorMessage: LOST_IMAGE_MESSAGE };
+          }
+          return im;
         })
       );
 
       let audioBlob = s.audioBlob;
       let audioUrl = s.audioUrl;
+      let audioStatus = s.audioStatus;
+      let audioError = s.audioError;
       if (audioBlob) {
         audioUrl = audioUrl || URL.createObjectURL(audioBlob);
       } else if (s.audioStoragePath) {
@@ -54,9 +77,13 @@ export async function rehydrateProjectMedia(project) {
         } catch (err) {
           console.error('[mediaRehydration] could not restore scene audio from storage', s.audioStoragePath, err);
         }
+      } else if (audioStatus === 'ready') {
+        audioStatus = 'error';
+        audioUrl = null;
+        audioError = LOST_AUDIO_MESSAGE;
       }
 
-      return { ...s, images, audioBlob, audioUrl };
+      return { ...s, images, audioBlob, audioUrl, audioStatus, audioError };
     })
   );
 

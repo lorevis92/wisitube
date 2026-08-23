@@ -262,6 +262,17 @@ function drawFlatText(ctx, W, H, narration, textStyle) {
 }
 
 function drawBeat(ctx, W, H, beat, p, alpha) {
+  // beat.img can be null for a beat whose image was lost to a failed Storage backup (see
+  // mediaRehydration.js) — EditorStep.jsx/videoRenderEngine.js still build an item for it (so
+  // timing/audio for the rest of the scene stays correct) but pass img: null instead of throwing.
+  // Draw a plain black placeholder frame for it rather than crashing the whole draw call.
+  if (!beat.img) {
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+    return;
+  }
   const tr = (ANIMATIONS[beat.animation] || ANIMATIONS.zoom_in)(ease(p));
   ctx.globalAlpha = alpha;
   drawCover(ctx, beat.img, W, H, tr.scale, tr.dx, tr.dy);
