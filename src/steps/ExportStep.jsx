@@ -118,20 +118,36 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   // Same idea for the thumbnail — project.thumbnailStoragePath survives a refresh even though the
   // canvas itself (and any in-memory Blob) doesn't, so redraw it from the Supabase Storage backup
-  // instead of forcing a full (paid, for premium providers) regeneration.
+  // instead of forcing a full (paid, for premium providers) regeneration. Extracted as its own
+  // function (not just inline in the mount effect below) so the "click here to retry" link in the
+  // pre-publish block further down, and the mount effect, both go through the exact same restore
+  // logic — one path, not two copies that could drift.
+  async function restoreThumbnailFromStorage() {
+    if (!project.thumbnailStoragePath) return;
+    setError('');
+    try {
+      const blob = await downloadMediaAsBlob(project.thumbnailStoragePath);
+      const img = await loadImage(URL.createObjectURL(blob));
+      const ctx = thumbCanvasRef.current.getContext('2d');
+      ctx.drawImage(img, 0, 0, 1280, 720);
+      setThumbReady(true);
+      // Clears the pre-publish block (see publishToYoutube's THUMBNAIL_NOT_READY sentinel) once a
+      // retry from that same message actually succeeds — leaves any other, unrelated ytFormError
+      // untouched.
+      setYtFormError((prev) => (prev === 'THUMBNAIL_NOT_READY' ? '' : prev));
+    } catch (err) {
+      // Used to only go to console.error, so a failed restore was invisible until the user had
+      // already published without noticing the cover was missing (see youtubePublishEngine.js's
+      // setThumbnail, which now also refuses to silently treat this as success). Surfaced through
+      // the same `error` state/style every other failure in this component already uses.
+      console.error('[mediaStorage] could not restore thumbnail from storage', project.thumbnailStoragePath, err);
+      setError(`Could not restore the saved thumbnail from storage: ${String(err.message || err)}`);
+    }
+  }
+
   useEffect(() => {
     if (thumbReady || !project.thumbnailStoragePath) return;
-    (async () => {
-      try {
-        const blob = await downloadMediaAsBlob(project.thumbnailStoragePath);
-        const img = await loadImage(URL.createObjectURL(blob));
-        const ctx = thumbCanvasRef.current.getContext('2d');
-        ctx.drawImage(img, 0, 0, 1280, 720);
-        setThumbReady(true);
-      } catch (err) {
-        console.error('[mediaStorage] could not restore thumbnail from storage', project.thumbnailStoragePath, err);
-      }
-    })();
+    restoreThumbnailFromStorage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -340,7 +356,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   async function runThumbnail(videoId) {
     // no custom thumbnail made — YouTube's auto-picked one applies; skip the toBlob() call entirely.
     const thumbBlob = thumbReady ? await new Promise((resolve) => thumbCanvasRef.current.toBlob(resolve, 'image/png')) : null;
-    return setThumbnail(videoId, thumbBlob, { channel, onProgress: handleYtProgress });
+    return setThumbnail(videoId, thumbBlob, { channel, onProgress: handleYtProgress, expectedThumbnailPath: project.thumbnailStoragePath });
   }
 
   async function runCaptions(videoId) {
@@ -359,6 +375,16 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     }
     if (ytScheduleMode === 'schedule' && new Date(ytPublishAt).getTime() <= Date.now()) {
       setYtFormError('Scheduled publish time must be in the future.');
+      return;
+    }
+    // A thumbnail was made and backed up for this video (thumbnailStoragePath set) but isn't
+    // actually loaded right now (thumbReady false — most likely the Storage restore above failed).
+    // Blocks the click instead of letting it through to publish with no cover unnoticed — same
+    // failure youtubePublishEngine.js's setThumbnail now also refuses to silently swallow, caught
+    // here BEFORE the upload even starts instead of after. THUMBNAIL_NOT_READY is a sentinel the
+    // render below recognizes to show a clickable retry rather than plain text.
+    if (project.thumbnailStoragePath && !thumbReady) {
+      setYtFormError('THUMBNAIL_NOT_READY');
       return;
     }
     setYtBusy(true);
@@ -649,7 +675,20 @@ export default function ExportStep({ project, setProject, settings, channel, cha
             )}
           </div>
 
-          {ytFormError && <div style={{ marginTop: 12, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{ytFormError}</div>}
+          {ytFormError === 'THUMBNAIL_NOT_READY' ? (
+            <div style={{ marginTop: 12, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
+              Thumbnail failed to load —{' '}
+              <button
+                onClick={restoreThumbnailFromStorage}
+                style={{ background: 'none', border: 'none', padding: 0, color: T.primary, textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+              >
+                click here to retry
+              </button>{' '}
+              before publishing.
+            </div>
+          ) : (
+            ytFormError && <div style={{ marginTop: 12, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{ytFormError}</div>
+          )}
 
           {/* Once project.youtubeVideoId is set (from a previous session's automation run or manual
               upload — see handleYtProgress/fullPipelineRecipe.js's youtube phase), the primary

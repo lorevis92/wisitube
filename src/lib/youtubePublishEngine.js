@@ -128,13 +128,29 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
 }
 
 /**
- * Attaches a custom thumbnail to a video that's just finished uploading. A no-op (returns true
- * immediately, no request sent) when thumbnailBlob is falsy — the equivalent of the original's
- * "no custom thumbnail made, YouTube's auto-picked one applies" early return.
+ * Attaches a custom thumbnail to a video that's just finished uploading.
+ *
+ * expectedThumbnailPath: pass project.thumbnailStoragePath so a falsy thumbnailBlob can be told
+ * apart from two very different situations: no thumbnail was ever made for this video (falsy path
+ * too — a genuine no-op, YouTube's auto-picked one applies, returns true silently as before), or
+ * one WAS made and backed up (path present) but the blob isn't available right now — a real
+ * failure (a failed Storage restore, most likely — see ExportStep.jsx's restoreThumbnailFromStorage)
+ * that used to be silently swallowed as if it were the first case, letting a video go live with no
+ * cover unnoticed. That case is now reported through onProgress like every other phase failure
+ * here, and returns false instead of true.
  */
-export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress } = {}) {
-  console.log('[yt-upload] phase=runThumbnail:enter', { videoId, hasThumbnail: !!thumbnailBlob });
-  if (!thumbnailBlob) return true;
+export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress, expectedThumbnailPath } = {}) {
+  console.log('[yt-upload] phase=runThumbnail:enter', { videoId, hasThumbnail: !!thumbnailBlob, expectedThumbnailPath: !!expectedThumbnailPath });
+  if (!thumbnailBlob) {
+    if (expectedThumbnailPath) {
+      const message =
+        'A thumbnail was created for this video but could not be loaded for upload — the video published without a custom thumbnail. Restore or regenerate it from the Storyboard/Export page and retry.';
+      console.error('[yt-upload] phase=runThumbnail:missing-blob-but-expected', { videoId, expectedThumbnailPath });
+      onProgress?.({ kind: 'error', phase: 'thumbnail', message });
+      return false;
+    }
+    return true;
+  }
   onProgress?.({ kind: 'error-clear', phase: 'thumbnail' });
   try {
     const refreshToken = channel?.youtube_refresh_token;
@@ -275,7 +291,7 @@ export async function publishToYoutube(project, videoBlob, thumbnailBlob, { chan
   const videoId = await uploadVideo(project, videoBlob, { channel, metadata, onProgress });
   console.log('[yt-upload] phase=publishToYoutube:after-upload', { videoId });
   if (videoId) {
-    await setThumbnail(videoId, thumbnailBlob, { channel, onProgress });
+    await setThumbnail(videoId, thumbnailBlob, { channel, onProgress, expectedThumbnailPath: project.thumbnailStoragePath });
     await setCaptions(videoId, project, { channel, metadata, onProgress });
     await addToSeriesPlaylist(videoId, project, { channel, metadata, onProgress });
   }
