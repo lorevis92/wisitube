@@ -134,6 +134,13 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
   const seed = newSeed ? Math.floor(Math.random() * 999999) : beat.seed;
   const reference = beat.referenceId ? (project.references || []).find((r) => r.id === beat.referenceId) : null;
   const provider = settings.imageProvider || 'pollinations';
+  // A single regenerated beat is never worth submitting to Gemini Batch and waiting up to hours
+  // for — same reasoning, same fix as thumbnailEngine.js's effectiveThumbnailProvider. A
+  // 'nanobanana-batch' video's single-beat "↻ Image" regeneration still gets a real premium image,
+  // just via Nano Banana 2's ordinary synchronous endpoint. `provider` itself must never reach
+  // generateImage/api/generate-image.js directly for this path: that endpoint has no
+  // 'nanobanana-batch' case and rejects it outright (400) rather than silently downgrading.
+  const effectiveProvider = provider === 'nanobanana-batch' ? 'nanobanana' : provider;
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
 
   onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'loading', seed, backupFailed: false } });
@@ -142,15 +149,18 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
     // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
     // natively as referenceImages, same principle already used for Pollinations kontext.
     const referenceImages = reference ? [await blobToDataUri(reference.file)] : [];
+    // buildImagePrompt only branches on "pollinations vs not" (telegraphic vs natural-language),
+    // and 'nanobanana-batch' already falls into the "not pollinations" branch same as 'nanobanana'
+    // would — no separate effective-provider handling needed inside it.
     const imagePrompt = buildImagePrompt(beat, { project, settings });
     const { imageUrl, costUsd } = await withNetworkRetry(
-      (signal) => generateImage(imagePrompt, provider, referenceImages, { ...dims, seed, quality: 'medium' }, signal),
+      (signal) => generateImage(imagePrompt, effectiveProvider, referenceImages, { ...dims, seed, quality: 'medium' }, signal),
       GENERATION_TIMEOUT_MS,
       (attempt, total, err) =>
         onProgress?.({ kind: 'retry', message: `Image generation retry ${attempt}/${total} after network error: ${err.message}` })
     );
     // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
-    if (costUsd > 0) await recordCost({ channelId, videoId, provider, type: 'image', amountUsd: costUsd });
+    if (costUsd > 0) await recordCost({ channelId, videoId, provider: effectiveProvider, type: 'image', amountUsd: costUsd });
     await loadImage(imageUrl);
     // Keep the raw bytes so the project survives without the remote URL (persistence, offline).
     const imageBlob = await (await fetch(imageUrl)).blob();
