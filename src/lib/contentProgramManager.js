@@ -13,6 +13,7 @@
 // scored batch (free — no new Trends/YouTube/Claude-research calls) rather than re-running A-C.
 import { saveChannel, listPendingPromises } from './db';
 import { listChannelPlaylists } from './youtubePublishEngine';
+import { determineResumePhase } from './videoResumption';
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // Within the 12-15 range the feature calls for — a single fixed number keeps api/program-manager.js's
@@ -46,6 +47,36 @@ export function isTopicCacheFresh(channel) {
   return Date.now() - new Date(channel.topic_scoring_cached_at).getTime() < CACHE_TTL_MS;
 }
 
+// Titles of every video on this channel that's neither published nor genuinely finished —
+// determineResumePhase (src/lib/videoResumption.js) already returns null for exactly those two
+// cases (youtubeVideoId set, or render+thumbnail both done), so "non-terminal" here is precisely
+// "still has a phase to resume", regardless of which one (including a permanently stuck video —
+// its topic is still a real, unfinished commitment until someone deletes or resets it, so
+// re-proposing the same idea as if it were fresh is exactly the wrong outcome).
+//
+// Feeding these into avoidTitles (not just the softer existingVideos context below) closes the gap
+// that let the same topic get suggested twice 4 days apart: existingVideos is only a natural-
+// language hint Claude can (and did) disregard, while avoidTitles is the same hard, explicit
+// constraint already used for "Not interested" dismissals. Needed at every /api/program-manager
+// call in this file that builds its own avoidTitles — a fresh Stage A batch (runStageA) and the
+// single-idea fallback once the scored pool is exhausted (fetchFallbackSuggestion, called from
+// removeAndBackfill) — since the 24h cache TTL means a fresh Stage A run (with a brand-new
+// scoredCandidates/usedTitles that has no memory of earlier cache cycles) is exactly when a topic
+// already claimed by an in-progress video is most likely to resurface as "new" again.
+function nonTerminalVideoTitles(videos) {
+  return (videos || [])
+    .filter((v) => determineResumePhase(v, v.outline) !== null)
+    .map((v) => (v.displayTitle || v.topic || '').trim())
+    .filter(Boolean);
+}
+
+// dismissed_suggestions (existing behavior, unchanged) + non-terminal video titles (the fix above),
+// deduplicated.
+function combineAvoidTitles(channel, videos) {
+  const dismissed = (channel.dismissed_suggestions || []).map((t) => (t || '').trim()).filter(Boolean);
+  return [...new Set([...dismissed, ...nonTerminalVideoTitles(videos)])];
+}
+
 // ---- Stage A: broad qualitative batch ----
 async function runStageA({ channel, videos, existingPlaylists, pendingPromises, refinementText }) {
   const { ok, data } = await postJSON('/api/program-manager', {
@@ -58,7 +89,7 @@ async function runStageA({ channel, videos, existingPlaylists, pendingPromises, 
     activeDirective: channel.automation_directive || '',
     existingPlaylists,
     pendingPromises,
-    avoidTitles: channel.dismissed_suggestions || [],
+    avoidTitles: combineAvoidTitles(channel, videos),
     count: CANDIDATE_BATCH_SIZE,
   });
   if (!ok) throw new Error(data.error || 'Content Program Manager request failed');
@@ -224,7 +255,7 @@ async function removeAndBackfill(channel, suggestion, videos) {
     usedTitles = [...usedTitles, replacement.title];
   } else {
     try {
-      const avoidTitles = [...usedTitles, ...(channel.dismissed_suggestions || []), ...finalSuggestions.map((s) => s.title)];
+      const avoidTitles = [...new Set([...combineAvoidTitles(channel, videos), ...usedTitles, ...finalSuggestions.map((s) => s.title)])];
       const fallback = await fetchFallbackSuggestion(channel, videos, avoidTitles);
       if (fallback) {
         finalSuggestions = [...finalSuggestions, fallback];
