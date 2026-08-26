@@ -6,7 +6,7 @@
 // memory/IndexedDB for the current session only, stripped out before every write to wisitube_videos
 // (see stripBlobsForSync below). Real Blob persistence is Phase 3.
 import { supabase } from './supabase';
-import { determineResumePhase } from './videoResumption';
+import { determineResumePhase, RESUME_PHASE_PUBLISH } from './videoResumption';
 
 export function createId() {
   return crypto.randomUUID();
@@ -381,6 +381,7 @@ function computeVideoCounts(project) {
 // (project.stuckError set) is labeled with that message instead, by the caller — this only ever
 // describes ordinary progress.
 function describeIncompletePhase(project, phase, counts) {
+  if (phase === RESUME_PHASE_PUBLISH) return 'Ready to publish — will publish on the next cycle';
   if (phase === 'suggestion') return 'Writing outline';
 
   if (phase === 'scenes') {
@@ -481,10 +482,12 @@ export async function resetStuckVideo(id) {
   return saveVideo({ ...video, resumeAttempts: 0, stuckError: null });
 }
 
-// Every video, across every one of this user's channels, whose generation is genuinely finished —
-// render AND thumbnail both done (determineResumePhase returns null) — regardless of whether it's
-// been published to YouTube yet, most-recent first, capped at `limit`. For the permanent status
-// dashboard's collapsible "Recently completed" section (see AutomationMirrorStep.jsx).
+// Every video, across every one of this user's channels, that automation has nothing left to do on
+// (determineResumePhase returns null) — published, or fully produced with a publish already
+// attempted. A fully-produced video whose publish was NEVER started is deliberately excluded here:
+// it's RESUME_PHASE_PUBLISH, not null, and shows under "Videos in progress" (a later cycle will
+// publish it) instead. Most-recent first, capped at `limit`. For the permanent status dashboard's
+// collapsible "Recently completed" section (see AutomationMirrorStep.jsx).
 export async function listRecentCompletedVideos(userId, limit = 10) {
   const channels = await listChannels();
   const results = [];

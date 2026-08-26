@@ -8,9 +8,11 @@
 // A video interrupted partway (browser tab closed, computer slept, any crash — not just Gemini
 // Batch's own async turnaround) is picked back up from wherever it actually left off — suggestion/
 // outline, scenes, media, render, or thumbnail — via findResumableVideo + determineResumePhase (see
-// src/lib/videoResumption.js), NOT restarted from scratch. YouTube publish is the one phase never
-// auto-resumed (see the 'youtube' phase below for why), and a video stuck failing the same phase
-// MAX_RESUME_ATTEMPTS times in a row is marked permanently stuck rather than retried forever.
+// src/lib/videoResumption.js), NOT restarted from scratch. YouTube publish auto-resumes ONLY when
+// it's provably a safe first attempt (normal Gemini Batch wait, or fully produced with the upload
+// never started — see the 'youtube' phase below); a genuine anomalous interruption mid-generation
+// still stops for manual review. A video stuck failing the same phase MAX_RESUME_ATTEMPTS times in
+// a row is marked permanently stuck rather than retried forever.
 //
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
@@ -27,17 +29,18 @@ import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
-import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
+import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
 // Finds the most recent video on this channel that isn't in a terminal state — published
 // (youtubeVideoId set) or explicitly abandoned (stuckError set, see the resume-attempt tracking
-// below) — and that still has an automation-safe phase left to resume (determineResumePhase !==
-// null; see src/lib/videoResumption.js for what that excludes, namely YouTube publish). Used to be
-// Gemini-Batch-only (only ever found something via pendingImageBatches); now covers a video
-// interrupted at any phase, since the same "browser tab must stay open" constraint that scheduler
-// resumption has to work around applies here too.
+// below) — and that still has something automation can safely do next (determineResumePhase !==
+// null; that includes RESUME_PHASE_PUBLISH — a fully produced video whose upload was never started —
+// but excludes a video whose upload WAS already attempted). Used to be Gemini-Batch-only (only ever
+// found something via pendingImageBatches); now covers a video interrupted at any phase, since the
+// same "browser tab must stay open" constraint that scheduler resumption has to work around applies
+// here too.
 async function findResumableVideo(channelId) {
   const videos = await listVideosByChannel(channelId);
   const cutoff = Date.now() - RESUMABLE_VIDEO_WINDOW_MS;
@@ -240,8 +243,9 @@ function buildAutomationSettings(channel) {
  * just nothing left to do until Google finishes them — see automationEngine.js, which treats this
  * as neither a completed video nor an error). inProgress is false (the pre-existing contract) once
  * a video is genuinely done, whether that took one call or several resumed ones. youtubeVideoId is
- * null both when auto-publish is off AND when the video was resumed from an earlier interruption
- * (see the YouTube phase below) — check project.stuckError separately for "gave up after
+ * null when auto-publish is off, and when the video was resumed after an anomalous mid-generation
+ * interruption (NOT for a normal Gemini Batch wait or a safe ready-to-publish resume — those still
+ * publish; see the YouTube phase below) — check project.stuckError separately for "gave up after
  * MAX_RESUME_ATTEMPTS", which throws rather than returning normally (see below).
  *
  * Throws on the first phase failure that ISN'T "batch jobs still running", INCLUDING a resumed
@@ -292,6 +296,18 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   const resumable = targetVideoId ? await loadVideo(targetVideoId) : await findResumableVideo(channelId);
   let resumePhase = 'suggestion';
   const wasResumed = !!resumable;
+  // wasResumed alone is too blunt to gate auto-publish on (see the YouTube phase): it's true for the
+  // entirely normal "submit Gemini Batch → wait → resume" flow — a nanobanana-batch video is ALWAYS
+  // resumed at least once, since the submitting call returns inProgress:true without ever rendering.
+  // Two narrower signals separate that (and a safe ready-to-publish resume) from a genuine anomalous
+  // mid-generation interruption:
+  //   resumedFromNormalBatchWait — this resume picked the video up specifically because it still had
+  //     Gemini Batch jobs outstanding (resumable.pendingImageBatches non-empty).
+  //   resumedReadyToPublish — media/render/thumbnail all done AND the YouTube upload was never even
+  //     started (determineResumePhase → RESUME_PHASE_PUBLISH, which already excludes
+  //     project.youtubeUploadStarted), so publishing now is provably a safe first attempt.
+  let resumedFromNormalBatchWait = false;
+  let resumedReadyToPublish = false;
 
   if (resumable) {
     videoId = resumable.id;
@@ -313,12 +329,17 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       totalScenes: resumable.totalScenes || 0,
     };
     suggestion = { title: resumable.topic || plan.title, series: resumable.series || null };
-    resumePhase = determineResumePhase(project, plan.outline);
+    const rawResumePhase = determineResumePhase(project, plan.outline);
+    resumePhase = rawResumePhase;
+    resumedFromNormalBatchWait = Array.isArray(resumable.pendingImageBatches) && resumable.pendingImageBatches.length > 0;
+    resumedReadyToPublish = rawResumePhase === RESUME_PHASE_PUBLISH;
 
     // Safety net: determineResumePhase says render/thumbnail already happened based on a storage
     // path being present, but the actual Storage download (rehydrateProjectMedia above) can itself
-    // fail — never proceed past render as if a usable video blob exists when it doesn't.
-    if ((resumePhase === 'thumbnail' || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
+    // fail — never proceed past render as if a usable video blob exists when it doesn't. (The
+    // resumedReadyToPublish flag stays set even when this downgrades the phase: publishing is still
+    // safe once the re-render + existing-thumbnail restore below finish.)
+    if ((resumePhase === 'thumbnail' || resumePhase === RESUME_PHASE_PUBLISH || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
 
     // A video stuck failing the exact same phase over and over (a systematic problem — a bad
     // prompt, a persistently failing provider, corrupted state) would otherwise retry forever,
@@ -735,14 +756,15 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // cycle, so this phase fails immediately on any error (network or not) and asks for a manual
   // check instead of an automatic retry.
   let youtubeVideoId = null;
-  // wasResumed: this video existed BEFORE this call (it came back through the resume check above),
-  // meaning it had at least one earlier interrupted attempt somewhere. Publish is never auto-
-  // retried for a resumed video reaching this point, regardless of which phase it was actually
-  // resumed from: nothing persisted distinguishes "that earlier attempt never reached YouTube" from
-  // "it died mid-upload, after the bytes already reached Google" (see determineResumePhase's own
-  // comment in src/lib/videoResumption.js) — a duplicate public upload is a worse outcome than one
-  // video sitting for manual review. A video produced start-to-finish in ONE uninterrupted call
-  // (wasResumed false) is unaffected: that's always definitely a first attempt.
+  // Auto-publish is gated so it NEVER re-fires for a video whose earlier attempt might already have
+  // reached YouTube. wasResumed alone is too blunt (see the resume check above): it's true for the
+  // normal Gemini Batch "submit → wait → resume" flow, which must publish, and for a safe ready-to-
+  // publish resume. Only a genuine anomalous mid-generation interruption — resumed, but NOT because
+  // it was waiting on a batch job, and NOT already fully produced with the upload never started —
+  // blocks here. The youtubeUploadStarted marker persisted just before publishToYoutube below is
+  // what keeps a video that actually died mid-upload out of both this branch and findResumableVideo
+  // on the next cycle (determineResumePhase returns null for it).
+  const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
   if (channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
@@ -751,12 +773,22 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // automationEngine.js after this returns — it counts videos *produced*, not videos published.
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
-  } else if (wasResumed) {
-    const message = 'video ready for manual review — resumed after an earlier interruption, publish is not auto-retried to avoid a possible duplicate upload';
+  } else if (anomalousInterruption) {
+    const message = 'video ready for manual review — resumed after an anomalous interruption mid-generation, publish is not auto-retried to avoid a possible duplicate upload';
     await logStep(channelId, videoId, 'youtube', 'success', message);
     report('youtube', 'Resumed video — ready for manual review, not auto-published');
   } else {
     try {
+      // Persist that a publish is being ATTEMPTED before any bytes go out. If this call then dies
+      // mid-upload (a network drop after the request reached YouTube but before its response),
+      // determineResumePhase sees youtubeUploadStarted on the next cycle and returns null — the
+      // video is left for manual review instead of risking a duplicate. Set once; a successful
+      // publish supersedes it with youtubeVideoId.
+      if (!project.youtubeUploadStarted) {
+        project = { ...project, youtubeUploadStarted: true };
+        await persist();
+      }
+
       const metadata = {
         title: plan.title,
         description: plan.description,
