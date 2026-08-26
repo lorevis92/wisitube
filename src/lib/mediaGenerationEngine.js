@@ -143,7 +143,7 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
   const effectiveProvider = provider === 'nanobanana-batch' ? 'nanobanana' : provider;
   const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
 
-  onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'loading', seed, backupFailed: false } });
+  onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'loading', seed, backupFailed: false, errorMessage: null } });
   const startedAt = performance.now();
   try {
     // Reference photos flow to every provider the same way now — nanobanana/gptimage take them
@@ -166,7 +166,7 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
     const imageBlob = await (await fetch(imageUrl)).blob();
     const objectUrl = URL.createObjectURL(imageBlob);
     recordImageTime((performance.now() - startedAt) / 1000);
-    onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'ready', url: objectUrl, blob: imageBlob } });
+    onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'ready', url: objectUrl, blob: imageBlob, errorMessage: null } });
 
     // Back up to Supabase Storage so this survives a refresh — never blocks the generation
     // itself: the Blob set above is already usable this session regardless of whether this
@@ -193,8 +193,11 @@ export async function generateBeatImage(scene, beatIndex, { settings, project, c
     }
 
     return true;
-  } catch {
-    onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'error' } });
+  } catch (err) {
+    // Carry the real cause onto the beat (same as generateSceneAudio does with audioError below) —
+    // StoryboardStep's status-dot tooltip reads im.errorMessage, and fullPipelineRecipe inspects it
+    // to tell a "credit exhausted" failure apart from an ordinary one.
+    onProgress?.({ kind: 'beat', sceneId: scene.id, beatIndex, patch: { status: 'error', errorMessage: err?.message || String(err) } });
     return false;
   }
 }

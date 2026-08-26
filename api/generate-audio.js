@@ -9,6 +9,8 @@
 // Every phase has its own try/catch so a failure anywhere returns a clear JSON error with a phase
 // tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
 
+import { isFalCreditExhausted, FAL_CREDIT_EXHAUSTED_MESSAGE, FAL_CREDIT_EXHAUSTED_CODE } from '../src/lib/providerErrors.js';
+
 export const config = { maxDuration: 60 };
 
 // MiniMax's language_boost enum uses its own English names for each language — map the app's
@@ -89,6 +91,19 @@ export default async function handler(req, res) {
     }
 
     if (!response.ok) {
+      // "Out of money" gets its own recognizable response: a distinct 402, a clear action-oriented
+      // message (in BOTH error and detail, so the client's `data.detail || data.error` surfaces it
+      // verbatim), a machine code, and the untouched provider body kept under providerBody for the
+      // log. Everything else stays the generic 502 with fal's raw body in detail.
+      if (isFalCreditExhausted(response.status, rawText)) {
+        console.error('[generate-audio] phase=fal-credit-exhausted status=', response.status, 'body=', rawText.slice(0, 300));
+        return res.status(402).json({
+          error: FAL_CREDIT_EXHAUSTED_MESSAGE,
+          detail: FAL_CREDIT_EXHAUSTED_MESSAGE,
+          code: FAL_CREDIT_EXHAUSTED_CODE,
+          providerBody: rawText.slice(0, 300),
+        });
+      }
       console.error('[generate-audio] phase=fal-http-error status=', response.status, 'body=', rawText.slice(0, 300));
       return res.status(502).json({ error: `MiniMax Speech-02 HD generation failed (HTTP ${response.status})`, detail: rawText.slice(0, 300) });
     }

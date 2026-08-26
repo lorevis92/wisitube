@@ -14,6 +14,7 @@
 // tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
 
 import { priceForImage, resolutionTier } from '../src/lib/imageProviders.js';
+import { isFalCreditExhausted, FAL_CREDIT_EXHAUSTED_MESSAGE, FAL_CREDIT_EXHAUSTED_CODE } from '../src/lib/providerErrors.js';
 
 export const config = { maxDuration: 60 };
 
@@ -188,6 +189,23 @@ async function handlePollinations(res, { prompt, referenceImages, width, height,
 
 // ---- fal.ai gateway (nanobanana + gptimage) ----
 
+// Shared by both fal-backed handlers below: on a non-2xx from fal.run, an exhausted-balance lock
+// gets its own recognizable response (distinct 402, clear message in both error and detail so the
+// client's `data.detail || data.error` surfaces it verbatim, a machine code, and the raw provider
+// body kept under providerBody for the log). Returns true once it has sent that response; false
+// (nothing sent) for any other error, leaving the caller to send its own generic 502.
+function sendIfFalCreditExhausted(res, tag, status, rawText) {
+  if (!isFalCreditExhausted(status, rawText)) return false;
+  console.error(`[generate-image] phase=fal-credit-exhausted handler=${tag} status=`, status, 'body=', rawText.slice(0, 300));
+  res.status(402).json({
+    error: FAL_CREDIT_EXHAUSTED_MESSAGE,
+    detail: FAL_CREDIT_EXHAUSTED_MESSAGE,
+    code: FAL_CREDIT_EXHAUSTED_CODE,
+    providerBody: rawText.slice(0, 300),
+  });
+  return true;
+}
+
 async function handleNanoBanana(res, { prompt, referenceImages, width, height, seed }) {
   const falKey = process.env.FAL_KEY;
   if (!falKey) {
@@ -225,6 +243,7 @@ async function handleNanoBanana(res, { prompt, referenceImages, width, height, s
   }
 
   if (!response.ok) {
+    if (sendIfFalCreditExhausted(res, 'nanobanana', response.status, rawText)) return;
     console.error('[generate-image] phase=fal-http-error status=', response.status, 'body=', rawText.slice(0, 300));
     return res.status(502).json({ error: `Nano Banana 2 generation failed (HTTP ${response.status})`, detail: rawText.slice(0, 300) });
   }
@@ -287,6 +306,7 @@ async function handleGptImage(res, { prompt, referenceImages, width, height, qua
   }
 
   if (!response.ok) {
+    if (sendIfFalCreditExhausted(res, 'gptimage', response.status, rawText)) return;
     console.error('[generate-image] phase=fal-http-error status=', response.status, 'body=', rawText.slice(0, 300));
     return res.status(502).json({ error: `GPT Image 2 generation failed (HTTP ${response.status})`, detail: rawText.slice(0, 300) });
   }

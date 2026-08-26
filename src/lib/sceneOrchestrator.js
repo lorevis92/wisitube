@@ -2,6 +2,8 @@
 // into calls of at most MAX_SCENES_PER_CALL scenes, the narration handed continuity via
 // previousTail so the voiceover reads as one continuous script rather than disjointed fragments.
 
+import { isCreditExhaustedMessage } from './providerErrors';
+
 const MAX_SCENES_PER_CALL = 16;
 const RETRY_BACKOFF_MS = 3000;
 // Shared cap for every paid-provider concurrency pool below (images via nanobanana/gptimage,
@@ -12,11 +14,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // One retry with a fixed backoff, shared by scene generation and image generation below — a
 // second failure propagates to the caller (for scenes, that's after every prior successful chunk
-// has already been handed over via onProgress, so no completed work is lost).
+// has already been handed over via onProgress, so no completed work is lost). A recognized
+// "credit exhausted" failure is never retried: topping up an account is not something a 3s wait
+// fixes, and each pointless retry is another billable request that also 402s.
 async function withRetry(fn) {
   try {
     return await fn();
-  } catch {
+  } catch (err) {
+    if (isCreditExhaustedMessage(err?.message)) throw err;
     await sleep(RETRY_BACKOFF_MS);
     return await fn();
   }
@@ -136,7 +141,11 @@ async function callGenerateImage(payload, signal) {
     signal,
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Image generation failed');
+  // Prefer the provider's own detail over our generic wrapper so the real cause (fal.ai's raw
+  // message, or the recognized "credit exhausted" line the endpoint puts in both fields) reaches
+  // the caller — and from there scene.audioError / beat.errorMessage — instead of being flattened
+  // to "generation failed (HTTP 502)".
+  if (!res.ok) throw new Error(data.detail || data.error || 'Image generation failed');
   if (!data.imageUrl) throw new Error('Image generation returned no image URL');
   return data;
 }
@@ -164,7 +173,9 @@ async function callGenerateAudio(payload, signal) {
     signal,
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Audio generation failed');
+  // Same as callGenerateImage above: prefer data.detail (fal.ai's real message, or the recognized
+  // "credit exhausted" line) so the true cause reaches scene.audioError instead of being lost.
+  if (!res.ok) throw new Error(data.detail || data.error || 'Audio generation failed');
   if (!data.audioUrl) throw new Error('Audio generation returned no audio URL');
   return data;
 }

@@ -8,9 +8,54 @@ import { priceForImage } from './imageProviders';
 import { priceForVoice } from './voiceProviders';
 import { runFullPipeline } from './recipes/fullPipelineRecipe';
 import { runStaticBackgroundPipeline } from './recipes/staticBackgroundRecipe';
+import { isCreditExhaustedMessage } from './providerErrors';
 
 const PAID_IMAGE_PROVIDERS = ['nanobanana', 'gptimage', 'nanobanana-batch'];
 const PAID_VOICE_ENGINES = ['minimax'];
+
+// Image providers that actually bill fal.ai. 'nanobanana-batch' is deliberately NOT here — that
+// path runs through Google's Gemini Batch API, not fal.ai, so a fal balance check says nothing
+// about it.
+const FAL_BACKED_IMAGE_PROVIDERS = ['nanobanana', 'gptimage'];
+// Below this, the cycle logs a one-off heads-up (never blocks) so a mid-video "credit exhausted"
+// failure doesn't come as a surprise.
+const LOW_FAL_BALANCE_THRESHOLD_USD = 10;
+
+// Best-effort fal.ai balance read via api/fal-balance.js. Returns the USD balance as a number, or
+// null when it can't be determined (endpoint down, or the billing API rejected the key — it wants
+// an admin key) — a null must never be treated as "low", only as "don't know, don't warn".
+async function readFalBalanceUsd() {
+  const res = await fetch('/api/fal-balance');
+  if (!res.ok) return null;
+  const data = await res.json();
+  return typeof data.balanceUsd === 'number' ? data.balanceUsd : null;
+}
+
+// One fal.ai balance check per real cycle — not per channel: the balance is account-wide, so
+// re-checking it for every channel would just burn calls for the same number. Only bothers when at
+// least one channel in this cycle actually uses a fal-backed engine. A low balance is logged as a
+// distinct 'low_balance_warning' row and nothing else; the cycle proceeds exactly as normal.
+async function warnIfFalBalanceLow(channels) {
+  const anyFalChannel = channels.some(
+    (c) => FAL_BACKED_IMAGE_PROVIDERS.includes(c.automation_image_provider) || c.automation_voice_engine === 'minimax'
+  );
+  if (!anyFalChannel) return;
+  try {
+    const balance = await readFalBalanceUsd();
+    if (balance != null && balance < LOW_FAL_BALANCE_THRESHOLD_USD) {
+      await logAutomationStep(
+        null,
+        null,
+        'balance',
+        'low_balance_warning',
+        `fal.ai balance is $${balance.toFixed(2)} — below $${LOW_FAL_BALANCE_THRESHOLD_USD}. Top up at fal.ai/dashboard/billing to avoid a mid-video "credit exhausted" failure.`
+      );
+    }
+  } catch (err) {
+    // Non-fatal by design — a balance check that itself failed must not stop a cycle from running.
+    console.error('[automationEngine] fal.ai balance pre-check failed (non-fatal)', err);
+  }
+}
 
 // 'YYYY-MM-DD' in the browser's local timezone — matches what a user means by "today" when they
 // set a daily cap, and is stable to store/compare as a plain string.
@@ -171,6 +216,9 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
   const channels = allChannels.filter((c) => c.automation_enabled === true);
   console.warn('[run-cycle-debug] runAutomationCycle()', channels.length, 'channels have automation_enabled === true');
 
+  // Proactive, non-blocking low-balance heads-up — real cycles only (a dry run spends nothing).
+  if (!dryRun) await warnIfFalBalanceLow(channels);
+
   for (let i = 0; i < channels.length; i++) {
     if (shouldStop()) break;
 
@@ -299,7 +347,10 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
     } catch (err) {
       console.warn('[run-cycle-debug] runAutomationCycle() channel try/catch caught an exception', channel?.id, err);
       console.error('[automationEngine] channel cycle failed', channel?.id, err);
-      await logStep(channel?.id, null, 'cycle', 'error', String(err?.message || err));
+      // A billing failure keeps its distinct status at the cycle level too, so the history table
+      // shows "💳 credit exhausted" in amber rather than another generic red 'error' row.
+      const status = isCreditExhaustedMessage(err?.message) ? 'credit_exhausted' : 'error';
+      await logStep(channel?.id, null, 'cycle', status, String(err?.message || err));
       report('error');
     }
   }

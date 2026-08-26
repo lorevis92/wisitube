@@ -22,6 +22,7 @@ import { generateAllMedia } from '../mediaGenerationEngine';
 import { generateAllMediaViaBatch } from '../geminiBatchImageEngine';
 import { resumePendingBatches } from '../batchResumption';
 import { rehydrateProjectMedia } from '../mediaRehydration';
+import { isCreditExhaustedMessage } from '../providerErrors';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
@@ -176,6 +177,20 @@ function applyMediaProgress(project, evt) {
     return { ...project, scenes: project.scenes.map((s) => (s.id === sceneId ? { ...s, ...evt.patch } : s)) };
   }
   return project;
+}
+
+// Scans a project's per-beat/per-scene media state for a recognized "credit exhausted" failure
+// (the 💳-marked message the api/ endpoints and providerErrors.js produce), so the media phase can
+// log that specific cause with its own distinct status instead of the generic "some scenes failed
+// to generate media". Returns the message of the first one found, or null.
+function findCreditExhaustedError(project) {
+  for (const s of project.scenes || []) {
+    if (s.audioStatus === 'error' && isCreditExhaustedMessage(s.audioError)) return s.audioError;
+    for (const im of s.images || []) {
+      if (im.status === 'error' && isCreditExhaustedMessage(im.errorMessage)) return im.errorMessage;
+    }
+  }
+  return null;
 }
 
 // Style/language/format/voice/YouTube category/made-for-kids are all configurable per channel now
@@ -594,12 +609,18 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           await persistChain;
         }
 
+        // A billing failure (exhausted audio credit, or a batch chunk that 402'd on submit) is not
+        // "still in progress" — waiting for Google batch jobs that were never submitted would just
+        // stall the video indefinitely. Surface it as the failure it is.
+        const creditMsg = findCreditExhaustedError(project);
+        if (creditMsg) throw new Error(creditMsg);
+
         const nowAllReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
         if (!nowAllReady) mediaStillInProgress = true;
       } else {
         await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: mediaOnProgress });
         const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
-        if (!allReady) throw new Error('Some scenes failed to generate media (image or audio)');
+        if (!allReady) throw new Error(findCreditExhaustedError(project) || 'Some scenes failed to generate media (image or audio)');
       }
 
       await persist();
@@ -615,7 +636,16 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       report('media', 'Media complete');
     }
   } catch (err) {
-    await logStep(channelId, videoId, 'media', 'error', String(err?.message || err));
+    // A billing failure (fal.ai or Gemini Batch) is logged as its own 'credit_exhausted' status,
+    // visually distinct from a generic 'error' in the automation history — see AutomationStep's
+    // statusColor. The 💳 message came either straight from the thrown error or from a per-item
+    // failure the throw above didn't itself carry.
+    const creditMsg = isCreditExhaustedMessage(err?.message) ? err.message : findCreditExhaustedError(project);
+    if (creditMsg) {
+      await logStep(channelId, videoId, 'media', 'credit_exhausted', creditMsg);
+    } else {
+      await logStep(channelId, videoId, 'media', 'error', String(err?.message || err));
+    }
     throw err;
   }
   }
@@ -680,7 +710,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     await logStep(channelId, videoId, 'thumbnail', 'success', 'thumbnail created');
     report('thumbnail', 'Thumbnail ready');
   } catch (err) {
-    await logStep(channelId, videoId, 'thumbnail', 'error', String(err?.message || err));
+    // The thumbnail is a paid fal.ai image too (nanobanana/gptimage) — an exhausted balance here
+    // gets the same distinct 'credit_exhausted' status as the media phase.
+    const status = isCreditExhaustedMessage(err?.message) ? 'credit_exhausted' : 'error';
+    await logStep(channelId, videoId, 'thumbnail', status, String(err?.message || err));
     throw err;
   }
   } else {

@@ -12,6 +12,7 @@
 // is configured) still runs through the existing synchronous mediaGenerationEngine.js path.
 import { buildImagePrompt } from './mediaGenerationEngine';
 import { runWithConcurrency } from './sceneOrchestrator';
+import { isCreditExhaustedMessage } from './providerErrors';
 
 // Scenes per submitted batch job, not beats — matches pendingImageBatches' own `chunkSceneIds`
 // field (scene-level, not beat-level). Each scene contributes up to 2 items (its 2 image beats),
@@ -43,6 +44,9 @@ const staggerDelay = () => SUBMIT_STAGGER_MIN_MS + Math.random() * (SUBMIT_STAGG
 // message mentioning rate/quota (Google's own wording for this varies; this catches both an exact
 // status and the common phrasing without assuming one specific error shape).
 function isRateLimitError(err) {
+  // A recognized "billing/quota exhausted" failure is NOT a transient rate limit — retrying it 5s
+  // later just burns two more 402s. api/gemini-batch.js already classified it; trust that.
+  if (isCreditExhaustedMessage(err?.message)) return false;
   if (err?.status === 429) return true;
   return /rate|quota/i.test(String(err?.message || ''));
 }
@@ -187,7 +191,10 @@ export async function generateAllMediaViaBatch(project, { settings, channelId, v
         onProgress?.({ kind: 'message', text: `Batch submit retry ${attempt}/${total} after rate limit: ${String(err.message || err)}` })
       );
     } catch (err) {
-      const message = `Batch chunk failed to submit (scenes: ${chunkSceneIds.join(', ')}): ${String(err.message || err)}`;
+      const creditExhausted = isCreditExhaustedMessage(err?.message);
+      const message = creditExhausted
+        ? `${err.message} (batch chunk not submitted — scenes: ${chunkSceneIds.join(', ')})`
+        : `Batch chunk failed to submit (scenes: ${chunkSceneIds.join(', ')}): ${String(err.message || err)}`;
       console.error('[geminiBatchImageEngine] chunk submit failed', chunkSceneIds, err);
       onProgress?.({ kind: 'message', text: message });
       // This is the one place a failed submission used to vanish without a persisted trace — the
@@ -195,7 +202,7 @@ export async function generateAllMediaViaBatch(project, { settings, channelId, v
       // attempted. logStep makes the failure show up in the automation log even if nobody was
       // watching the live view at the time; batchResumption.js's completeness check (independent of
       // whether other jobs are still pending — see that file) is what actually retries it later.
-      await logStep?.(channelId, videoId, 'media', 'error', message)?.catch(() => {});
+      await logStep?.(channelId, videoId, 'media', creditExhausted ? 'credit_exhausted' : 'error', message)?.catch(() => {});
       await sleep(staggerDelay());
       return;
     }

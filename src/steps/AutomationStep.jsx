@@ -97,6 +97,12 @@ function statusColor(status) {
   // Recovering an abandoned lock (automationScheduler.js's runManagedCycle) — notable, not a
   // failure, but deliberately not the same green as an ordinary successful step either.
   if (status === 'stale_lock_released') return T.yellow;
+  // Billing states — a provider's credit ran out mid-run ('credit_exhausted'), or the pre-cycle
+  // fal.ai balance check came back low ('low_balance_warning'). Amber, not the red of a generic
+  // 'error': the cause is specific and the fix is "top up", not "debug" — and the 💳 in the
+  // message itself makes it unmistakable.
+  if (status === 'credit_exhausted') return T.yellow;
+  if (status === 'low_balance_warning') return T.yellow;
   if (status === 'skipped') return T.textMuted;
   return T.green;
 }

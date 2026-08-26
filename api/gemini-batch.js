@@ -23,6 +23,12 @@
 // always small (a handful of test prompts now, at most a few dozen beats per video later), well
 // under any inline size limit, so there's no need for the more speculative upload/download flow.
 
+import {
+  isGoogleBatchCreditExhausted,
+  GOOGLE_BATCH_CREDIT_EXHAUSTED_MESSAGE,
+  GOOGLE_CREDIT_EXHAUSTED_CODE,
+} from '../src/lib/providerErrors.js';
+
 export const config = { maxDuration: 60 };
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
@@ -201,6 +207,26 @@ async function submit(req, res, apiKey) {
     }
 
     if (!response.ok) {
+      // "Out of money" (an exhausted daily/free-tier quota or an unpaid/disabled billing account)
+      // gets its own recognizable response — a clear action-oriented message in both error and
+      // detail, a machine code, the raw Google body kept under providerBody — distinct from a
+      // schema-rejection or a transient rate limit (which geminiBatchImageEngine.js retries).
+      let parsedErr = null;
+      try {
+        parsedErr = JSON.parse(rawText);
+      } catch {
+        parsedErr = rawText;
+      }
+      if (isGoogleBatchCreditExhausted(parsedErr)) {
+        console.error('[gemini-batch] phase=submit-credit-exhausted status=', response.status, 'body=', rawText.slice(0, 800));
+        return res.status(402).json({
+          error: GOOGLE_BATCH_CREDIT_EXHAUSTED_MESSAGE,
+          detail: GOOGLE_BATCH_CREDIT_EXHAUSTED_MESSAGE,
+          code: GOOGLE_CREDIT_EXHAUSTED_CODE,
+          status: response.status,
+          providerBody: rawText.slice(0, 800),
+        });
+      }
       // Gemini's raw error body is returned verbatim (not summarized) — with an unverified request
       // schema, this is the fastest way to see exactly which field name/nesting it rejected.
       console.error('[gemini-batch] phase=submit-http-error status=', response.status, 'body=', rawText.slice(0, 800));
@@ -366,6 +392,15 @@ async function results(req, res, apiKey) {
 
     if (!data?.done) return res.status(400).json({ error: 'Batch job is not finished yet' });
     if (data?.error) {
+      if (isGoogleBatchCreditExhausted(data.error)) {
+        console.error('[gemini-batch] phase=results-credit-exhausted', JSON.stringify(data.error).slice(0, 500));
+        return res.status(402).json({
+          error: GOOGLE_BATCH_CREDIT_EXHAUSTED_MESSAGE,
+          detail: GOOGLE_BATCH_CREDIT_EXHAUSTED_MESSAGE,
+          code: GOOGLE_CREDIT_EXHAUSTED_CODE,
+          providerBody: JSON.stringify(data.error).slice(0, 500),
+        });
+      }
       console.error('[gemini-batch] phase=results-job-failed', JSON.stringify(data.error).slice(0, 500));
       return res.status(502).json({ error: 'Batch job failed', detail: JSON.stringify(data.error).slice(0, 500) });
     }

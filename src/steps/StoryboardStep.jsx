@@ -8,6 +8,7 @@ import { priceForVoice } from '../lib/voiceProviders';
 import { generateBeatImage, generateSceneAudio, generateAllMedia } from '../lib/mediaGenerationEngine';
 import { generateAllMediaViaBatch } from '../lib/geminiBatchImageEngine';
 import { resumePendingBatches } from '../lib/batchResumption';
+import { isCreditExhaustedMessage } from '../lib/providerErrors';
 import { downloadMediaAsBlob } from '../lib/mediaStorage';
 import ImageLightbox from '../components/ImageLightbox';
 import ExpandableTextarea from '../components/ExpandableTextarea';
@@ -283,19 +284,30 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
     [project.scenes, settings.imageProvider]
   );
 
-  const statusDot = (st, title) => (
-    <span
-      title={title}
-      style={{
-        display: 'inline-block',
-        width: 8,
-        height: 8,
-        borderRadius: 8,
-        background: st === 'ready' ? T.green : st === 'error' ? T.primary : st === 'loading' ? T.yellow : T.border,
-        animation: st === 'loading' ? 'wisiPulse 1.2s infinite' : 'none',
-      }}
-    />
-  );
+  const statusDot = (st, title) => {
+    // A "credit exhausted" failure gets a 💳 glyph in place of the plain red dot — same tooltip,
+    // but instantly distinguishable from an ordinary generation error at a glance.
+    if (st === 'error' && isCreditExhaustedMessage(title)) {
+      return (
+        <span title={title} style={{ fontSize: 11, lineHeight: '8px', cursor: 'help', verticalAlign: 'middle' }}>
+          💳
+        </span>
+      );
+    }
+    return (
+      <span
+        title={title}
+        style={{
+          display: 'inline-block',
+          width: 8,
+          height: 8,
+          borderRadius: 8,
+          background: st === 'ready' ? T.green : st === 'error' ? T.primary : st === 'loading' ? T.yellow : T.border,
+          animation: st === 'loading' ? 'wisiPulse 1.2s infinite' : 'none',
+        }}
+      />
+    );
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
