@@ -308,6 +308,14 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   //     project.youtubeUploadStarted), so publishing now is provably a safe first attempt.
   let resumedFromNormalBatchWait = false;
   let resumedReadyToPublish = false;
+  // Snapshot of the resume-attempt counters from BEFORE this call's trackResumeAttempt bump. A
+  // media phase that ends still legitimately waiting on Gemini Batch jobs (mediaStillInProgress,
+  // with jobs actually outstanding on Google's side) is NOT a failed attempt — the bump is rolled
+  // back to these values so an arbitrarily long batch can never be mistaken for a video stuck
+  // failing the media phase. Same principle as resumedFromNormalBatchWait: waiting on Google,
+  // however long, is not a failure.
+  let priorResumeAttempts = 0;
+  let priorLastResumePhase = null;
 
   if (resumable) {
     videoId = resumable.id;
@@ -345,6 +353,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // prompt, a persistently failing provider, corrupted state) would otherwise retry forever,
     // quietly burning quota/spend every cycle. Recorded and checked BEFORE this attempt actually
     // runs, so a crash during this very attempt still gets counted correctly on the next resume.
+    // (The media phase rolls this bump back if it ends still waiting on Gemini Batch — see below.)
+    priorResumeAttempts = Number(project?.resumeAttempts) || 0;
+    priorLastResumePhase = project?.lastResumePhase || null;
     const { attempts, stuck } = trackResumeAttempt(project, resumePhase);
     project = { ...project, resumeAttempts: attempts, lastResumePhase: resumePhase };
 
@@ -672,6 +683,20 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   }
 
   if (mediaStillInProgress) {
+    // Roll back this call's resume-attempt bump when the media phase ended PURELY waiting on Google
+    // — the original batch jobs are still running, nothing has failed. A long batch, however many
+    // cycles it spans, is a normal wait, not a failed media-phase attempt, and must never
+    // accumulate toward the MAX_RESUME_ATTEMPTS "stuck" cap. Any sign of actual failure keeps the
+    // count: a beat that errored, or a recovery batch having been needed (batchResumption.js's
+    // completeness check) — that's the path the stuck cap exists to eventually stop.
+    const jobsStillOutstanding = Array.isArray(project.pendingImageBatches) && project.pendingImageBatches.length > 0;
+    const anyImageErrored = project.scenes.some((s) => (s.images || []).some((im) => im.status === 'error'));
+    const recoveryWasNeeded = (Number(project.batchRecoveryCycles) || 0) > 0;
+    const purelyWaitingOnGoogle = jobsStillOutstanding && !anyImageErrored && !recoveryWasNeeded;
+    if (wasResumed && purelyWaitingOnGoogle && project.resumeAttempts !== priorResumeAttempts) {
+      project = { ...project, resumeAttempts: priorResumeAttempts, lastResumePhase: priorLastResumePhase };
+      await persist();
+    }
     // Not a failure — this video will be picked up again by the resume check on a later cycle.
     // automationEngine.js treats inProgress specially: no upload-count increment (nothing was
     // actually produced yet) and no exhaustion-loop retry on this same channel this cycle.
