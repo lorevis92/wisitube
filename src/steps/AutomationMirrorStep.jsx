@@ -8,11 +8,10 @@ import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 // a run is active. Three parts, in order:
 //   1. The live, real-time mirror below — only rendered while `run` (App.jsx's
 //      currentAutomationRun) is non-null, unchanged from before.
-//   2. "Videos in progress" — every incomplete video across every channel (src/lib/db.js's
-//      listIncompleteVideos, reusing determineResumePhase so this can never disagree with what
-//      automation would actually do next), always present regardless of whether a run is live.
-//   3. "Recently completed" — the last 10 videos whose generation finished (render+thumbnail done),
-//      published or not, collapsed by default.
+//   2. "Videos in progress" — every video whose listing thumbnail isn't created yet (src/lib/db.js's
+//      listIncompleteVideos), always present regardless of whether a run is live.
+//   3. "Recently completed" — the last 10 videos whose thumbnail IS created, published or not, with
+//      a per-row "✓ Published" / "◻ Finished — not published" badge. Collapsed by default.
 const PHASE_LABELS = {
   starting: 'Starting run',
   suggestion: 'Choosing a topic',
@@ -579,6 +578,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                       </a>
                     ) : (
                       <span
+                        title="The video is fully produced (render + thumbnail done) but was never published — auto-publish is off for this channel, or it's awaiting manual review after an anomalous interruption."
                         style={{
                           ...mono,
                           fontSize: 10,
@@ -591,7 +591,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                           flexShrink: 0,
                         }}
                       >
-                        Not published
+                        ◻ Finished — not published
                       </span>
                     )}
                   </div>

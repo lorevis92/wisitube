@@ -6,7 +6,7 @@
 // memory/IndexedDB for the current session only, stripped out before every write to wisitube_videos
 // (see stripBlobsForSync below). Real Blob persistence is Phase 3.
 import { supabase } from './supabase';
-import { determineResumePhase, RESUME_PHASE_PUBLISH } from './videoResumption';
+import { determineResumePhase } from './videoResumption';
 
 export function createId() {
   return crypto.randomUUID();
@@ -381,7 +381,6 @@ function computeVideoCounts(project) {
 // (project.stuckError set) is labeled with that message instead, by the caller — this only ever
 // describes ordinary progress.
 function describeIncompletePhase(project, phase, counts) {
-  if (phase === RESUME_PHASE_PUBLISH) return 'Ready to publish — will publish on the next cycle';
   if (phase === 'suggestion') return 'Writing outline';
 
   if (phase === 'scenes') {
@@ -412,13 +411,13 @@ function describeIncompletePhase(project, phase, counts) {
   return phase || 'In progress';
 }
 
-// Every video, across every one of this user's channels, that hasn't reached a terminal state —
-// published (youtubeVideoId set) or fully produced-but-unpublished (determineResumePhase returns
-// null, meaning render+thumbnail are both done; see listRecentCompletedVideos below for that
-// bucket) — for the permanent status dashboard's "Videos in progress" section (see
-// AutomationMirrorStep.jsx). Reuses determineResumePhase (src/lib/videoResumption.js), the exact
-// same logic the automation recipes use to decide where to resume a video from, so this dashboard
-// can never show a phase that disagrees with what automation would actually do next.
+// Every video, across every one of this user's channels, whose YouTube listing thumbnail hasn't
+// been created yet — i.e. it's genuinely still mid-generation (outline/scenes/media/render/thumbnail,
+// or waiting on a Gemini Batch job). A video that HAS a thumbnail is "completed" for dashboard
+// purposes regardless of whether it was ever published — it moves to listRecentCompletedVideos
+// below. Purely a display split: determineResumePhase / findResumableVideo (the automation-side
+// resume logic) are untouched, so a thumbnail-ready-but-unpublished video is still resumed and
+// published by a later cycle — it just shows under "Recently completed" while that's pending.
 //
 // waitingReason explains WHY a video isn't progressing right now, distinct from `phase` (WHERE it
 // is): 'awaiting_batch' (a real Gemini Batch job is outstanding — nothing to do but wait on
@@ -436,9 +435,11 @@ export async function listIncompleteVideos(userId) {
     // eslint-disable-next-line no-await-in-loop
     const videos = await listVideosByChannel(channel.id);
     for (const v of videos) {
-      if (v.youtubeVideoId) continue; // published — terminal
+      // Thumbnail created (or already published, which implies it) → "completed", shown in
+      // listRecentCompletedVideos instead — see that function's own comment.
+      if (v.thumbnailStoragePath || v.youtubeVideoId) continue;
       const phase = determineResumePhase(v, v.outline);
-      if (phase === null) continue; // render+thumbnail done — that's "completed", not "in progress"
+      if (phase === null) continue; // nothing left for automation to do AND no thumbnail — nothing to surface
       const counts = computeVideoCounts(v);
       const hasPendingBatches = Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0;
       const stuck = !!v.stuckError;
@@ -482,12 +483,12 @@ export async function resetStuckVideo(id) {
   return saveVideo({ ...video, resumeAttempts: 0, stuckError: null });
 }
 
-// Every video, across every one of this user's channels, that automation has nothing left to do on
-// (determineResumePhase returns null) — published, or fully produced with a publish already
-// attempted. A fully-produced video whose publish was NEVER started is deliberately excluded here:
-// it's RESUME_PHASE_PUBLISH, not null, and shows under "Videos in progress" (a later cycle will
-// publish it) instead. Most-recent first, capped at `limit`. For the permanent status dashboard's
-// collapsible "Recently completed" section (see AutomationMirrorStep.jsx).
+// Every video, across every one of this user's channels, whose YouTube listing thumbnail has been
+// created — "completed" regardless of publish status. That covers: published videos; videos
+// finished on a channel with auto-publish off; and videos finished but awaiting manual review (or a
+// later cycle's publish). The UI badge (AutomationMirrorStep.jsx) tells published ("✓ Published",
+// links to YouTube) from not ("◻ Finished — not published") using youtubeVideoId. Most-recent
+// first, capped at `limit`. For the dashboard's collapsible "Recently completed" section.
 export async function listRecentCompletedVideos(userId, limit = 10) {
   const channels = await listChannels();
   const results = [];
@@ -495,8 +496,7 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
     // eslint-disable-next-line no-await-in-loop
     const videos = await listVideosByChannel(channel.id);
     for (const v of videos) {
-      const phase = determineResumePhase(v, v.outline);
-      if (phase !== null) continue; // not done yet — belongs in listIncompleteVideos instead
+      if (!v.thumbnailStoragePath && !v.youtubeVideoId) continue; // no thumbnail yet — still in progress
       results.push({
         videoId: v.id,
         channelId: channel.id,
