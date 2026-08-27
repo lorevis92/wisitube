@@ -49,6 +49,13 @@ async function findResumableVideo(channelId) {
       if ((v.createdAt || 0) < cutoff) return false;
       if (v.youtubeVideoId) return false; // already published — terminal
       if (v.stuckError) return false; // explicitly abandoned after MAX_RESUME_ATTEMPTS — terminal
+      // Only automation's OWN videos are ever picked up by an automatic cycle. A video created by
+      // hand (Create/Storyboard) that's left half-finished stays purely the owner's to resume, from
+      // the "Videos in progress" dashboard. createdByAutomation is stamped by the video-record phase
+      // below (and re-stamped on resume); a persisted non-empty outline is accepted as an equivalent
+      // signal for automation videos that predate the flag — the manual flow provably never persists
+      // an outline (only App.jsx's local `plan` holds one), so this can't misclassify a manual video.
+      if (v.createdByAutomation !== true && !(Array.isArray(v.outline) && v.outline.length > 0)) return false;
       return determineResumePhase(v, v.outline) !== null;
     }) || null
   );
@@ -326,6 +333,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // YouTube, means those phases always see valid, loadable media regardless of which session each
     // piece was actually completed in.
     project = await rehydrateProjectMedia(resumable);
+    // Reached via findResumableVideo (no explicit targetVideoId) → this is an automation video by
+    // definition; stamp createdByAutomation so one that predates the flag (matched via the outline
+    // fallback) carries it from now on. An explicit "Resume now" on a specific video (targetVideoId)
+    // never stamps — a hand-made video the owner resumes stays hand-made.
+    if (!targetVideoId && project.createdByAutomation !== true) {
+      project = { ...project, createdByAutomation: true };
+    }
     plan = {
       title: resumable.displayTitle || resumable.topic || '',
       description: resumable.description || '',
@@ -411,7 +425,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // ---- Phase: video record ----
     videoId = createId();
     createdAt = Date.now();
-    project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null };
+    // createdByAutomation marks this record as one an automatic cycle is allowed to resume later
+    // (see findResumableVideo) — a hand-made video from Create/Storyboard never carries it.
+    project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null, createdByAutomation: true };
 
     try {
       await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
@@ -494,6 +510,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           characterBible: plan.characterBible,
           scenes: [],
           series: suggestion.series || null,
+          // This phase REPLACES project wholesale rather than spreading it, so the flag set in the
+          // video-record phase has to be re-set here to survive to the record — see findResumableVideo.
+          createdByAutomation: true,
           // Persisted (not just kept on the in-memory `plan`) specifically so a resumed session can
           // reconstruct what the scenes phase needs to continue from — see determineResumePhase and
           // the resume-aware scenes phase below, which read these back via plan.outline/totalScenes.

@@ -44,6 +44,10 @@ async function findResumableVideo(channelId) {
       if ((v.createdAt || 0) < cutoff) return false;
       if (v.youtubeVideoId) return false;
       if (v.stuckError) return false;
+      // Automatic cycles only ever resume automation's own videos — see fullPipelineRecipe.js's
+      // identical guard for the reasoning (createdByAutomation flag, with a persisted-outline
+      // fallback for pre-flag videos; the manual flow never persists an outline).
+      if (v.createdByAutomation !== true && !(Array.isArray(v.outline) && v.outline.length > 0)) return false;
       return determineResumePhase(v, v.outline) !== null;
     }) || null
   );
@@ -219,6 +223,11 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     videoId = resumable.id;
     createdAt = resumable.createdAt || Date.now();
     project = await rehydrateProjectMedia(resumable);
+    // See fullPipelineRecipe.js's identical line — stamp createdByAutomation on a findResumableVideo
+    // pickup (never on an explicit targetVideoId resume).
+    if (!targetVideoId && project.createdByAutomation !== true) {
+      project = { ...project, createdByAutomation: true };
+    }
     plan = {
       title: resumable.displayTitle || resumable.topic || '',
       description: resumable.description || '',
@@ -285,7 +294,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
 
   // ---- Phase: video record ----
   videoId = createId();
-  project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null };
+  // createdByAutomation marks this as a record an automatic cycle may resume later (findResumableVideo).
+  project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null, createdByAutomation: true };
 
   try {
     await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
@@ -370,6 +380,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         series: suggestion.series || null,
         staticBackground,
         staticTextStyle,
+        // Re-set here because this phase replaces project wholesale (see findResumableVideo).
+        createdByAutomation: true,
         // Persisted (not just kept on the in-memory `plan`) specifically so a resumed session can
         // reconstruct what the scenes phase needs to continue from — see determineResumePhase and
         // the resume-aware scenes phase below, which read these back via plan.outline/totalScenes.
