@@ -90,8 +90,17 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
           >
             💰 Google Cloud billing →
           </a>
+          <a
+            href="https://platform.claude.com"
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...btnGhost, textDecoration: 'none', display: 'inline-block' }}
+          >
+            💰 Anthropic balance →
+          </a>
         </div>
         <div style={{ ...mono, fontSize: 11, color: T.textMuted }}>May require one extra click to select the right billing account/project</div>
+        <div style={{ ...mono, fontSize: 11, color: T.textMuted }}>Anthropic: go to Plans &amp; Billing in the left menu to see your credit balance</div>
       </div>
 
       <div style={{ ...mono, fontSize: 12, color: T.textSecondary }}>
