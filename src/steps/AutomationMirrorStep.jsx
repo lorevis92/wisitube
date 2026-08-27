@@ -28,8 +28,8 @@ const PHASE_LABELS = {
 const LOG_PHASES = new Set(['starting', 'suggestion', 'video-record', 'outline', 'scenes']);
 
 // Exported so App.jsx's Navbar idle-video-count badge polls listIncompleteVideos at the exact same
-// cadence this page's own "Videos in progress" list does — one shared constant, never two numbers
-// that could quietly drift apart.
+// cadence this page's own dashboard lists ("Videos in progress" / "Recently completed") do — one
+// shared constant, never two numbers that could quietly drift apart.
 export const INCOMPLETE_POLL_MS = 30000;
 
 // Same status-dot logic as StoryboardStep.jsx's own statusDot, minus the title tooltip (there's no
@@ -110,15 +110,31 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
     }
   }
 
-  // Polls regardless of whether a run is live — a video can be sitting on Gemini Batch jobs, or
-  // simply mid-phase from an earlier interrupted session, whether or not anything is actively
-  // running right now (same reasoning AutomationStep.jsx's old "Batches in flight" panel had, now
-  // generalized to every phase — see src/lib/videoResumption.js).
+  // Both lists refresh on a fixed interval regardless of whether a run is live — a video can be
+  // sitting on Gemini Batch jobs, or simply mid-phase from an earlier interrupted session, and its
+  // persisted state changes underneath this view (a background cycle advancing it, batch jobs
+  // resolving) with nothing here to trigger a re-read. Without this the dashboard could show
+  // hours-old counts ("0/80 scenes" long after they finished) until a manual action or a full
+  // reload. Also refreshes the instant the tab regains visibility/focus: a backgrounded tab has its
+  // setInterval throttled hard by the browser (to ~once a minute, and paused entirely while the
+  // machine sleeps), so the interval alone isn't enough to keep a re-focused tab current.
   useEffect(() => {
-    loadIncomplete();
-    loadCompleted();
-    const id = setInterval(loadIncomplete, INCOMPLETE_POLL_MS);
-    return () => clearInterval(id);
+    const refresh = () => {
+      loadIncomplete();
+      loadCompleted();
+    };
+    refresh();
+    const id = setInterval(refresh, INCOMPLETE_POLL_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', refresh);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', refresh);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
