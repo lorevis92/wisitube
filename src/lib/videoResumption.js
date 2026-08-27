@@ -32,12 +32,13 @@ export const MAX_RESUME_ATTEMPTS = 5;
 export const RESUMABLE_VIDEO_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * project: the video's persisted project object (src/lib/db.js fromVideoRow's spread) — must
- * include `outline`/`totalScenes` if scene generation ever got that far (see the outline phase in
- * both recipes, which now persists them alongside the rest of the outline's output specifically so
- * a resumed session can inspect them here).
+ * project: the video's persisted project object (src/lib/db.js fromVideoRow's spread).
  * outline: project.outline, passed explicitly rather than read from `project` internally so this
- * function stays a pure, easily-testable inspection of whatever data it's handed.
+ * function stays a pure, easily-testable inspection of whatever data it's handed. Only the
+ * automation recipes' outline phase persists `outline`/`totalScenes`; the manual create flow
+ * (App.jsx) never does — so its absence must NOT be read as "still at the suggestion phase" once
+ * project.scenes already holds written scenes. outline/totalScenes are used only where a planned
+ * total is genuinely needed (deciding whether scene writing is still unfinished).
  *
  * Returns one of RESUME_PHASE_ORDER's values, RESUME_PHASE_PUBLISH (everything produced, only a
  * first publish left), or null when there's nothing left for AUTOMATION to safely do on its own —
@@ -70,12 +71,20 @@ export function determineResumePhase(project, outline) {
   // instead of being misrouted all the way back to "suggestion".
   if (Array.isArray(project?.pendingImageBatches) && project.pendingImageBatches.length > 0) return 'media';
 
+  const scenes = Array.isArray(project?.scenes) ? project.scenes : [];
   const totalScenes = Number(project?.totalScenes) || 0;
   const hasOutline = Array.isArray(outline) && outline.length > 0 && totalScenes > 0;
-  if (!hasOutline) return 'suggestion';
 
-  const scenes = Array.isArray(project?.scenes) ? project.scenes : [];
-  if (scenes.length < totalScenes) return 'scenes';
+  // Nothing written yet: genuinely still early. 'scenes' if there's a plan to work from, otherwise
+  // 'suggestion'. Once ANY scene exists, the outline phase is behind us — a manually-created video
+  // never persists outline/totalScenes, so its written scenes are the only proof it got this far,
+  // and their absence here must never regress it to "never started".
+  if (scenes.length === 0) return hasOutline ? 'scenes' : 'suggestion';
+
+  // Scene writing not finished — only decidable against a known planned total. Automation always
+  // persists totalScenes; the manual flow never does, so a manual video with any scenes at all is
+  // treated as past this phase, and the real per-scene media status below drives the rest.
+  if (totalScenes > 0 && scenes.length < totalScenes) return 'scenes';
 
   // static_background videos have no per-beat images at all (see App.jsx/the recipes'
   // buildScenesFromRaw) — only narration audio needs to be ready for that content type.
