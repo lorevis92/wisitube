@@ -3,15 +3,123 @@
 // Never convert to Edge (runtime: 'edge' / new Response()) — the two APIs are incompatible.
 //
 // Second stage of the titles → outline → scenes pipeline. Runs AFTER the user has picked a title
-// and its narrative angle (api/generate-titles.js) — everything here is anchored to that specific
-// angle, not a generic treatment of the topic. Produces the SEO pack, the character bible (with
-// web search enabled, same as the old single-call api/generate.js), and a chapter outline whose
-// scene_count fields the client will later split into individual api/generate-scenes.js calls.
+// and its narrative angle — everything here is anchored to that specific angle, not a generic
+// treatment of the topic. Produces the SEO pack, the character bible (with web search enabled, same
+// as the old single-call api/generate.js), and a chapter outline whose scene_count fields the
+// client will later split into individual api/generate-scenes.js calls.
+//
+// Also serves STAGE 1 of the same pipeline — the titles call (body.mode === 'titles', dispatched to
+// generateTitles below) — folded in from the former api/generate-titles.js to stay under Vercel
+// Hobby's 12-function cap (see scripts/check-function-count.js). The two stages share nothing but
+// the ANTHROPIC_API_KEY and this file.
 //
 // Every phase has its own try/catch so a failure anywhere returns a clear JSON error with a phase
 // tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
 
 export const config = { maxDuration: 120 };
+
+// ---- Stage 1: titles (was api/generate-titles.js) ----
+//
+// A short, fast call that lets the user pick a title and its narrative angle before any of the
+// heavier outline/scene-writing work runs.
+
+// The "channel voice" half of the titles system prompt — safe to override per-channel (nothing
+// here constrains the output format, so swapping it can't break downstream parsing).
+const TITLES_DEFAULT_CREATIVE_DIRECTION = `You are a YouTube strategist for successful faceless animated channels. Given a topic, propose 5 distinct, highly clickable video titles — curiosity-driven but not misleading, max 70 chars each. Each title implies a specific narrative angle (what the video will actually focus on), and the 5 angles must be genuinely different from each other — not just reworded versions of the same idea. For each title, write "angle": one short phrase naming that specific narrative cut (e.g. for the title "Why Napoleon Lost in Russia" the angle is "focus on the strategic blunder"; for the title "The Winter That Destroyed an Empire" the angle is "focus on human suffering").`;
+
+// The output-format half — NEVER influenced by creativeOverride: the client's JSON parsing depends
+// on this exact shape regardless of what creative direction is in play.
+const TITLES_SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "titles": [5 objects: { "title": string, "angle": string }] }.`;
+
+async function generateTitles(req, res, apiKey) {
+  try {
+    let topic, language, creativeOverride;
+    try {
+      const body = req.body || {};
+      topic = typeof body.topic === 'string' ? body.topic.trim() : '';
+      language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
+      if (!topic || topic.length > 500) return res.status(400).json({ error: 'Invalid topic' });
+      creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+    } catch (err) {
+      console.error('[generate-titles] phase=validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    const systemPrompt = `${creativeOverride || TITLES_DEFAULT_CREATIVE_DIRECTION} ${TITLES_SCHEMA_INSTRUCTIONS}`;
+
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1200,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: `Topic: "${topic}". Narration language: ${language}. Respond with JSON only.` }],
+        }),
+      });
+    } catch (err) {
+      console.error('[generate-titles] phase=fetch-anthropic', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not reach the Anthropic API', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    let rawText;
+    try {
+      rawText = await response.text();
+    } catch (err) {
+      console.error('[generate-titles] phase=read-response-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the Anthropic response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    if (!response.ok) {
+      console.error('[generate-titles] phase=anthropic-http-error status=', response.status, 'body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic API error', detail: rawText.slice(0, 300) });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (err) {
+      console.error('[generate-titles] phase=parse-envelope-json', err?.message, 'raw body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic returned a non-JSON response', detail: rawText.slice(0, 300) });
+    }
+
+    let raw;
+    try {
+      raw = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    } catch (err) {
+      console.error('[generate-titles] phase=extract-text-blocks', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read Anthropic response content', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = clean.indexOf('{');
+    const end = clean.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+      console.error('[generate-titles] phase=locate-json no braces found, text=', clean.slice(0, 300));
+      return res.status(502).json({ error: 'Invalid AI response' });
+    }
+
+    let plan;
+    try {
+      plan = JSON.parse(clean.slice(start, end + 1));
+    } catch (e) {
+      console.error('[generate-titles] phase=parse-plan-json', e?.message, 'raw text=', clean.slice(0, 300));
+      return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
+    }
+
+    if (!Array.isArray(plan.titles) || plan.titles.length === 0) {
+      console.error('[generate-titles] phase=validate-plan missing/empty titles, plan=', JSON.stringify(plan).slice(0, 300));
+      return res.status(502).json({ error: 'AI response missing titles' });
+    }
+
+    return res.status(200).json(plan);
+  } catch (err) {
+    console.error('[generate-titles] phase=unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
 
 // The "channel voice" half of the system prompt — tone, editorial priorities, how to approach
 // outline pacing and character-bible writing. Safe to override per-channel (see creativeOverride
@@ -77,6 +185,9 @@ export default async function handler(req, res) {
     console.error('[generate-outline] phase=config missing ANTHROPIC_API_KEY env var');
     return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
   }
+
+  // Stage 1 (titles) is dispatched here, before any of the outline-specific body validation below.
+  if (req.body?.mode === 'titles') return generateTitles(req, res, apiKey);
 
   // Outer safety net: the phase-specific catches below should handle everything, but this
   // guarantees we never let an uncaught exception fall through to a platform-level 502.

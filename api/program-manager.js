@@ -6,7 +6,8 @@
 // Claude — with web search enabled, same as api/generate.js — to propose what to produce next.
 // Three modes, dispatched by body.mode, all sharing this one file rather than three separate
 // functions — Vercel Hobby caps a deployment at 12 Serverless Functions (see api/youtube.js's own
-// header comment), and this project is already at that limit:
+// header comment); scripts/check-function-count.js now guards the count at build time, keeping a
+// deliberate buffer below that cap:
 //   mode=suggest (default)  — the original behavior above/below: a broad qualitative candidate batch.
 //   mode=synthesize         — see the SYNTHESIZE_* constants: selects/ranks a scored batch.
 //   mode=chat               — see CHAT_SYSTEM_PROMPT: a conversation with the channel owner about

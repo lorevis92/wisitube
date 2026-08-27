@@ -2,8 +2,9 @@
 // CRITICAL: this is a Serverless Function: handler(req, res) + res.status().json().
 // Never convert to Edge (runtime: 'edge' / new Response()) — the two APIs are incompatible.
 //
-// Vercel Hobby caps a deployment at 12 Serverless Functions. The 7 standalone YouTube endpoints
-// were consolidated into this single routed function to stay under that limit. Each case below is
+// Vercel Hobby caps a deployment at 12 Serverless Functions (scripts/check-function-count.js guards
+// this at build time with a deliberate buffer). The 7 standalone YouTube endpoints were
+// consolidated into this single routed function to stay under that limit. Each case below is
 // the original handler's body, moved here unchanged, dispatched by an `action` field — read from
 // the POST body for our own client's calls, or from the query string for the OAuth callback, since
 // that one is a GET redirect from Google, not a POST from our client:

@@ -1,6 +1,6 @@
 // Client-side mirror of the "channel voice" and "technical format" prompt halves defined in each
-// AI endpoint (api/generate-titles.js, api/generate-outline.js, api/generate-scenes.js,
-// api/program-manager.js) — see ChannelDashboardStep.jsx's Prompt Lab, which uses these to show
+// AI endpoint (api/generate-outline.js — for both its titles mode and the outline itself —
+// api/generate-scenes.js, api/program-manager.js) — see ChannelDashboardStep.jsx's Prompt Lab, which uses these to show
 // what a channel's generations do by default (as a textarea placeholder, not a value) and to
 // display the fixed technical contract read-only.
 //

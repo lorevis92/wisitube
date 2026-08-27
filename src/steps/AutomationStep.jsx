@@ -154,10 +154,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   // shows something for those.
   const [batchResultsRawOpen, setBatchResultsRawOpen] = useState(false);
 
-  // TEMPORARY diagnostic — calls api/gemini-single-test.js (non-batch generateContent) with the
-  // first prompt, to isolate whether "Request contains an invalid argument" comes from the image
-  // request shape itself or from how api/gemini-batch.js wraps it inside a batch. Separate state
-  // from the batch flow above so the two never contend for the same status/error display.
+  // TEMPORARY diagnostic — calls api/gemini-batch.js with action:'single-test' (a plain non-batch
+  // generateContent) with the first prompt, to isolate whether "Request contains an invalid
+  // argument" comes from the image request shape itself or from how the batch envelope wraps it.
+  // Separate state from the batch flow above so the two never contend for the same status/error display.
   const [singleTestLoading, setSingleTestLoading] = useState(false);
   const [singleTestResult, setSingleTestResult] = useState(null); // { googleStatus, googleOk, sentPayload, googleResponse }
   const [singleTestError, setSingleTestError] = useState('');
@@ -482,8 +482,8 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
     }
   }
 
-  // TEMPORARY diagnostic — see api/gemini-single-test.js's own header comment for what this
-  // isolates. Uses the first prompt currently in the textarea, whether or not a batch has been
+  // TEMPORARY diagnostic — see api/gemini-batch.js's action:'single-test' header comment for what
+  // this isolates. Uses the first prompt currently in the textarea, whether or not a batch has been
   // submitted yet.
   async function runSingleTest() {
     const items = parseBatchPrompts();
@@ -492,10 +492,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
     setSingleTestLoading(true);
     setSingleTestResult(null);
     try {
-      const res = await fetch('/api/gemini-single-test', {
+      const res = await fetch('/api/gemini-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: items[0].prompt, resolution: '0.5K' }),
+        body: JSON.stringify({ action: 'single-test', prompt: items[0].prompt, resolution: '0.5K' }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || data.error || 'Single test request failed');

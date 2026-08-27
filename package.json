@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "check:functions": "node scripts/check-function-count.js",
+    "prebuild": "node scripts/check-function-count.js",
     "build": "vite build",
     "preview": "vite preview"
   },

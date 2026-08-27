@@ -120,6 +120,8 @@ export default async function handler(req, res) {
       return status(req, res, apiKey);
     case 'results':
       return results(req, res, apiKey);
+    case 'single-test':
+      return singleTest(req, res, apiKey);
     default:
       return res.status(400).json({ error: 'Unknown or missing action' });
   }
@@ -450,6 +452,83 @@ async function results(req, res, apiKey) {
     return res.status(200).json({ results });
   } catch (err) {
     console.error('[gemini-batch] phase=results-unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
+
+// ---- action=single-test ----
+//
+// TEMPORARY diagnostic (was its own file, api/gemini-single-test.js — folded in here to stay under
+// Vercel Hobby's 12-function cap; see scripts/check-function-count.js). Not part of the real
+// pipeline — remove once the generic "Request contains an invalid argument" (code: 3) error the
+// batch items were hitting is fully root-caused.
+//
+// Calls Gemini's plain (non-batch) generateContent endpoint with the EXACT same
+// contents/generationConfig/imageConfig shape `submit` above wraps inside a single batch item's
+// "request" field. Purpose: tell whether that error comes from the image-generation request shape
+// itself (this un-batched call fails the same way) or from something specific to the batch envelope
+// (this call succeeds). Whatever Google returns — success or error — goes straight back to the
+// client unmodified, alongside the exact payload sent, so the two can be compared directly.
+async function singleTest(req, res, apiKey) {
+  try {
+    let prompt, resolution;
+    try {
+      const body = req.body || {};
+      prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+      if (!prompt) return res.status(400).json({ error: 'Invalid prompt' });
+      resolution = typeof body.resolution === 'string' && body.resolution.trim() ? body.resolution.trim() : '0.5K';
+    } catch (err) {
+      console.error('[gemini-batch] phase=single-test-validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    // Same inner GenerateContentRequest shape a batch item wraps — built from the same DEFAULT_MODEL
+    // and resolveImageSize this file's `submit` uses, so this genuinely tests the current shape.
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseModalities: ['IMAGE'],
+        imageConfig: { imageSize: resolveImageSize(resolution) },
+      },
+    };
+
+    let response;
+    try {
+      response = await fetch(`${API_BASE}/models/${DEFAULT_MODEL}:generateContent`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      console.error('[gemini-batch] phase=single-test-fetch', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not reach the Gemini API', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    let rawText;
+    try {
+      rawText = await response.text();
+    } catch (err) {
+      console.error('[gemini-batch] phase=single-test-read-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the Gemini response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    console.log('[gemini-batch] phase=single-test-result', { status: response.status, ok: response.ok, sentPayload: payload, body: rawText });
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = null; // not JSON — raw text is still returned below untouched
+    }
+
+    return res.status(200).json({
+      googleStatus: response.status,
+      googleOk: response.ok,
+      sentPayload: payload,
+      googleResponse: data !== null ? data : rawText,
+    });
+  } catch (err) {
+    console.error('[gemini-batch] phase=single-test-unexpected', err?.message, err?.stack);
     return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
   }
 }

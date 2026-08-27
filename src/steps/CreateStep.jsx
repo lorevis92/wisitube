@@ -241,10 +241,11 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     setError('');
     setLoading(true);
     try {
-      const res = await fetch('/api/generate-titles', {
+      const res = await fetch('/api/generate-outline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          mode: 'titles',
           topic: settings.topic.trim(),
           language: settings.language,
           creativeOverride: channel?.prompt_overrides?.titles || null,

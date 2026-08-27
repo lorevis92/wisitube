@@ -1,8 +1,9 @@
 // Rough, self-improving time estimates for the Create→Storyboard flow. Image/voice generation
 // times are learned per-browser (localStorage moving average) rather than hardcoded, since they
 // vary a lot with the user's machine and network. Script writing now runs as three separate server
-// calls (titles → outline → chunked scenes, see api/generate-titles.js / generate-outline.js /
-// generate-scenes.js) instead of one big call, so the estimate sums each phase individually.
+// calls (titles → outline → chunked scenes, see api/generate-outline.js's titles mode +
+// api/generate-outline.js + api/generate-scenes.js) instead of one big call, so the estimate sums
+// each phase individually.
 
 const IMAGE_BEATS_PER_SCENE = 2;
 const MAX_SAMPLES = 20;
