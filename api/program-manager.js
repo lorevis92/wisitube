@@ -41,7 +41,7 @@ const DEFAULT_CREATIVE_DIRECTION = `You are an expert YouTube content strategist
 // client uses this to mark the ORIGINAL video's promise as fulfilled once this suggestion is
 // actually started (see ChannelDashboardStep.jsx/fullPipelineRecipe.js/staticBackgroundRecipe.js).
 const schemaInstructions = (suggestionCountText) =>
-  `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [${suggestionCountText} objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low", "fulfills_promise_video_id": "the video id from the pending-promises list this suggestion fulfills, or null" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
+  `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [${suggestionCountText} objects: { "title": "clickable video title — names the real subject by its proper name AND carries a curiosity hook, never just one", "angle": "one sentence on what makes it interesting / why now", "subject": "the bare proper name of the subject — just the name, no framing words, no verbs, no leading article (e.g. \\"Fritz Haber\\", \\"Singapore\\", \\"ammonium nitrate\\"); used only for de-duplication, never shown", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low", "fulfills_promise_video_id": "the video id from the pending-promises list this suggestion fulfills, or null" }] }. If a refinement instruction is provided, bias all suggestions toward it.`;
 
 // ---- mode=synthesize ----
 //
@@ -89,7 +89,7 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let mode, channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, pendingPromises, analysis, scoredCandidates, chatMessages, recentSuggestions;
+    let mode, channelName, niche, editorialNotes, videos, refinement, creativeOverride, activeDirective, existingPlaylists, count, avoidTitles, avoidSubjects, pendingPromises, analysis, scoredCandidates, chatMessages, recentSuggestions;
     try {
       const body = req.body || {};
       mode = body.mode === 'synthesize' ? 'synthesize' : body.mode === 'chat' ? 'chat' : 'suggest';
@@ -106,6 +106,7 @@ export default async function handler(req, res) {
             .map((v) => ({
               title: typeof v.title === 'string' ? v.title.trim() : '',
               topic: typeof v.topic === 'string' ? v.topic.trim() : '',
+              subject: typeof v.subject === 'string' ? v.subject.trim() : '',
             }))
             .filter((v) => v.title || v.topic)
         : [];
@@ -132,6 +133,12 @@ export default async function handler(req, res) {
       // baked into userContent below.
       avoidTitles = Array.isArray(body.avoidTitles)
         ? body.avoidTitles.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 200)
+        : [];
+      // Bare proper-name subjects already covered by a video on this channel (made or in progress) —
+      // the primary "don't repeat this" signal, stronger than title similarity. See
+      // src/lib/contentProgramManager.js.
+      avoidSubjects = Array.isArray(body.avoidSubjects)
+        ? body.avoidSubjects.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 200)
         : [];
       // Videos on this channel whose closing CTA promised a specific future topic, not yet
       // addressed (src/lib/db.js listPendingPromises) — see the system-prompt addition below.
@@ -259,8 +266,11 @@ export default async function handler(req, res) {
           .join(', ');
         systemPrompt += ` This channel already has these YouTube playlists: ${playlistList}. When a suggestion is part of a series, prefer continuing one of these existing playlists when relevant, rather than always inventing a brand new one — continuity keeps the channel's series coherent and bingeable.`;
       }
+      if (avoidSubjects.length) {
+        systemPrompt += ` These exact subjects are ALREADY covered by a video on this channel (published or in progress) — do NOT propose another video about any of them, whatever the angle or framing. This is the PRIMARY check for "already covered", and it overrides how different a new title might look: ${avoidSubjects.join('; ')}.`;
+      }
       if (avoidTitles.length) {
-        systemPrompt += ` Avoid suggesting anything substantially similar to these previously rejected or already-covered ideas: ${avoidTitles.join('; ')}`;
+        systemPrompt += ` Also avoid anything substantially similar to these previously rejected or already-covered ideas: ${avoidTitles.join('; ')}`;
       }
       systemPrompt += ` ${schemaInstructions(count ? `exactly ${count}` : '6-8')}`;
 
@@ -269,7 +279,7 @@ export default async function handler(req, res) {
         `Niche: ${niche || '(not specified)'}`,
         editorialNotes ? `Editorial notes: ${editorialNotes}` : '',
         videos.length
-          ? `Videos already made (${videos.length}):\n${videos.map((v) => `- "${v.title || v.topic}"${v.topic && v.title ? ` (topic: ${v.topic})` : ''}`).join('\n')}`
+          ? `Videos already made (${videos.length}):\n${videos.map((v) => `- "${v.title || v.topic}"${v.subject ? ` [subject: ${v.subject}]` : v.topic && v.title ? ` (topic: ${v.topic})` : ''}`).join('\n')}`
           : 'No videos made yet — this is a brand new channel.',
         refinement ? `Refinement instruction from the user — bias ALL suggestions toward this: ${refinement}` : '',
         'Respond with JSON only.',

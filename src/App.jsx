@@ -360,6 +360,9 @@ export default function App() {
       characterBible: plan.characterBible,
       scenes: buildScenesFromRaw(rawScenesSoFar, settings.contentType === 'static_background'),
       series: settings.series || null,
+      // Comparison-only subject name from the chosen title — see the setProject call in
+      // runSceneGeneration for what it's for.
+      subject: plan.subject || null,
       displayTitle: plan.title || settings.topic?.slice(0, 60) || 'Untitled video',
       // Resolved once in handleOutlineReady (background image already uploaded to this video's own
       // Storage path there, if it needed to be) — carried through every partial save unchanged, same
@@ -407,6 +410,10 @@ export default function App() {
         characterBible: plan.characterBible,
         scenes: buildScenesFromRaw(scenes, settings.contentType === 'static_background'),
         series: settings.series || null,
+        // Bare proper name of the subject (from the chosen title — api/generate-outline.js's titles
+        // mode). Comparison-only, never displayed: the Content Program Manager uses it as the
+        // primary "already covered this" check (src/lib/contentProgramManager.js).
+        subject: plan.subject || null,
         // Whatever the closing CTA promised for a future video (see api/generate-scenes.js's
         // promised_follow_up field) — null when the CTA was generic. Feeds
         // api/program-manager.js's pendingPromises context (ChannelDashboardStep.jsx) once this
@@ -426,7 +433,7 @@ export default function App() {
 
   // Phase 2: TitleSelectStep has already fetched the outline — persist the pieces we have so far
   // and kick off chunked scene generation in the background.
-  async function handleOutlineReady(outlineData, title, angle) {
+  async function handleOutlineReady(outlineData, title, angle, subject) {
     generationRef.current += 1;
     const generation = generationRef.current;
     const newProjectId = createId();
@@ -494,6 +501,9 @@ export default function App() {
     const plan = {
       title,
       angle,
+      // Comparison-only proper-name of the subject, from the chosen title (see TitleSelectStep.jsx /
+      // api/generate-outline.js titles mode). Never shown — feeds the anti-repetition check only.
+      subject: (subject || '').trim(),
       description: outlineData.description || '',
       tags: outlineData.tags || [],
       thumbnails: outlineData.thumbnail_concepts || [],
@@ -584,6 +594,9 @@ export default function App() {
       // later suggestion had already fulfilled it.
       promisedFollowUp: record.promisedFollowUp || null,
       promiseFulfilled: !!record.promiseFulfilled,
+      // Comparison-only subject name — same "carry it through resume or the next autosave drops it"
+      // reason as the fields above.
+      subject: record.subject || null,
     });
 
     if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile

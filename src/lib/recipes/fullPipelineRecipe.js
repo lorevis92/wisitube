@@ -427,7 +427,15 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     createdAt = Date.now();
     // createdByAutomation marks this record as one an automatic cycle is allowed to resume later
     // (see findResumableVideo) — a hand-made video from Create/Storyboard never carries it.
-    project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null, createdByAutomation: true };
+    // subject: the Content Program Manager's bare proper-name for this suggestion — comparison-only,
+    // feeds the anti-repetition check on the next cycle (src/lib/contentProgramManager.js).
+    project = {
+      titles: [suggestion.title],
+      selectedTitle: 0,
+      series: suggestion.series || null,
+      createdByAutomation: true,
+      subject: suggestion.subject || null,
+    };
 
     try {
       await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
@@ -510,9 +518,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           characterBible: plan.characterBible,
           scenes: [],
           series: suggestion.series || null,
-          // This phase REPLACES project wholesale rather than spreading it, so the flag set in the
-          // video-record phase has to be re-set here to survive to the record — see findResumableVideo.
+          // This phase REPLACES project wholesale rather than spreading it, so fields set in the
+          // video-record phase have to be re-set here to survive to the record.
           createdByAutomation: true,
+          subject: suggestion.subject || null, // comparison-only — see the video-record phase
           // Persisted (not just kept on the in-memory `plan`) specifically so a resumed session can
           // reconstruct what the scenes phase needs to continue from — see determineResumePhase and
           // the resume-aware scenes phase below, which read these back via plan.outline/totalScenes.

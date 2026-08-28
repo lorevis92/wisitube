@@ -63,11 +63,23 @@ export function isTopicCacheFresh(channel) {
 // removeAndBackfill) — since the 24h cache TTL means a fresh Stage A run (with a brand-new
 // scoredCandidates/usedTitles that has no memory of earlier cache cycles) is exactly when a topic
 // already claimed by an in-progress video is most likely to resurface as "new" again.
+function nonTerminalVideos(videos) {
+  return (videos || []).filter((v) => determineResumePhase(v, v.outline) !== null);
+}
+
 function nonTerminalVideoTitles(videos) {
-  return (videos || [])
-    .filter((v) => determineResumePhase(v, v.outline) !== null)
+  return nonTerminalVideos(videos)
     .map((v) => (v.displayTitle || v.topic || '').trim())
     .filter(Boolean);
+}
+
+// The bare proper-name subject of every non-terminal video that has one (App.jsx's title flow and
+// the Content Program Manager both now produce it — older videos simply have none and fall back to
+// title comparison). Fed to /api/program-manager as avoidSubjects — the PRIMARY anti-repetition
+// signal: a subject match means "already covering this", regardless of how different a new title
+// would look.
+function nonTerminalVideoSubjects(videos) {
+  return [...new Set(nonTerminalVideos(videos).map((v) => (v.subject || '').trim()).filter(Boolean))];
 }
 
 // dismissed_suggestions (existing behavior, unchanged) + non-terminal video titles (the fix above),
@@ -83,13 +95,14 @@ async function runStageA({ channel, videos, existingPlaylists, pendingPromises, 
     channelName: channel.name,
     niche: channel.niche || '',
     editorialNotes: channel.editorialNotes || '',
-    existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
+    existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '', subject: v.subject || '' })),
     refinement: refinementText || '',
     creativeOverride: channel.prompt_overrides?.programManager || null,
     activeDirective: channel.automation_directive || '',
     existingPlaylists,
     pendingPromises,
     avoidTitles: combineAvoidTitles(channel, videos),
+    avoidSubjects: nonTerminalVideoSubjects(videos),
     count: CANDIDATE_BATCH_SIZE,
   });
   if (!ok) throw new Error(data.error || 'Content Program Manager request failed');
@@ -209,20 +222,21 @@ function pickNextCandidate(scoredCandidates, avoidTitlesLower) {
 // for one more idea, deliberately NOT re-running Trends/YouTube scoring (that's the whole point of
 // this fallback existing separately from the full A-C pipeline). The result is marked
 // signal_incomplete so the UI never implies it's backed by real data it was never given.
-async function fetchFallbackSuggestion(channel, videos, avoidTitles) {
+async function fetchFallbackSuggestion(channel, videos, avoidTitles, avoidSubjects) {
   const existingPlaylists = await listChannelPlaylists(channel).catch(() => []);
   const pendingPromises = await listPendingPromises(channel.id).catch(() => []);
   const { ok, data } = await postJSON('/api/program-manager', {
     channelName: channel.name,
     niche: channel.niche || '',
     editorialNotes: channel.editorialNotes || '',
-    existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '' })),
+    existingVideos: (videos || []).map((v) => ({ title: v.displayTitle || '', topic: v.topic || '', subject: v.subject || '' })),
     creativeOverride: channel.prompt_overrides?.programManager || null,
     activeDirective: channel.automation_directive || '',
     existingPlaylists,
     pendingPromises,
     count: 1,
     avoidTitles,
+    avoidSubjects: avoidSubjects || [],
   });
   if (!ok) throw new Error(data.error || 'Failed to fetch a fallback suggestion');
   const s = (data.suggestions || [])[0];
@@ -256,7 +270,8 @@ async function removeAndBackfill(channel, suggestion, videos) {
   } else {
     try {
       const avoidTitles = [...new Set([...combineAvoidTitles(channel, videos), ...usedTitles, ...finalSuggestions.map((s) => s.title)])];
-      const fallback = await fetchFallbackSuggestion(channel, videos, avoidTitles);
+      const avoidSubjects = [...new Set([...nonTerminalVideoSubjects(videos), ...finalSuggestions.map((s) => (s.subject || '').trim()).filter(Boolean)])];
+      const fallback = await fetchFallbackSuggestion(channel, videos, avoidTitles, avoidSubjects);
       if (fallback) {
         finalSuggestions = [...finalSuggestions, fallback];
         usedTitles = [...usedTitles, fallback.title];

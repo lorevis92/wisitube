@@ -46,7 +46,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Outline generation failed');
-      onOutlineReady(data, option.title, option.angle);
+      onOutlineReady(data, option.title, option.angle, option.subject || '');
     } catch (e) {
       setError(String(e.message || e));
       setLoading(false);

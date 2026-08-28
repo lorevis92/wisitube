@@ -25,11 +25,24 @@ export const config = { maxDuration: 120 };
 
 // The "channel voice" half of the titles system prompt — safe to override per-channel (nothing
 // here constrains the output format, so swapping it can't break downstream parsing).
-const TITLES_DEFAULT_CREATIVE_DIRECTION = `You are a YouTube strategist for successful faceless animated channels. Given a topic, propose 5 distinct, highly clickable video titles — curiosity-driven but not misleading, max 70 chars each. Each title implies a specific narrative angle (what the video will actually focus on), and the 5 angles must be genuinely different from each other — not just reworded versions of the same idea. For each title, write "angle": one short phrase naming that specific narrative cut (e.g. for the title "Why Napoleon Lost in Russia" the angle is "focus on the strategic blunder"; for the title "The Winter That Destroyed an Empire" the angle is "focus on human suffering").`;
+const TITLES_DEFAULT_CREATIVE_DIRECTION = `You are a YouTube strategist for successful faceless animated channels. Given a topic, propose 5 distinct, highly clickable video titles — max 70 chars each.
+
+Every title MUST do BOTH of these at once, never only one:
+1. Name the real subject explicitly, by its proper name — the specific person, place, law, event, organisation, or named phenomenon the video is actually about. If a viewer couldn't say what the video is about before clicking, the title is too vague no matter how intriguing it sounds.
+2. Carry a real curiosity hook — a surprising claim, a tension, or a question that makes the specific outcome feel worth watching. A flat encyclopedic label is not a title.
+
+WRONG (vague — no identifiable subject): "The Scientist Whose Invention Fed Billions and Killed Millions"
+RIGHT (proper name + hook): "Fritz Haber: The Chemist Who Fed the World, Then Gassed It"
+
+WRONG (vague): "The Tiny Nation That Got Impossibly Rich"
+RIGHT: "How Singapore Went From Swamp to the Richest City on Earth"
+
+Each title implies a specific narrative angle (what the video will actually focus on), and the 5 angles must be genuinely different from each other — not reworded versions of the same idea. For each title, write "angle": one short phrase naming that specific narrative cut (e.g. for the title "Why Napoleon Lost in Russia" the angle is "focus on the strategic blunder"; for "The Winter That Destroyed an Empire" the angle is "focus on human suffering").`;
 
 // The output-format half — NEVER influenced by creativeOverride: the client's JSON parsing depends
-// on this exact shape regardless of what creative direction is in play.
-const TITLES_SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "titles": [5 objects: { "title": string, "angle": string }] }.`;
+// on this exact shape regardless of what creative direction is in play. "subject" is a
+// comparison-only field (anti-repetition — see src/lib/contentProgramManager.js), never displayed.
+const TITLES_SCHEMA_INSTRUCTIONS = `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "titles": [5 objects: { "title": string, "angle": string, "subject": string }] }. "subject" is the bare proper name of what the video is about — just the name, no framing words, no verbs, no leading article (e.g. "Fritz Haber", "Singapore", "ammonium nitrate", "the Antikythera mechanism"). It exists only to detect two videos covering the same thing and is never shown to anyone.`;
 
 async function generateTitles(req, res, apiKey) {
   try {
@@ -111,6 +124,21 @@ async function generateTitles(req, res, apiKey) {
 
     if (!Array.isArray(plan.titles) || plan.titles.length === 0) {
       console.error('[generate-titles] phase=validate-plan missing/empty titles, plan=', JSON.stringify(plan).slice(0, 300));
+      return res.status(502).json({ error: 'AI response missing titles' });
+    }
+
+    // Normalize each title object — subject is optional from the model's side (if it's omitted the
+    // anti-repetition check just falls back to title comparison for that video), but always
+    // present and trimmed in the response so the client never has to guard against undefined.
+    plan.titles = plan.titles
+      .map((t) => ({
+        title: typeof t?.title === 'string' ? t.title.trim() : '',
+        angle: typeof t?.angle === 'string' ? t.angle.trim() : '',
+        subject: typeof t?.subject === 'string' ? t.subject.trim() : '',
+      }))
+      .filter((t) => t.title);
+    if (!plan.titles.length) {
+      console.error('[generate-titles] phase=validate-plan no usable titles after normalize');
       return res.status(502).json({ error: 'AI response missing titles' });
     }
 

@@ -295,7 +295,14 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // ---- Phase: video record ----
   videoId = createId();
   // createdByAutomation marks this as a record an automatic cycle may resume later (findResumableVideo).
-  project = { titles: [suggestion.title], selectedTitle: 0, series: suggestion.series || null, createdByAutomation: true };
+  // subject: the Content Program Manager's bare proper-name — comparison-only, feeds anti-repetition.
+  project = {
+    titles: [suggestion.title],
+    selectedTitle: 0,
+    series: suggestion.series || null,
+    createdByAutomation: true,
+    subject: suggestion.subject || null,
+  };
 
   try {
     await withPhaseNetworkResilience('video-record', channelId, videoId, logStep, persist);
@@ -380,8 +387,9 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         series: suggestion.series || null,
         staticBackground,
         staticTextStyle,
-        // Re-set here because this phase replaces project wholesale (see findResumableVideo).
+        // Re-set here because this phase replaces project wholesale.
         createdByAutomation: true,
+        subject: suggestion.subject || null, // comparison-only — see the video-record phase
         // Persisted (not just kept on the in-memory `plan`) specifically so a resumed session can
         // reconstruct what the scenes phase needs to continue from — see determineResumePhase and
         // the resume-aware scenes phase below, which read these back via plan.outline/totalScenes.
