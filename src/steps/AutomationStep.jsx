@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
-import { listChannels, saveChannel, listAutomationLog, getSchedulerSettings, saveSchedulerSettings } from '../lib/db';
+import { listChannels, updateChannelFields, listAutomationLog, getSchedulerSettings, saveSchedulerSettings } from '../lib/db';
 import { runAutomationCycle } from '../lib/automationEngine';
 import { runManagedCycle, requestStop, applyProgressToRun, forceUnlock } from '../lib/automationScheduler';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
@@ -89,6 +89,19 @@ function timeUntil(ts) {
 // timer, same small-stable-constant duplication already used elsewhere in this codebase (e.g.
 // YOUTUBE_LANGUAGE_CODES in ExportStep.jsx/fullPipelineRecipe.js).
 const UNIT_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
+
+// The columns this form's typed number/text fields own (edited locally, saved on blur via
+// persistChannel). Everything else here saves immediately via updateAndSaveImmediately with its own
+// one-key patch. Neither ever writes the daily counters or topic_scoring_cache — those belong to
+// the automation cycle (see db.js's bumpChannelDailyUsage / updateChannelFields).
+const BLUR_SAVED_COLUMNS = [
+  'automation_videos_per_day',
+  'automation_daily_budget_usd',
+  'automation_length_minutes',
+  'automation_length_cap_min',
+  'automation_length_cap_max',
+  'automation_directive',
+];
 
 function statusColor(status) {
   if (status === 'error') return T.primary;
@@ -268,14 +281,19 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   }
 
   // Reads the freshest local state (already merged by updateLocalField on every keystroke/change)
-  // rather than taking the patch directly, so a run of several field edits between saves — or a
-  // save triggered by a sibling field's onChange — never overwrites one field with another's stale copy.
+  // for exactly the blur-saved columns, and writes ONLY those via a targeted update — so a run of
+  // several field edits between saves never overwrites one field with another's stale copy, and a
+  // save never reverts a column another code path owns.
   async function persistChannel(channelId) {
     const channel = (channels || []).find((c) => c.id === channelId);
     if (!channel) return;
+    const patch = Object.fromEntries(
+      BLUR_SAVED_COLUMNS.map((k) => [k, channel[k]]).filter(([, v]) => v !== undefined)
+    );
+    if (!Object.keys(patch).length) return;
     try {
-      const updated = await saveChannel(channel);
-      setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c)));
+      const updated = await updateChannelFields(channelId, patch);
+      if (updated) setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c)));
     } catch (err) {
       console.error('[AutomationStep] failed to save channel automation settings', channelId, err);
     }
@@ -283,10 +301,11 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
   function updateAndSaveImmediately(channelId, patch) {
     updateLocalField(channelId, patch);
-    const channel = (channels || []).find((c) => c.id === channelId);
-    if (!channel) return;
-    saveChannel({ ...channel, ...patch })
-      .then((updated) => setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c))))
+    // `patch` keys are already DB column names — write just those, never the whole row.
+    updateChannelFields(channelId, patch)
+      .then((updated) => {
+        if (updated) setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c)));
+      })
       .catch((err) => console.error('[AutomationStep] failed to save channel automation settings', channelId, err));
   }
 

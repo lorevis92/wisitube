@@ -553,10 +553,10 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
 // redirect's query string and lands here on the client). ----
 
 export async function saveYoutubeConnection(channelId, data) {
-  const channel = await loadChannel(channelId);
-  if (!channel) return null;
-  return saveChannel({
-    ...channel,
+  // Targeted update of only the four YouTube columns — never a full-row rewrite (which would revert
+  // whatever the automation cycle changed on this row in the meantime: daily counters,
+  // topic_scoring_cache). Returns null if the channel no longer exists.
+  return updateChannelFields(channelId, {
     youtube_connected: true,
     youtube_channel_name: data.channelName || '',
     youtube_channel_id: data.youtubeChannelId || '',
@@ -565,10 +565,7 @@ export async function saveYoutubeConnection(channelId, data) {
 }
 
 export async function clearYoutubeConnection(channelId) {
-  const channel = await loadChannel(channelId);
-  if (!channel) return null;
-  return saveChannel({
-    ...channel,
+  return updateChannelFields(channelId, {
     youtube_connected: false,
     youtube_channel_name: '',
     youtube_channel_id: '',

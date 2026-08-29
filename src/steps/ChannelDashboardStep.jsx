@@ -7,7 +7,7 @@ import {
   loadVideo,
   loadChannel,
   listChannels,
-  saveChannel,
+  updateChannelFields,
   deleteChannel,
   clearYoutubeConnection,
   getCostsByChannel,
@@ -114,8 +114,8 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [showProgramManagerChat, setShowProgramManagerChat] = useState(false);
   // Local in-progress edits per stage, keyed by stage — undefined means "not yet touched this
   // session, fall back to channel.prompt_overrides[stage] or the stage's default text". Kept
-  // separate from channel state so typing doesn't need a round-trip through saveChannel on every
-  // keystroke; onBlur is what persists.
+  // separate from channel state so typing doesn't need a persist round-trip on every keystroke;
+  // onBlur (savePromptOverride) is what persists.
   const [promptDrafts, setPromptDrafts] = useState({});
   // Which stage's version-history dropdown is open (null = none), plus that dropdown's own loading
   // state and fetched items — refetched every time it's opened rather than cached, so a restore
@@ -225,7 +225,8 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       return;
     }
     if (trimmed === (channel.name || '')) return;
-    const updated = await saveChannel({ ...channel, name: trimmed });
+    const updated = await updateChannelFields(channel.id, { name: trimmed });
+    if (!updated) return;
     setChannel(updated);
     setName(updated.name || '');
     onChannelChange?.(updated);
@@ -233,28 +234,32 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
   async function saveNiche() {
     if (!channel || niche === (channel.niche || '')) return;
-    const updated = await saveChannel({ ...channel, niche });
+    const updated = await updateChannelFields(channel.id, { niche });
+    if (!updated) return;
     setChannel(updated);
     onChannelChange?.(updated);
   }
 
   async function saveNotes() {
     if (!channel || notes === (channel.editorialNotes || '')) return;
-    const updated = await saveChannel({ ...channel, editorialNotes: notes });
+    const updated = await updateChannelFields(channel.id, { editorial_notes: notes });
+    if (!updated) return;
     setChannel(updated);
     onChannelChange?.(updated);
   }
 
   async function saveContentType(value) {
     if (!channel) return;
-    const updated = await saveChannel({ ...channel, content_type: value });
+    const updated = await updateChannelFields(channel.id, { content_type: value });
+    if (!updated) return;
     setChannel(updated);
     onChannelChange?.(updated);
   }
 
   async function saveChannelIntro(value) {
     if (!channel) return;
-    const updated = await saveChannel({ ...channel, automation_channel_intro: value });
+    const updated = await updateChannelFields(channel.id, { automation_channel_intro: value });
+    if (!updated) return;
     setChannel(updated);
     onChannelChange?.(updated);
   }
@@ -274,31 +279,26 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     if (effectiveNext) nextOverrides[stage] = effectiveNext;
     else delete nextOverrides[stage];
     const [updated] = await Promise.all([
-      saveChannel({ ...channel, prompt_overrides: nextOverrides }),
+      updateChannelFields(channel.id, { prompt_overrides: nextOverrides }),
       // Only real custom content is worth a version entry — reverting to the default (or clearing)
       // isn't a "version" of anything, and savePromptVersion no-ops on an empty string anyway.
       effectiveNext ? savePromptVersion(channel.id, stage, effectiveNext) : Promise.resolve(null),
     ]);
+    if (!updated) return;
     setChannel(updated);
     onChannelChange?.(updated);
   }
 
-  // Persists the Content Program Manager chat (ProgramManagerChat.jsx) — a functional setChannel
-  // update rather than spreading the `channel` closed over by this callback, same reasoning as
-  // startSuggestion/dismissSuggestion below: ProgramManagerChat.jsx's own onApplyUpdate call
-  // (savePromptOverride) can land a prompt_overrides change moments before this fires, and reading
-  // the LATEST state here (not a possibly-stale `channel` prop snapshot) is what keeps that change
-  // from being silently clobbered by this save. history is null to clear the chat ("New
-  // conversation"), or the array of { role, content } turns to persist otherwise.
+  // Persists the Content Program Manager chat (ProgramManagerChat.jsx). Targeted update of only the
+  // program_manager_chat column, so it can't clobber a prompt_overrides change ProgramManagerChat's
+  // own onApplyUpdate (savePromptOverride) may have landed moments before, nor anything the
+  // automation cycle touched. history is null to clear the chat ("New conversation"), or the array
+  // of { role, content } turns to persist otherwise.
   async function saveProgramManagerChat(history) {
-    let latestChannel;
-    setChannel((prev) => {
-      if (!prev) return prev;
-      latestChannel = { ...prev, program_manager_chat: history };
-      return latestChannel;
-    });
-    if (!latestChannel) return;
-    const updated = await saveChannel(latestChannel);
+    if (!channelId) return;
+    setChannel((prev) => (prev ? { ...prev, program_manager_chat: history } : prev)); // optimistic
+    const updated = await updateChannelFields(channelId, { program_manager_chat: history });
+    if (!updated) return;
     setChannel(updated);
     onChannelChange?.(updated);
   }
@@ -473,13 +473,14 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     onChannelChange?.(updated);
   }
 
-  // Instant-save for the simple defaults below (color pickers, outline toggle) — same
-  // read-latest-then-save pattern as saveNiche/saveNotes above, just generalized to an arbitrary
-  // patch since there are several independent fields here.
+  // Instant-save for the simple defaults below (color pickers, outline toggle, background image
+  // path). Targeted update — `patch` keys are already DB column names — so it only ever writes the
+  // one or two fields that changed, never the whole row.
   async function updateStaticDefaults(patch) {
     if (!channel) return;
     try {
-      const updated = await saveChannel({ ...channel, ...patch });
+      const updated = await updateChannelFields(channel.id, patch);
+      if (!updated) return;
       setChannel(updated);
       onChannelChange?.(updated);
     } catch (err) {

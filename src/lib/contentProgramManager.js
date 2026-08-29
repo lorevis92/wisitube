@@ -11,7 +11,7 @@
 //             its own editorial judgment with the real numbers.
 // Between full passes, "Start this video"/"Not interested" pull a replacement from the already-
 // scored batch (free — no new Trends/YouTube/Claude-research calls) rather than re-running A-C.
-import { saveChannel, listPendingPromises } from './db';
+import { updateChannelFields, listPendingPromises } from './db';
 import { listChannelPlaylists } from './youtubePublishEngine';
 import { determineResumePhase } from './videoResumption';
 
@@ -206,8 +206,14 @@ export async function getTopicSuggestions(channel, { videos = [], forceRefresh =
     usedTitles: finalSuggestions.map((s) => s.title).filter(Boolean),
     generatedAt: Date.now(),
   };
-  const updated = await saveChannel({ ...channel, topic_scoring_cache, topic_scoring_cached_at: new Date().toISOString() });
-  return { channel: updated, analysis, finalSuggestions };
+  // Targeted update of just the two cache columns — a full-row saveChannel from `channel` would
+  // revert anything the automation cycle changed on this same row while the A→B→C pipeline was
+  // running (daily counters most of all). Falls back to the in-memory `channel` if the row is gone.
+  const updated = await updateChannelFields(channel.id, {
+    topic_scoring_cache,
+    topic_scoring_cached_at: new Date().toISOString(),
+  });
+  return { channel: updated || channel, analysis, finalSuggestions };
 }
 
 // Best-scoring candidate from the cached batch that hasn't already been shown (usedTitles) or
@@ -254,8 +260,9 @@ async function fetchFallbackSuggestion(channel, videos, avoidTitles, avoidSubjec
 
 // Shared by startTopicSuggestion/dismissTopicSuggestion below: removes `suggestion` from the
 // cached finalSuggestions, tops the list back up from the scored pool (or, failing that, one cheap
-// fallback idea), and persists the result. `channel` should already reflect any caller-side change
-// (e.g. dismissTopicSuggestion appending to dismissed_suggestions) before this runs.
+// fallback idea), and persists the result — a targeted update of ONLY topic_scoring_cache, so it
+// never reverts a concurrent change to any other column. dismissTopicSuggestion persists its
+// dismissed_suggestions change on its own, before calling here, for the same reason.
 async function removeAndBackfill(channel, suggestion, videos) {
   const cache = channel.topic_scoring_cache;
   if (!cache) return channel; // nothing cached yet — shouldn't normally happen; no-op rather than throw
@@ -283,7 +290,7 @@ async function removeAndBackfill(channel, suggestion, videos) {
   }
 
   const updatedCache = { ...cache, finalSuggestions, usedTitles };
-  return saveChannel({ ...channel, topic_scoring_cache: updatedCache });
+  return (await updateChannelFields(channel.id, { topic_scoring_cache: updatedCache })) || channel;
 }
 
 // "Start this video" — dashboard (ChannelDashboardStep.jsx) and automation (fullPipelineRecipe.js/
@@ -298,5 +305,8 @@ export async function startTopicSuggestion(channel, suggestion, videos) {
 // at the most recent 50 by whoever appends to it — same convention as before this refactor).
 export async function dismissTopicSuggestion(channel, suggestion, videos) {
   const dismissed_suggestions = [...(channel.dismissed_suggestions || []), suggestion.title].filter(Boolean).slice(-50);
-  return removeAndBackfill({ ...channel, dismissed_suggestions }, suggestion, videos);
+  // Persist the dismissal on its own, targeted, so removeAndBackfill's own targeted cache write
+  // below doesn't have to carry it (and can't clobber a concurrent dismissed_suggestions change).
+  const updated = await updateChannelFields(channel.id, { dismissed_suggestions });
+  return removeAndBackfill(updated || { ...channel, dismissed_suggestions }, suggestion, videos);
 }
