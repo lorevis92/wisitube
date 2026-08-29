@@ -342,6 +342,44 @@ export async function loadChannel(id) {
   return data ? fromChannelRow(data) : null;
 }
 
+// Partial update of a channel row — writes ONLY the columns in `patch` (plus updated_at), leaving
+// every other column untouched. Unlike saveChannel, which upserts the WHOLE row rebuilt from the
+// object it's handed, this can't silently revert a change another code path made to a column the
+// caller isn't touching — most importantly the automation cycle's mid-run edits to
+// topic_scoring_cache and the daily-usage counters (see bumpChannelDailyUsage). `patch` keys are
+// raw DB column names (snake_case). Returns the updated channel record, or null if no such channel.
+export async function updateChannelFields(channelId, patch) {
+  const data = unwrap(
+    await supabase
+      .from('wisitube_channels')
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq('id', channelId)
+      .select()
+      .maybeSingle()
+  );
+  return data ? fromChannelRow(data) : null;
+}
+
+// Adds the given deltas to a channel's daily automation counters, computed from the row as it is
+// RIGHT NOW in the database (a fresh read, not a possibly-stale in-memory copy) and written back
+// with a targeted updateChannelFields — so a concurrent change to any other column is never
+// clobbered, and the increment stays correct even if the caller's snapshot of the counters was
+// stale. Returns the updated channel record, or null if the channel no longer exists.
+export async function bumpChannelDailyUsage(channelId, { uploadCountDelta = 0, spendDeltaUsd = 0 } = {}) {
+  const current = unwrap(
+    await supabase
+      .from('wisitube_channels')
+      .select('automation_daily_upload_count, automation_daily_spend_usd')
+      .eq('id', channelId)
+      .maybeSingle()
+  );
+  if (!current) return null;
+  return updateChannelFields(channelId, {
+    automation_daily_upload_count: (Number(current.automation_daily_upload_count) || 0) + uploadCountDelta,
+    automation_daily_spend_usd: (Number(current.automation_daily_spend_usd) || 0) + spendDeltaUsd,
+  });
+}
+
 export async function listChannels() {
   const data = unwrap(await supabase.from('wisitube_channels').select('*').order('updated_at', { ascending: false }));
   return (data || []).map(fromChannelRow);

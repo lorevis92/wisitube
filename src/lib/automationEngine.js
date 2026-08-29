@@ -3,7 +3,7 @@
 // to the real titles → outline → scenes → media → render → thumbnail → YouTube pipeline
 // (src/lib/recipes/fullPipelineRecipe.js) — real generation, real spend, real publishing, but
 // still only ever started manually from AutomationStep.jsx (no auto-start; that's Phase 2b).
-import { saveChannel, listChannels, logAutomationStep } from './db';
+import { listChannels, logAutomationStep, updateChannelFields, bumpChannelDailyUsage } from './db';
 import { priceForImage } from './imageProviders';
 import { priceForVoice } from './voiceProviders';
 import { runFullPipeline } from './recipes/fullPipelineRecipe';
@@ -71,12 +71,15 @@ function todayDateString() {
 export async function resetDailyCountersIfNeeded(channel) {
   const today = todayDateString();
   if (channel.automation_last_reset_date && channel.automation_last_reset_date >= today) return channel;
-  return saveChannel({
-    ...channel,
+  // Targeted update, NOT a full-row saveChannel: the day's reset must only touch these three
+  // columns, never revert whatever else changed on the row since this `channel` snapshot was taken
+  // (a dashboard edit, or the recipe's own topic_scoring_cache write later in the cycle).
+  const updated = await updateChannelFields(channel.id, {
     automation_daily_upload_count: 0,
     automation_daily_spend_usd: 0,
     automation_last_reset_date: today,
   });
+  return updated || channel;
 }
 
 // { ok: boolean, reason: string | null } rather than a bare boolean — every false case needs a
@@ -255,7 +258,7 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
         // Exhaust this channel's daily quota before moving on to the next channel: keep generating
         // videos on it until canRunChannelToday says no (upload cap reached or budget exhausted) or
         // the caller asks to stop — not just one video then straight to the next channel. `channel`
-        // is reassigned to saveChannel's own return after every video, since
+        // is reassigned to bumpChannelDailyUsage's own return after every video, since
         // automation_daily_upload_count/automation_daily_spend_usd were just updated and the next
         // canRunChannelToday/budget check needs to see that, not the stale pre-run values.
         let videosCompleted = 0;
@@ -295,11 +298,13 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
             // video was actually produced yet. Stops the exhaustion loop for this channel this
             // cycle rather than starting ANOTHER new video on top of the one still in flight —
             // it'll be picked up (resumed) automatically on a later cycle.
+            //
+            // bumpChannelDailyUsage (fresh read + targeted write) rather than a full-row saveChannel
+            // from `channel` — the recipe just edited this same row's topic_scoring_cache (removing
+            // the suggestion it started), and a stale-snapshot upsert here would revert that.
             // eslint-disable-next-line no-await-in-loop
-            channel = await saveChannel({
-              ...channel,
-              automation_daily_spend_usd: (Number(channel.automation_daily_spend_usd) || 0) + (result.costUsd || 0),
-            });
+            const bumped = await bumpChannelDailyUsage(channel.id, { spendDeltaUsd: result.costUsd || 0 });
+            if (bumped) channel = bumped;
             videoInProgress = true;
             // eslint-disable-next-line no-await-in-loop
             await logStep(channel.id, result.videoId, 'cycle', 'pending', 'video still in progress (Gemini Batch jobs running) — will resume next cycle');
@@ -308,12 +313,18 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
 
           // A failed run never reaches here (the recipe throws, caught below) — so the upload
           // count only ever increments for a video that actually finished and published.
+          //
+          // bumpChannelDailyUsage: fresh read + targeted write of just the two counters, so this
+          // never reverts the recipe's mid-cycle topic_scoring_cache edit (or a dashboard change
+          // made while this video was generating). The returned `channel` carries the fresh cache,
+          // so the next exhaustion-loop iteration's getTopicSuggestions sees the already-used
+          // suggestion removed and picks a different topic — no duplicate-topic video in one cycle.
           // eslint-disable-next-line no-await-in-loop
-          channel = await saveChannel({
-            ...channel,
-            automation_daily_upload_count: (Number(channel.automation_daily_upload_count) || 0) + 1,
-            automation_daily_spend_usd: (Number(channel.automation_daily_spend_usd) || 0) + (result.costUsd || 0),
+          const bumped = await bumpChannelDailyUsage(channel.id, {
+            uploadCountDelta: 1,
+            spendDeltaUsd: result.costUsd || 0,
           });
+          if (bumped) channel = bumped;
           videosCompleted++;
 
           if (shouldStop()) break;
