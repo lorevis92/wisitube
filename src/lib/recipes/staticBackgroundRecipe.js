@@ -53,8 +53,6 @@ async function findResumableVideo(channelId) {
   );
 }
 
-let sceneIdCounter = 1;
-
 const NETWORK_WAIT_POLL_MS = 30000;
 const NETWORK_WAIT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -96,9 +94,15 @@ async function withPhaseNetworkResilience(phaseName, channelId, videoId, logStep
 // Same transform App.jsx's buildScenesFromRaw performs, but always in "no image_beats" mode — this
 // recipe only ever runs for content_type 'static_background' (see automationEngine.js's
 // getRecipeForContentType), so there's no fixed-vs-static-background branch to carry here at all.
-function buildScenesFromRaw(rawScenes) {
-  return (rawScenes || []).map((s) => ({
-    id: sceneIdCounter++,
+//
+// sceneIdBase: the first id to hand out, assigned deterministically (base + position) rather than
+// from a mutating module counter — see fullPipelineRecipe.js's copy for the full reasoning (a
+// module counter resets on page reload, so a resume of a partly-generated video would restart at 1
+// and collide with already-persisted scene ids). The scenes phase computes this from the max id
+// already on the video.
+function buildScenesFromRaw(rawScenes, sceneIdBase = 1) {
+  return (rawScenes || []).map((s, i) => ({
+    id: sceneIdBase + i,
     narration: s.narration || '',
     pad: 0.3,
     audioStatus: 'idle',
@@ -434,11 +438,16 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         ? { alreadyGeneratedCount: existingScenes.length, previousTail: existingScenes[existingScenes.length - 1]?.narration || null }
         : null;
 
+      // Start new scene ids strictly above every id already on this video (0 for a brand-new one →
+      // base 1), so a resume — possibly in a later browser session — never reuses an id from a
+      // partially-generated earlier run. See buildScenesFromRaw's own note.
+      const sceneIdBase = existingScenes.reduce((m, s) => Math.max(m, Number(s?.id) || 0), 0) + 1;
+
       const { scenes: newRawScenes, promisedFollowUp } = await generateAllScenes(
         plan.outline,
         context,
         (soFarNew, total) => {
-          const combined = [...existingScenes, ...buildScenesFromRaw(soFarNew)];
+          const combined = [...existingScenes, ...buildScenesFromRaw(soFarNew, sceneIdBase)];
           report('scenes', `${combined.length}/${total} scenes written`);
           project = { ...project, scenes: combined };
           persist().catch((err) => console.error('[staticBackgroundRecipe] partial scene save failed', err));
@@ -448,7 +457,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
 
       project = {
         ...project,
-        scenes: [...existingScenes, ...buildScenesFromRaw(newRawScenes)],
+        scenes: [...existingScenes, ...buildScenesFromRaw(newRawScenes, sceneIdBase)],
         promisedFollowUp: promisedFollowUp || project.promisedFollowUp || null,
       };
       await persist();

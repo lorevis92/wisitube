@@ -70,9 +70,6 @@ async function totalCostForVideo(channelId, videoId) {
   return costItems.filter((c) => c.videoId === videoId).reduce((sum, c) => sum + (c.amountUsd || 0), 0);
 }
 
-let sceneIdCounter = 1;
-let beatIdCounter = 1;
-
 const NETWORK_WAIT_POLL_MS = 30000;
 const NETWORK_WAIT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -128,18 +125,25 @@ async function withPhaseNetworkResilience(phaseName, channelId, videoId, logStep
 
 // Same transform App.jsx's buildScenesFromRaw performs on api/generate-scenes.js's raw output —
 // duplicated here rather than imported (App.jsx is a React component, not a shared module; this is
-// a pure data transform with no framework dependency). Its own counters are separate from App.jsx's
-// — fine, since scene/beat ids only ever need to be unique within the one project they belong to,
-// never compared across videos or across this file vs. App.jsx's copy.
-function buildScenesFromRaw(rawScenes) {
-  return (rawScenes || []).map((s) => {
+// a pure data transform with no framework dependency).
+//
+// sceneIdBase / beatIdBase: the first id to hand out. Ids are assigned deterministically
+// (base + position), NOT from a mutating module-level counter — a module counter resets to 1 on
+// every page reload, so resuming a video whose scenes were partly generated in an earlier session
+// would restart at 1 and collide with the ids already persisted. The scenes phase computes these
+// bases from the max id already on the video (see there), so a resume's new scenes always get ids
+// strictly above every existing one; and because it's base+position rather than counter++, calling
+// this repeatedly with a growing prefix (the progress callback does) is idempotent for that prefix.
+// Ids only ever need to be unique within one video, so a brand-new video just gets 1..N as before.
+function buildScenesFromRaw(rawScenes, sceneIdBase = 1, beatIdBase = 1) {
+  return (rawScenes || []).map((s, sceneIdx) => {
     const beats = Array.isArray(s.image_beats) && s.image_beats.length ? s.image_beats.slice(0, 2) : [{}, {}];
     while (beats.length < 2) beats.push({});
     return {
-      id: sceneIdCounter++,
+      id: sceneIdBase + sceneIdx,
       narration: s.narration || '',
-      images: beats.map((b) => ({
-        id: beatIdCounter++,
+      images: beats.map((b, beatIdx) => ({
+        id: beatIdBase + sceneIdx * 2 + beatIdx, // exactly 2 beats per scene (enforced above)
         prompt: b.image_prompt || '',
         animation: b.animation || 'zoom_in',
         referenceId: b.reference_id || null,
@@ -566,11 +570,21 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           ? { alreadyGeneratedCount: existingScenes.length, previousTail: existingScenes[existingScenes.length - 1]?.narration || null }
           : null;
 
+        // Start new scene/beat ids strictly above every id already on this video (0 for a brand-new
+        // one → base 1), so a resume — possibly in a later browser session — can never reuse an id
+        // from a partially-generated earlier run. See buildScenesFromRaw's own note.
+        const sceneIdBase = existingScenes.reduce((m, s) => Math.max(m, Number(s?.id) || 0), 0) + 1;
+        const beatIdBase =
+          existingScenes.reduce(
+            (m, s) => (s?.images || []).reduce((mm, im) => Math.max(mm, Number(im?.id) || 0), m),
+            0
+          ) + 1;
+
         const { scenes: newRawScenes, promisedFollowUp } = await generateAllScenes(
           plan.outline,
           context,
           (soFarNew, total) => {
-            const combined = [...existingScenes, ...buildScenesFromRaw(soFarNew)];
+            const combined = [...existingScenes, ...buildScenesFromRaw(soFarNew, sceneIdBase, beatIdBase)];
             report('scenes', `${combined.length}/${total} scenes written`);
             project = { ...project, scenes: combined };
             persist().catch((err) => console.error('[fullPipelineRecipe] partial scene save failed', err));
@@ -580,7 +594,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
 
         project = {
           ...project,
-          scenes: [...existingScenes, ...buildScenesFromRaw(newRawScenes)],
+          scenes: [...existingScenes, ...buildScenesFromRaw(newRawScenes, sceneIdBase, beatIdBase)],
           promisedFollowUp: promisedFollowUp || project.promisedFollowUp || null,
         };
         await persist();
