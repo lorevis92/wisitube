@@ -3,6 +3,7 @@ import { T, FONT, card, label, btnPrimary, btnGhost, mono } from '../theme';
 import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, saveVideo, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
 import { resumePendingBatches } from '../lib/batchResumption';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
+import { runManagedResume } from '../lib/automationScheduler';
 
 // Permanent status dashboard for automation — no longer just a temporary mirror that appears while
 // a run is active. Three parts, in order:
@@ -165,10 +166,13 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
   }
 
   // "Resume now" — runs just this one video's next phase (and however many follow, in the same
-  // call — see the recipes' shouldRunPhase gating) directly, via the channel's own recipe function
-  // with targetVideoId set. Deliberately NOT routed through runManagedCycle/automationScheduler.js:
-  // this is a single-video action the owner explicitly asked for, not a cycle, and must never
-  // contend with (or be blocked by) the currently_running lock a real cycle holds.
+  // call — see the recipes' shouldRunPhase gating) via the channel's own recipe with targetVideoId
+  // set, so the recipe touches ONLY this video (never findResumableVideo, never the per-channel
+  // exhaustion loop). Routed through runManagedResume so it takes the SAME currently_running lock a
+  // scheduled cycle takes: the two are now mutually exclusive. Before this, the manual resume ran
+  // completely outside the lock, so a scheduler tick firing at the same instant would start a full
+  // runAutomationCycle that resumed other videos on the same channel (and could double-submit
+  // Gemini Batch chunks for this very one) — one click appearing to start several videos at once.
   async function resumeVideoNow(item) {
     setBusyVideoId(item.videoId);
     setBusyLabel('Resuming…');
@@ -177,7 +181,10 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
       if (!channel) throw new Error('Channel not found');
       const recipe = getRecipeForContentType(channel.content_type);
       if (!recipe) throw new Error(`No recipe available for content_type "${channel.content_type || '(none)'}"`);
-      await recipe(channel, { userId, logStep, targetVideoId: item.videoId });
+      const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
+      if (!result.started) {
+        window.alert(`Can't resume "${item.displayTitle}" right now — ${result.reason}`);
+      }
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to resume video', item.videoId, err);
       window.alert(`Could not resume "${item.displayTitle}": ${String(err.message || err)}`);

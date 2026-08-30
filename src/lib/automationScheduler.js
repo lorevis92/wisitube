@@ -106,17 +106,42 @@ let claimedLocally = false;
  * above), not an exception — nothing throws in that case, there's nothing for a finally to catch.
  */
 export async function runManagedCycle({ userId, onUpdate, onProgress }) {
-  console.warn('[run-cycle-debug] runManagedCycle() entered, claimedLocally =', claimedLocally);
+  return withSchedulerLock({ label: 'cycle', resetInterval: true }, ({ shouldStop }) =>
+    runAutomationCycle({ userId, dryRun: false, onUpdate, onProgress, shouldStop })
+  );
+}
+
+/**
+ * Runs a single-video "Resume now" (AutomationMirrorStep.jsx) under the EXACT same currently_running
+ * lock the scheduler's own cycle takes, so a manual resume and an automatic cycle can never overlap.
+ * They used to run completely independently: resumeVideoNow bypassed the lock entirely, so a
+ * scheduler tick firing at the same moment would start runAutomationCycle, whose findResumableVideo
+ * + per-channel exhaustion loop would then resume OTHER videos on the same channel (and could even
+ * double-submit Gemini Batch chunks for the very video being resumed by hand) — one click appearing
+ * to "start several videos at once". `task` here is the caller's already-scoped
+ * recipe(channel, { targetVideoId }) call — this function only adds the mutual exclusion, it never
+ * touches which video runs. resetInterval is false: a manual resume must not push the next
+ * scheduled cycle's timer out.
+ *
+ * Same return shape as runManagedCycle: { started: false, reason } if a cycle/resume is already in
+ * flight (the caller should surface `reason` and do nothing), { started: true } once `task` settles.
+ */
+export async function runManagedResume(task) {
+  return withSchedulerLock({ label: 'resume', resetInterval: false }, () => task());
+}
+
+async function withSchedulerLock({ label, resetInterval }, task) {
+  console.warn(`[run-cycle-debug] withSchedulerLock(${label}) entered, claimedLocally =`, claimedLocally);
   if (claimedLocally) {
-    console.warn('[run-cycle-debug] runManagedCycle() bailing out — claimedLocally is already true in this tab');
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) bailing out — claimedLocally is already true in this tab`);
     return { started: false, reason: 'another cycle claimed the lock in this same browser tab a moment ago — try again shortly' };
   }
 
-  console.warn('[run-cycle-debug] runManagedCycle() about to call getSchedulerSettings()');
+  console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to call getSchedulerSettings()`);
   const settings = await getSchedulerSettings();
   console.warn('[run-cycle-debug] getSchedulerSettings() returned', settings);
   if (settings.currentlyRunning) {
-    console.warn('[run-cycle-debug] runManagedCycle() bailing out — DB says currently_running is already true', {
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) bailing out — DB says currently_running is already true`, {
       currentRunStartedAt: settings.currentRunStartedAt,
       elapsedMs: settings.currentRunStartedAt ? Date.now() - settings.currentRunStartedAt : null,
     });
@@ -168,56 +193,54 @@ export async function runManagedCycle({ userId, onUpdate, onProgress }) {
     } else {
       return {
         started: false,
-        reason: `a cycle has been running for ${elapsed} (started ${startedAtText}) — ${lastLineText}`,
+        reason: `an automation ${label === 'resume' ? 'cycle or resume' : 'cycle'} has been running for ${elapsed} (started ${startedAtText}) — ${lastLineText}`,
       };
     }
   }
 
   // BUG FIX: claimedLocally = true and the initial "acquire the lock" write used to sit BEFORE this
   // try/finally. If that write itself threw (a network drop, an expired session, anything) the
-  // exception propagated straight out of runManagedCycle — claimedLocally was left stuck true for
-  // the rest of this tab's lifetime (every later call, from the scheduler's own tick or a manual
-  // "Run real cycle" click, would immediately hit the branch above and return its hardcoded "a
-  // moment ago" message forever, regardless of how much real time had actually passed — that's
-  // exactly the stale-message symptom this fix addresses), and if the write had actually landed
-  // server-side despite the client-side failure (an ambiguous "committed but response lost" case),
-  // currently_running was left stuck true in the database too, since runAutomationCycle — and the
-  // finally that releases the DB lock — was never even reached. Wrapping the acquire itself in this
-  // try/finally guarantees claimedLocally always gets released, whatever fails.
-  console.warn('[run-cycle-debug] runManagedCycle() acquiring lock — claimedLocally = true');
+  // exception propagated straight out — claimedLocally was left stuck true for the rest of this
+  // tab's lifetime (every later call, from the scheduler's own tick or a manual "Run real cycle"
+  // click, would immediately hit the branch above and return its hardcoded "a moment ago" message
+  // forever, regardless of how much real time had actually passed — that's exactly the stale-message
+  // symptom this fix addresses), and if the write had actually landed server-side despite the
+  // client-side failure (an ambiguous "committed but response lost" case), currently_running was
+  // left stuck true in the database too, since the task — and the finally that releases the DB lock
+  // — was never even reached. Wrapping the acquire itself in this try/finally guarantees
+  // claimedLocally always gets released, whatever fails.
+  console.warn(`[run-cycle-debug] withSchedulerLock(${label}) acquiring lock — claimedLocally = true`);
   claimedLocally = true;
   try {
     stopRequested = false;
     const startedAt = Date.now();
-    console.warn('[run-cycle-debug] runManagedCycle() about to write currently_running=true to DB');
-    await saveSchedulerSettings({ currentlyRunning: true, currentRunStartedAt: startedAt, lastRunStartedAt: startedAt });
-    console.warn('[run-cycle-debug] runManagedCycle() wrote currently_running=true, about to call runAutomationCycle()');
+    // lastRunStartedAt drives the scheduler's interval timer — only a real cycle bumps it; a manual
+    // single-video resume must not push the next scheduled cycle out.
+    const lockPatch = { currentlyRunning: true, currentRunStartedAt: startedAt };
+    if (resetInterval) lockPatch.lastRunStartedAt = startedAt;
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to write currently_running=true to DB`);
+    await saveSchedulerSettings(lockPatch);
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) wrote currently_running=true, about to run task()`);
     try {
-      await runAutomationCycle({
-        userId,
-        dryRun: false,
-        onUpdate,
-        onProgress,
-        shouldStop: () => stopRequested,
-      });
-      console.warn('[run-cycle-debug] runManagedCycle() runAutomationCycle() resolved normally');
+      await task({ shouldStop: () => stopRequested });
+      console.warn(`[run-cycle-debug] withSchedulerLock(${label}) task() resolved normally`);
       return { started: true };
     } finally {
-      // Runs whether runAutomationCycle resolved normally (success, a per-channel error already
-      // caught internally, or a video left inProgress:true awaiting Gemini Batch — none of these are
+      // Runs whether the task resolved normally (success, a per-channel error already caught
+      // internally, or a video left inProgress:true awaiting Gemini Batch — none of these are
       // exceptions, they're all just different normal return paths) or, in the unlikely case
       // something above it truly threw, on that exception too — inProgress:true never bypasses this.
       try {
-        console.warn('[run-cycle-debug] runManagedCycle() finally — releasing DB lock (currently_running=false)');
+        console.warn(`[run-cycle-debug] withSchedulerLock(${label}) finally — releasing DB lock (currently_running=false)`);
         await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
-        console.warn('[run-cycle-debug] runManagedCycle() DB lock released');
+        console.warn(`[run-cycle-debug] withSchedulerLock(${label}) DB lock released`);
       } catch (err) {
-        console.warn('[run-cycle-debug] runManagedCycle() FAILED to release DB lock — see error below', err);
+        console.warn(`[run-cycle-debug] withSchedulerLock(${label}) FAILED to release DB lock — see error below`, err);
         console.error('[automationScheduler] failed to release currently_running lock', err);
       }
     }
   } finally {
-    console.warn('[run-cycle-debug] runManagedCycle() outer finally — claimedLocally = false');
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) outer finally — claimedLocally = false`);
     claimedLocally = false;
   }
 }
