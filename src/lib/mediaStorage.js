@@ -55,3 +55,46 @@ export async function downloadMediaAsBlob(path) {
   if (error) throw error;
   return data;
 }
+
+// The per-video `kind` sub-folders that hold the heavy, post-publish-useless media — everything
+// except 'thumbnail' (kept for the dashboard preview). See src/lib/mediaArchival.js.
+export const ARCHIVABLE_MEDIA_KINDS = ['scene-image', 'scene-audio', 'rendered-video', 'static-background', 'reference'];
+
+// Every file (with byte size) under ${userId}/${videoId}/${kind} for each of the given kinds.
+// Supabase Storage list() isn't recursive and defaults to 100 rows — all of our kinds store files
+// directly in the kind folder (no deeper nesting), so a single paginated list() per kind covers it.
+// A folder that doesn't exist just lists as empty, so a video that never had e.g. a static
+// background contributes nothing rather than erroring.
+export async function listVideoMediaFiles(userId, videoId, kinds = ARCHIVABLE_MEDIA_KINDS) {
+  const files = [];
+  for (const kind of kinds) {
+    const folder = `${userId}/${videoId}/${kind}`;
+    let offset = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      // eslint-disable-next-line no-await-in-loop
+      const { data, error } = await supabase.storage.from(BUCKET).list(folder, { limit: 100, offset });
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+      for (const f of data) {
+        if (!f.name || f.id === null) continue; // skip nested "folders" (id null) — none expected, but be safe
+        files.push({ path: `${folder}/${f.name}`, size: Number(f.metadata?.size) || 0 });
+      }
+      if (data.length < 100) break;
+      offset += data.length;
+    }
+  }
+  return files;
+}
+
+// Permanently deletes the given storage paths, in batches (Supabase remove() takes an array but is
+// happiest well under a few hundred at a time). No-op for an empty list.
+export async function removeMediaFiles(paths) {
+  const list = (paths || []).filter(Boolean);
+  for (let i = 0; i < list.length; i += 100) {
+    const batch = list.slice(i, i + 100);
+    // eslint-disable-next-line no-await-in-loop
+    const { error } = await supabase.storage.from(BUCKET).remove(batch);
+    if (error) throw error;
+  }
+}

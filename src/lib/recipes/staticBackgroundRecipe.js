@@ -612,7 +612,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
 
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 
-      project = { ...project, youtubeVideoId };
+      // youtubePublishedAt drives the storage cleanup window (src/lib/mediaArchival.js).
+      project = { ...project, youtubeVideoId, youtubePublishedAt: project.youtubePublishedAt || Date.now() };
       await persist();
 
       const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;

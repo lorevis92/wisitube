@@ -12,7 +12,7 @@ import AutomationStep from './steps/AutomationStep';
 import AutomationMirrorStep, { INCOMPLETE_POLL_MS } from './steps/AutomationMirrorStep';
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
-import { T, FONT, mono, card, btnGhost } from './theme';
+import { T, FONT, mono, card, btnGhost, btnPrimary } from './theme';
 import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
@@ -143,6 +143,10 @@ export default function App() {
   const [project, setProject] = useState(null);
   const [projectId, setProjectId] = useState(null);
   const [createdAt, setCreatedAt] = useState(null);
+  // Set when the user tries to open a video whose heavy media was archived after publish (see
+  // src/lib/mediaArchival.js) — App shows a "watch it on YouTube" notice instead of feeding an
+  // empty scenes array into Storyboard/Editor. { title, youtubeVideoId }.
+  const [archivedVideoNotice, setArchivedVideoNotice] = useState(null);
   // The channel the OPEN video actually belongs to — distinct from currentChannelId (which just
   // means "which channel dashboard is on screen right now"). Set exactly once, at the moment a
   // video is created (handleOutlineReady) or resumed (handleResume), and never touched by mere
@@ -553,6 +557,19 @@ export default function App() {
     setTitleOptions(null);
     setPendingPlan(null);
     setGenerationError('');
+
+    // Media archived after publish (src/lib/mediaArchival.js) — project.scenes and every scene
+    // image/audio blob are gone. There's nothing to edit; show where to actually watch it instead
+    // of opening a broken editor.
+    if (record.mediaArchived) {
+      setResuming(false);
+      setArchivedVideoNotice({
+        title: record.displayTitle || record.topic || 'This video',
+        youtubeVideoId: record.youtubeVideoId || null,
+      });
+      return;
+    }
+
     setResuming(true);
 
     // Rebuilds usable blob: URLs for every ready image/audio/reference from their Supabase Storage
@@ -586,6 +603,7 @@ export default function App() {
       // from ExportStep) — carried through resume so ExportStep can tell it's already live and
       // refuse to offer a full re-upload (see its project.youtubeVideoId branch).
       youtubeVideoId: record.youtubeVideoId || null,
+      youtubePublishedAt: record.youtubePublishedAt || null,
       pendingImageBatches: record.pendingImageBatches || [],
       batchRecoveryCycles: record.batchRecoveryCycles || 0,
       // Same reason as staticBackground/staticTextStyle above: without these, resuming this video
@@ -770,6 +788,48 @@ export default function App() {
         idleVideoCount={idleVideoCount}
         onReturnToAutomation={() => setTab('automation-mirror')}
       />
+
+      {archivedVideoNotice && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 20,
+          }}
+          onClick={() => setArchivedVideoNotice(null)}
+        >
+          <div style={{ ...card, maxWidth: 440, padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontFamily: FONT.ui, fontSize: 16, fontWeight: 700, color: T.text }}>
+              “{archivedVideoNotice.title}” è stato archiviato
+            </div>
+            <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, lineHeight: 1.5 }}>
+              Questo video è stato pubblicato e le sue immagini, audio e il file MP4 sono stati rimossi dallo
+              Storage per liberare spazio. Non può più essere aperto in Storyboard o Editor — vai su YouTube per
+              vederlo.
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {archivedVideoNotice.youtubeVideoId && (
+                <a
+                  href={`https://youtube.com/watch?v=${archivedVideoNotice.youtubeVideoId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ ...btnPrimary, textDecoration: 'none', display: 'inline-block' }}
+                >
+                  ▶ Apri su YouTube
+                </a>
+              )}
+              <button onClick={() => setArchivedVideoNotice(null)} style={btnGhost}>
+                Chiudi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main style={{ flex: 1, width: '100%', maxWidth: 1200, margin: '0 auto', padding: isMobile ? '20px 14px' : '32px 20px' }}>
         {currentChannelId && (

@@ -625,7 +625,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     setYtEditBusy(v.id);
     setYtEditError('');
     try {
-      await saveVideo({ ...v, youtubeVideoId: id });
+      await saveVideo({ ...v, youtubeVideoId: id, youtubePublishedAt: v.youtubePublishedAt || Date.now() });
       const fresh = await listVideosByChannel(channelId);
       setVideos(fresh);
       setYtEditOpenForId(null);
@@ -1326,8 +1326,11 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
           {videos.map((v) => {
-            const sceneCount = v.scenes?.length || 0;
-            const readyCount = v.scenes?.filter((s) => s.images?.every((im) => im.status === 'ready') && s.audioStatus === 'ready').length || 0;
+            const isArchived = !!v.mediaArchived;
+            const sceneCount = isArchived ? v.archivedSceneCount || 0 : v.scenes?.length || 0;
+            const readyCount = isArchived
+              ? sceneCount
+              : v.scenes?.filter((s) => s.images?.every((im) => im.status === 'ready') && s.audioStatus === 'ready').length || 0;
             const title = v.displayTitle || 'Untitled video';
             const isPublished = !!v.youtubeVideoId;
             return (
@@ -1382,13 +1385,19 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                 <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{title}</div>
                 <div style={{ ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                   <span>
-                    {sceneCount} scene{sceneCount === 1 ? '' : 's'} · {readyCount}/{sceneCount} ready
+                    {isArchived
+                      ? `${sceneCount} scene${sceneCount === 1 ? '' : 's'} · media archived`
+                      : `${sceneCount} scene${sceneCount === 1 ? '' : 's'} · ${readyCount}/${sceneCount} ready`}
                   </span>
                   <span>{timeAgo(v.updatedAt)}</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 'auto' }}>
-                  <button onClick={() => onResume(v)} style={{ ...btnPrimary, flex: '1 1 80px' }}>
-                    Resume
+                  <button
+                    onClick={() => onResume(v)}
+                    title={isArchived ? 'Media archived after publish — opens a notice, not the editor' : undefined}
+                    style={{ ...(isArchived ? btnGhost : btnPrimary), flex: '1 1 80px' }}
+                  >
+                    {isArchived ? 'Archived' : 'Resume'}
                   </button>
                   <button
                     onClick={() => (moveOpenForId === v.id ? closeMove() : openMoveFor(v))}

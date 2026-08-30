@@ -9,6 +9,7 @@ import { priceForVoice } from './voiceProviders';
 import { runFullPipeline } from './recipes/fullPipelineRecipe';
 import { runStaticBackgroundPipeline } from './recipes/staticBackgroundRecipe';
 import { isCreditExhaustedMessage } from './providerErrors';
+import { runMediaCleanup } from './mediaArchival';
 
 const PAID_IMAGE_PROVIDERS = ['nanobanana', 'gptimage', 'nanobanana-batch'];
 const PAID_VOICE_ENGINES = ['minimax'];
@@ -17,6 +18,34 @@ const PAID_VOICE_ENGINES = ['minimax'];
 // path runs through Google's Gemini Batch API, not fal.ai, so a fal balance check says nothing
 // about it.
 const FAL_BACKED_IMAGE_PROVIDERS = ['nanobanana', 'gptimage'];
+
+// The scheduler ticks as often as every minute; storage cleanup (src/lib/mediaArchival.js) only
+// needs to run about once a day. Throttled with a module-level timestamp rather than a new DB
+// column — a page reload just means the next cycle runs it once more, which is harmless (it's a
+// no-op when nothing is eligible, and idempotent per video via mediaArchived).
+let lastMediaCleanupAt = 0;
+const MEDIA_CLEANUP_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000;
+
+async function runDailyMediaCleanup(userId) {
+  if (!userId) return;
+  if (Date.now() - lastMediaCleanupAt < MEDIA_CLEANUP_MIN_INTERVAL_MS) return;
+  lastMediaCleanupAt = Date.now();
+  try {
+    const result = await runMediaCleanup(userId, { dryRun: false, log: true });
+    if (result.archived > 0 || result.failed > 0) {
+      await logAutomationStep(
+        null,
+        null,
+        'cleanup',
+        result.failed > 0 ? 'error' : 'success',
+        `storage cleanup: archived ${result.archived} published video(s), freed ~${result.freedBytesLabel}${result.failed ? `, ${result.failed} failed` : ''}`
+      ).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[automationEngine] daily media cleanup failed', err);
+    await logAutomationStep(null, null, 'cleanup', 'error', `storage cleanup failed: ${String(err?.message || err)}`).catch(() => {});
+  }
+}
 // Below this, the cycle logs a one-off heads-up (never blocks) so a mid-video "credit exhausted"
 // failure doesn't come as a surprise.
 const LOW_FAL_BALANCE_THRESHOLD_USD = 10;
@@ -366,4 +395,7 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
     }
   }
   console.warn('[run-cycle-debug] runAutomationCycle() finished — all channels processed (or shouldStop() fired)');
+
+  // Housekeeping, after the real work — real cycles only, throttled to ~once a day internally.
+  if (!dryRun) await runDailyMediaCleanup(userId);
 }

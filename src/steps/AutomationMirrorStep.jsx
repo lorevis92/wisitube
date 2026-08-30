@@ -4,6 +4,7 @@ import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, saveVideo, 
 import { resumePendingBatches } from '../lib/batchResumption';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 import { runManagedResume } from '../lib/automationScheduler';
+import { planMediaCleanup, runMediaCleanup, ARCHIVE_AFTER_DAYS } from '../lib/mediaArchival';
 
 // Permanent status dashboard for automation — no longer just a temporary mirror that appears while
 // a run is active. Three parts, in order:
@@ -91,6 +92,12 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
   // checks below, all gated on `busyVideoId === item.videoId`), never other rows.
   const [busyVideoId, setBusyVideoId] = useState(null);
   const [busyLabel, setBusyLabel] = useState('');
+  // Storage cleanup panel (see src/lib/mediaArchival.js). cleanupPlan is the dry-run result shown
+  // before anything is deleted; cleanupResult is the outcome of the real run.
+  const [cleanupPlan, setCleanupPlan] = useState(null);
+  const [cleanupResult, setCleanupResult] = useState(null);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [cleanupError, setCleanupError] = useState('');
 
   async function loadIncomplete() {
     try {
@@ -239,6 +246,47 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
     } finally {
       setBusyVideoId(null);
       loadIncomplete();
+    }
+  }
+
+  async function checkCleanup() {
+    setCleanupBusy(true);
+    setCleanupError('');
+    setCleanupResult(null);
+    try {
+      setCleanupPlan(await planMediaCleanup(userId));
+    } catch (err) {
+      console.error('[AutomationMirrorStep] cleanup dry-run failed', err);
+      setCleanupError(String(err?.message || err));
+    } finally {
+      setCleanupBusy(false);
+    }
+  }
+
+  async function doCleanup() {
+    if (!cleanupPlan || cleanupPlan.totalVideos === 0) return;
+    if (
+      !window.confirm(
+        `Archive ${cleanupPlan.totalVideos} published video(s)?\n\n` +
+          `This permanently deletes ${cleanupPlan.totalFiles} media file(s) (~${cleanupPlan.totalBytesLabel}) from Storage — ` +
+          `scene images, audio and the rendered MP4. The videos stay on YouTube; the dashboard keeps its thumbnail and title. ` +
+          `They can no longer be opened in Storyboard/Editor.`
+      )
+    )
+      return;
+    setCleanupBusy(true);
+    setCleanupError('');
+    try {
+      const result = await runMediaCleanup(userId, { dryRun: false });
+      setCleanupResult(result);
+      setCleanupPlan(null);
+      loadCompleted();
+      loadIncomplete();
+    } catch (err) {
+      console.error('[AutomationMirrorStep] cleanup run failed', err);
+      setCleanupError(String(err?.message || err));
+    } finally {
+      setCleanupBusy(false);
     }
   }
 
@@ -605,6 +653,61 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                 ))}
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      <div style={card}>
+        <div style={label}>Storage cleanup</div>
+        <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 6, lineHeight: 1.6, maxWidth: 620 }}>
+          Deletes the heavy media (scene images, audio, rendered MP4) of videos published more than {ARCHIVE_AFTER_DAYS} days ago to free
+          Storage. The videos stay on YouTube and keep their thumbnail, title and metadata in the dashboard — they just can't be
+          reopened in Storyboard/Editor afterwards. The daily automation cycle also runs this on its own.
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+          <button onClick={checkCleanup} disabled={cleanupBusy} style={{ ...btnGhost, opacity: cleanupBusy ? 0.6 : 1 }}>
+            {cleanupBusy && !cleanupResult ? 'Checking…' : 'Check what can be cleaned up'}
+          </button>
+          {cleanupPlan && cleanupPlan.totalVideos > 0 && (
+            <button onClick={doCleanup} disabled={cleanupBusy} style={{ ...btnPrimary, opacity: cleanupBusy ? 0.6 : 1 }}>
+              {cleanupBusy ? 'Cleaning up…' : `Clean up ${cleanupPlan.totalVideos} video${cleanupPlan.totalVideos === 1 ? '' : 's'} (~${cleanupPlan.totalBytesLabel})`}
+            </button>
+          )}
+        </div>
+
+        {cleanupError && (
+          <div style={{ ...mono, fontSize: 12, color: T.primary, marginTop: 10 }}>{cleanupError}</div>
+        )}
+
+        {cleanupPlan && (
+          <div style={{ marginTop: 12 }}>
+            {cleanupPlan.totalVideos === 0 ? (
+              <div style={{ ...mono, fontSize: 12, color: T.textSecondary }}>Nothing eligible — no published video is older than {ARCHIVE_AFTER_DAYS} days and un-archived.</div>
+            ) : (
+              <>
+                <div style={{ ...mono, fontSize: 12, color: T.text }}>
+                  Dry run — would archive {cleanupPlan.totalVideos} video(s), removing {cleanupPlan.totalFiles} file(s), ~{cleanupPlan.totalBytesLabel}:
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
+                  {cleanupPlan.videos.map((v) => (
+                    <div key={v.videoId} style={{ ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {v.channelName} · {v.displayTitle}
+                      </span>
+                      <span style={{ flexShrink: 0 }}>{v.fileCount} file{v.fileCount === 1 ? '' : 's'}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {cleanupResult && !cleanupResult.dryRun && (
+          <div style={{ ...mono, fontSize: 12, color: T.green, marginTop: 12 }}>
+            Done — archived {cleanupResult.archived} video(s), freed ~{cleanupResult.freedBytesLabel}
+            {cleanupResult.failed > 0 ? `, ${cleanupResult.failed} failed (see console/log)` : ''}.
           </div>
         )}
       </div>

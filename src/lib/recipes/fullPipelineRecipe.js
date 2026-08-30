@@ -901,8 +901,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
 
       // Persisted so a later Storyboard/Editor/Export session (or a resumed browser tab) knows
       // this video is already live — without this, ExportStep.jsx would have no way to tell and
-      // could re-upload the same video as a duplicate.
-      project = { ...project, youtubeVideoId };
+      // could re-upload the same video as a duplicate. youtubePublishedAt drives the storage
+      // cleanup window (src/lib/mediaArchival.js).
+      project = { ...project, youtubeVideoId, youtubePublishedAt: project.youtubePublishedAt || Date.now() };
       await persist();
 
       const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;

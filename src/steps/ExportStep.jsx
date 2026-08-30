@@ -322,7 +322,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       // Rides on the project record itself (same pattern as renderedVideoBlob/thumbnailStoragePath
       // above) so App.jsx's existing debounced autosave persists it — without this, a manual
       // upload would be just as forgettable on refresh as the automation path used to be.
-      setProject((p) => ({ ...p, youtubeVideoId: evt.videoId }));
+      setProject((p) => ({ ...p, youtubeVideoId: evt.videoId, youtubePublishedAt: p.youtubePublishedAt || Date.now() }));
     } else if (evt.kind === 'error') setYtErrors((prev) => ({ ...prev, [evt.phase]: evt.message }));
     else if (evt.kind === 'error-clear') setYtErrors((e) => ({ ...e, [evt.phase]: null }));
   }
