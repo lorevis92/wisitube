@@ -182,7 +182,7 @@ function applyMediaProgress(project, evt) {
     return {
       ...project,
       scenes: project.scenes.map((s) =>
-        s.id === sceneId ? { ...s, images: s.images.map((im, i) => (i === evt.beatIndex ? { ...im, ...evt.patch } : im)) } : s
+        s.id === sceneId ? { ...s, images: (s.images || []).map((im, i) => (i === evt.beatIndex ? { ...im, ...evt.patch } : im)) } : s
       ),
     };
   }
@@ -659,7 +659,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           });
         }
 
-        const stillMissingImages = project.scenes.some((s) => s.images.some((im) => im.status !== 'ready'));
+        const stillMissingImages = project.scenes.some((s) => (s.images || []).some((im) => im.status !== 'ready'));
         if (stillMissingImages && (project.pendingImageBatches || []).length === 0) {
           // Nothing outstanding for this video yet at all — submit now. Chunks go out in
           // parallel (see geminiBatchImageEngine.js); each one's pendingEntry is persisted as
@@ -681,6 +681,19 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             },
           });
           await persistChain;
+
+          // generateAllMediaViaBatch is best-effort per chunk (a failed submit is logged and
+          // skipped, not thrown) and a no-op when there's nothing valid to submit. If NOT ONE
+          // batch made it out, there are no jobs to wait for — falling through to
+          // mediaStillInProgress here would leave the video silently stuck: resumed every cycle,
+          // submitting nothing, until MAX_RESUME_ATTEMPTS trips with an unhelpful "stuck in media".
+          // Surface it as the real failure it is (the per-chunk cause is already in earlier 'media'
+          // error rows).
+          if ((project.pendingImageBatches || []).length === 0) {
+            throw new Error(
+              'Gemini Batch: no image batch could be submitted for this video — every chunk submission failed, or the scene data had nothing valid to submit. See the earlier "media" error rows for the cause.'
+            );
+          }
         }
 
         // A billing failure (exhausted audio credit, or a batch chunk that 402'd on submit) is not
@@ -689,11 +702,11 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         const creditMsg = findCreditExhaustedError(project);
         if (creditMsg) throw new Error(creditMsg);
 
-        const nowAllReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
+        const nowAllReady = project.scenes.every((s) => s.audioStatus === 'ready' && (s.images || []).every((im) => im.status === 'ready'));
         if (!nowAllReady) mediaStillInProgress = true;
       } else {
         await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: mediaOnProgress });
-        const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && s.images.every((im) => im.status === 'ready'));
+        const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && (s.images || []).every((im) => im.status === 'ready'));
         if (!allReady) throw new Error(findCreditExhaustedError(project) || 'Some scenes failed to generate media (image or audio)');
       }
 
@@ -701,8 +714,8 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     });
 
     if (mediaStillInProgress) {
-      const readyCount = project.scenes.reduce((n, s) => n + s.images.filter((im) => im.status === 'ready').length, 0);
-      const totalCount = project.scenes.reduce((n, s) => n + s.images.length, 0);
+      const readyCount = project.scenes.reduce((n, s) => n + (s.images || []).filter((im) => im.status === 'ready').length, 0);
+      const totalCount = project.scenes.reduce((n, s) => n + (s.images || []).length, 0);
       await logStep(channelId, videoId, 'media', 'pending', `${readyCount}/${totalCount} images ready — batch jobs still in progress`);
       report('media', `${readyCount}/${totalCount} images ready — batch jobs in progress`);
     } else {

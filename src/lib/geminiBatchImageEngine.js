@@ -179,9 +179,35 @@ async function submitImageBatchChunkWithRetry(items, resolution, onRetry) {
  * every other engine module in this codebase.
  */
 export async function generateAllMediaViaBatch(project, { settings, channelId, videoId, resolution = '0.5K', onProgress, logStep } = {}) {
-  const chunks = chunkScenesNeedingImages(project.scenes, BATCH_CHUNK_SCENES)
-    .map((chunkSceneIds) => ({ chunkSceneIds, items: collectPendingBeatItems(project, chunkSceneIds, settings) }))
-    .filter((c) => c.items.length > 0); // every beat in an empty chunk was already ready by the time we got here
+  // collectPendingBeatItems -> buildImagePrompt can throw (e.g. settings.style not a key in STYLES,
+  // so STYLES[settings.style].suffix blows up). Without this, that throw would propagate as a bare
+  // "Cannot read properties of undefined" with no hint at the cause.
+  let chunks;
+  try {
+    chunks = chunkScenesNeedingImages(project.scenes, BATCH_CHUNK_SCENES)
+      .map((chunkSceneIds) => ({ chunkSceneIds, items: collectPendingBeatItems(project, chunkSceneIds, settings) }))
+      .filter((c) => c.items.length > 0); // every beat in an empty chunk was already ready by the time we got here
+  } catch (err) {
+    const message = `Gemini Batch: could not build the image batches — ${String(err?.message || err)} (a bad channel style setting is the usual cause: settings.style="${settings?.style}" must be a key in STYLES).`;
+    console.error('[geminiBatchImageEngine] generateAllMediaViaBatch: chunk build failed', err);
+    onProgress?.({ kind: 'message', text: message });
+    await logStep?.(channelId, videoId, 'media', 'error', message)?.catch(() => {});
+    throw new Error(message);
+  }
+
+  // The caller only invokes this when project.scenes still has non-ready image beats, so an empty
+  // chunk list here means the scene data itself is malformed (a scene with no images[] array — the
+  // filter in chunkScenesNeedingImages skips those). Loudly logged rather than a silent no-op that
+  // leaves the video stuck "in progress" with no batch ever submitted.
+  if (chunks.length === 0) {
+    const withImages = (project.scenes || []).filter((s) => Array.isArray(s.images) && s.images.length > 0).length;
+    const total = (project.scenes || []).length;
+    const message = `Gemini Batch: nothing to submit — ${withImages}/${total} scenes have an images array. Scene data looks malformed; regenerate the scenes for this video.`;
+    console.error('[geminiBatchImageEngine] generateAllMediaViaBatch: no chunks to submit', { withImages, total });
+    onProgress?.({ kind: 'message', text: message });
+    await logStep?.(channelId, videoId, 'media', 'error', message)?.catch(() => {});
+    return;
+  }
 
   let submitted = 0;
   await runWithConcurrency(chunks, MAX_BATCH_SUBMIT_CONCURRENCY, async ({ chunkSceneIds, items }) => {
