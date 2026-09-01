@@ -31,6 +31,32 @@ const DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND = `You are continuing the scr
 
 Narration must flow naturally when read aloud in sequence, calm and measured conversational tone, no scene numbers, no visual cues or stage directions of any kind.`;
 
+// DIAGNOSTIC (not a fix): when the model's JSON can't be parsed/validated, dump everything needed
+// to tell truncation from malformed output from a masked API error — the FULL raw text (Vercel
+// truncates a single console line, so it's split into ~3 KB chunks), plus Anthropic's own
+// stop_reason / usage, which say outright when a response was cut off at max_tokens.
+function dumpUnparsableSceneResponse(tag, { anthropicData, rawText, cleanText, chapterTitle, sceneCount, parseError }) {
+  try {
+    const raw = typeof rawText === 'string' ? rawText : '';
+    const clean = typeof cleanText === 'string' ? cleanText : '';
+    console.error(
+      `[generate-scenes] DIAGNOSTIC ${tag} — chapter="${chapterTitle}" sceneCount=${sceneCount} ` +
+        `stop_reason=${anthropicData?.stop_reason} ` +
+        `output_tokens=${anthropicData?.usage?.output_tokens} input_tokens=${anthropicData?.usage?.input_tokens} ` +
+        `rawLen=${raw.length} cleanLen=${clean.length} ` +
+        `parseError=${parseError ? String(parseError.message || parseError) : 'n/a'}`
+    );
+    const src = clean || raw;
+    const CHUNK = 3000;
+    const total = Math.ceil(src.length / CHUNK) || 1;
+    for (let i = 0; i < total; i++) {
+      console.error(`[generate-scenes] DIAGNOSTIC ${tag} rawtext part ${i + 1}/${total}:\n` + src.slice(i * CHUNK, (i + 1) * CHUNK));
+    }
+  } catch (e) {
+    console.error('[generate-scenes] DIAGNOSTIC dump itself failed', e?.message);
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -315,11 +341,20 @@ Rules:
       return res.status(502).json({ error: 'Could not read Anthropic response content', detail: String(err?.message || err).slice(0, 300) });
     }
 
+    // DIAGNOSTIC: Anthropic says outright when it stopped because it hit max_tokens (4000 here) —
+    // that truncates the JSON mid-object and is the most likely cause of a downstream parse failure.
+    if (data?.stop_reason && data.stop_reason !== 'end_turn') {
+      console.warn(
+        `[generate-scenes] DIAGNOSTIC stop_reason=${data.stop_reason} output_tokens=${data?.usage?.output_tokens} ` +
+          `chapter="${chapterTitle}" sceneCount=${sceneCount} — response may be truncated`
+      );
+    }
+
     const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     const start = clean.indexOf('{');
     const end = clean.lastIndexOf('}');
     if (start === -1 || end === -1) {
-      console.error('[generate-scenes] phase=locate-json no braces found, text=', clean.slice(0, 300));
+      dumpUnparsableSceneResponse('locate-json', { anthropicData: data, rawText: raw, cleanText: clean, chapterTitle, sceneCount });
       return res.status(502).json({ error: 'Invalid AI response' });
     }
 
@@ -328,12 +363,19 @@ Rules:
     try {
       plan = JSON.parse(clean.slice(start, end + 1));
     } catch (e) {
-      console.error('[generate-scenes] phase=parse-plan-json', e?.message, 'raw text=', clean.slice(0, 300));
+      dumpUnparsableSceneResponse('parse-plan-json', {
+        anthropicData: data,
+        rawText: raw,
+        cleanText: clean,
+        chapterTitle,
+        sceneCount,
+        parseError: e,
+      });
       return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
     }
 
     if (!Array.isArray(plan.scenes) || plan.scenes.length === 0) {
-      console.error('[generate-scenes] phase=validate-plan missing/empty scenes, plan=', JSON.stringify(plan).slice(0, 300));
+      dumpUnparsableSceneResponse('validate-plan-missing-scenes', { anthropicData: data, rawText: raw, cleanText: clean, chapterTitle, sceneCount });
       return res.status(502).json({ error: 'AI response missing scenes' });
     }
 
