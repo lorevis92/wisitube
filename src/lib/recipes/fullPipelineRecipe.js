@@ -17,7 +17,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
+import { createId, saveVideo, persistVideoMediaProgress, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
 import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -287,17 +287,50 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
 
   // Shared by every persist() call in this function, whether resuming or starting fresh — reads
   // whatever videoId/project/plan/suggestion/createdAt are in scope at call time.
-  const persist = () =>
-    saveVideo({
-      id: videoId,
-      channelId,
-      createdAt,
-      updatedAt: Date.now(),
-      topic: suggestion?.title,
-      settings,
+  const videoRecord = () => ({
+    id: videoId,
+    channelId,
+    createdAt,
+    updatedAt: Date.now(),
+    topic: suggestion?.title,
+    settings,
+    ...project,
+    displayTitle: plan?.title || suggestion?.title,
+  });
+  const persist = () => saveVideo(videoRecord());
+
+  // Media-phase persist: goes through persistVideoMediaProgress so a concurrent writer (a manual
+  // "Check for updates", the editor autosave, another overlapping resume) that already downloaded
+  // and saved some batch images can't be clobbered by this call's older snapshot — and vice versa.
+  // Then folds the DB-side merge result back into the in-memory project so the "all ready?" check
+  // below runs against the freshest state — WITHOUT dropping this process's own in-memory blobs
+  // (the DB copy is blob-less): a beat/audio the merge reveals as newly-ready gets its status +
+  // storagePath adopted, and the render phase rehydrates any that end up with a path but no blob.
+  const persistMedia = async () => {
+    const merged = await persistVideoMediaProgress(videoRecord());
+    if (!merged) return;
+    project = {
       ...project,
-      displayTitle: plan?.title || suggestion?.title,
-    });
+      pendingImageBatches: merged.pendingImageBatches,
+      batchRecoveryCycles: merged.batchRecoveryCycles,
+      scenes: (project.scenes || []).map((memS) => {
+        const dbS = (merged.scenes || []).find((s) => s.id === memS.id);
+        if (!dbS) return memS;
+        const audioReady = memS.audioStatus === 'ready' || dbS.audioStatus === 'ready';
+        return {
+          ...memS,
+          images: (memS.images || []).map((memB, i) => {
+            const dbB = (dbS.images || [])[i];
+            if (memB.status === 'ready' && (memB.blob || memB.url || memB.storagePath)) return memB;
+            if (dbB && dbB.status === 'ready') return { ...memB, status: 'ready', storagePath: dbB.storagePath || memB.storagePath || null };
+            return memB;
+          }),
+          audioStatus: audioReady ? 'ready' : memS.audioStatus,
+          audioStoragePath: memS.audioStoragePath || dbS.audioStoragePath || null,
+        };
+      }),
+    };
+  };
 
   // ---- Resume check ----
   // Covers a video interrupted at ANY phase (suggestion/outline, scenes, media, render, thumbnail —
@@ -634,7 +667,17 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         // same pattern as the scenes phase above.
         const beatDone = evt.kind === 'beat' && (evt.patch?.status === 'ready' || evt.patch?.status === 'error');
         const audioDone = evt.kind === 'scene' && (evt.patch?.audioStatus === 'ready' || evt.patch?.audioStatus === 'error');
-        if (beatDone || audioDone) persist().catch((err) => console.error('[fullPipelineRecipe] partial media save failed', err));
+        // Per-scene audio save (both paths) — audio generation is early and has no concurrent
+        // writer, so a plain chained save is enough, and it stops a mid-gen crash from re-charging
+        // for voiceovers already in Storage.
+        // Per-beat image save ONLY for synchronous providers: on the Gemini Batch path
+        // resumePendingBatches persists per JOB (its own injected persistMedia), which is both the
+        // real durability boundary (Google keeps the results ~48h, so an un-persisted job is simply
+        // refetched, never re-billed) AND the point where a stale overwrite would cause the
+        // "complete video never publishes" bug — a per-beat write here would only add clobber risk.
+        if (audioDone || (beatDone && !usesGeminiBatch)) {
+          persist().catch((err) => console.error('[fullPipelineRecipe] partial media save failed', err));
+        }
       };
 
       if (usesGeminiBatch) {
@@ -654,7 +697,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             onProgress: mediaOnProgress,
             persist: async (proj) => {
               project = proj;
-              await persist();
+              await persistMedia();
             },
           });
         }
@@ -676,7 +719,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
               if (evt.kind === 'message' && evt.text) report('media', evt.text);
               if (evt.kind === 'batch-submitted') {
                 project = { ...project, pendingImageBatches: [...(project.pendingImageBatches || []), evt.pendingEntry] };
-                persistChain = persistChain.then(persist).catch((err) => console.error('[fullPipelineRecipe] pending batch save failed', err));
+                persistChain = persistChain.then(persistMedia).catch((err) => console.error('[fullPipelineRecipe] pending batch save failed', err));
               }
             },
           });
@@ -702,15 +745,26 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         const creditMsg = findCreditExhaustedError(project);
         if (creditMsg) throw new Error(creditMsg);
 
+        // Merge in the freshest DB state (another writer — a manual "Check for updates", say — may
+        // have downloaded the last few images while this cycle was running) BEFORE deciding whether
+        // media is done. Without this the decision runs on this cycle's own snapshot, which is
+        // exactly how a video that's actually complete keeps getting left "in progress".
+        await persistMedia();
         const nowAllReady = project.scenes.every((s) => s.audioStatus === 'ready' && (s.images || []).every((im) => im.status === 'ready'));
-        if (!nowAllReady) mediaStillInProgress = true;
+        if (!nowAllReady) {
+          mediaStillInProgress = true;
+        } else {
+          // Complete — but the merge may have adopted beats/audio a CONCURRENT writer finished, which
+          // this process only has a storagePath for, not a blob. Rehydrate so the render phase below
+          // sees a usable blob for every scene (no-op for beats that already have one).
+          project = await rehydrateProjectMedia(project);
+        }
       } else {
         await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: mediaOnProgress });
         const allReady = project.scenes.every((s) => s.audioStatus === 'ready' && (s.images || []).every((im) => im.status === 'ready'));
         if (!allReady) throw new Error(findCreditExhaustedError(project) || 'Some scenes failed to generate media (image or audio)');
+        await persist();
       }
-
-      await persist();
     });
 
     if (mediaStillInProgress) {
@@ -750,7 +804,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     const purelyWaitingOnGoogle = jobsStillOutstanding && !anyImageErrored && !recoveryWasNeeded;
     if (wasResumed && purelyWaitingOnGoogle && project.resumeAttempts !== priorResumeAttempts) {
       project = { ...project, resumeAttempts: priorResumeAttempts, lastResumePhase: priorLastResumePhase };
-      await persist();
+      await persistMedia();
     }
     // Not a failure — this video will be picked up again by the resume check on a later cycle.
     // automationEngine.js treats inProgress specially: no upload-count increment (nothing was

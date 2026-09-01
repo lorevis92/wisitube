@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, mono } from '../theme';
-import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, saveVideo, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
+import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, persistVideoMediaProgress, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
 import { resumePendingBatches } from '../lib/batchResumption';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 import { runManagedResume } from '../lib/automationScheduler';
@@ -161,7 +161,8 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
         videoId: item.videoId,
         channelId: item.channelId,
         settings: { style: item.style, imageProvider: item.imageProvider },
-        persist: (p) => saveVideo(p),
+        // Merge-persist: the automation cycle may be resolving this same video's batches right now.
+        persist: (p) => persistVideoMediaProgress(p),
       });
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to check batch updates for video', item.videoId, err);

@@ -73,10 +73,38 @@ function fromVideoRow(row) {
   };
 }
 
-export async function saveVideo(video) {
+// ---- Per-video write serialization ----
+// The whole `project` (scenes, beat status, pendingImageBatches, …) lives in a single jsonb column,
+// so every write is a full-column rewrite from whatever in-memory snapshot the caller holds — the
+// exact lost-update shape already fixed for channels (updateChannelFields). Unlike a channel, a
+// video can't be split into per-field column updates without a schema change, so instead:
+//   1. every write for a given videoId is chained through here, so two writers in THIS tab (the
+//      automation cycle's per-beat saves, a manual "Check for updates", the editor autosave) can't
+//      interleave their read-modify-write;
+//   2. persistVideoMediaProgress() below re-reads the freshest row and MERGES media progress
+//      (never regressing a beat/audio another writer already marked ready) instead of blindly
+//      overwriting — used by every path that saves `project` while Gemini Batch jobs are in flight.
+const videoWriteChains = new Map();
+
+function chainVideoWrite(videoId, fn) {
+  const prev = videoWriteChains.get(videoId) || Promise.resolve();
+  const run = prev.then(() => fn(), () => fn()); // fn always runs, whatever the previous write did
+  const settled = run.then(
+    () => {
+      if (videoWriteChains.get(videoId) === settled) videoWriteChains.delete(videoId);
+    },
+    () => {
+      if (videoWriteChains.get(videoId) === settled) videoWriteChains.delete(videoId);
+    }
+  );
+  videoWriteChains.set(videoId, settled);
+  return run; // caller sees fn's real resolution/rejection
+}
+
+function videoRowFrom(video) {
   const { id, channelId, createdAt, topic, settings, displayTitle, promisedFollowUp, promiseFulfilled, ...project } = video;
   const now = new Date().toISOString();
-  const row = {
+  return {
     id,
     channel_id: channelId,
     created_at: createdAt ? new Date(createdAt).toISOString() : now,
@@ -91,8 +119,103 @@ export async function saveVideo(video) {
     promise_fulfilled: !!promiseFulfilled,
     project: stripBlobsForSync(project),
   };
-  const data = unwrap(await supabase.from('wisitube_videos').upsert(row, { onConflict: 'id' }).select().single());
+}
+
+async function upsertVideoRow(video) {
+  const data = unwrap(await supabase.from('wisitube_videos').upsert(videoRowFrom(video), { onConflict: 'id' }).select().single());
   return fromVideoRow(data);
+}
+
+export async function saveVideo(video) {
+  if (!video?.id) return upsertVideoRow(video); // no id to serialize on (shouldn't happen — callers always set one)
+  return chainVideoWrite(video.id, () => upsertVideoRow(video));
+}
+
+// ---- media-progress merge (see videoWriteChains comment) ----
+const MEDIA_RANK = { ready: 3, error: 2, loading: 1, idle: 0 };
+const rank = (s) => MEDIA_RANK[s] ?? 0;
+
+function mergeBeat(dbB, memB) {
+  if (!dbB) return memB;
+  if (!memB) return dbB;
+  const dbReady = dbB.status === 'ready';
+  const memReady = memB.status === 'ready';
+  // Whoever already reached 'ready' wins — a stale snapshot must never pull a completed beat back.
+  if (dbReady && !memReady) return dbB;
+  if (memReady && !dbReady) return memB;
+  if (dbReady && memReady) return { ...memB, storagePath: memB.storagePath || dbB.storagePath };
+  return rank(dbB.status) > rank(memB.status) ? dbB : memB;
+}
+
+function mergeScene(dbS, memS) {
+  if (!dbS) return memS;
+  const n = Math.max((memS.images || []).length, (dbS.images || []).length);
+  const images = [];
+  for (let i = 0; i < n; i++) images.push(mergeBeat((dbS.images || [])[i], (memS.images || [])[i]));
+  const merged = { ...memS, images };
+  if (dbS.audioStatus === 'ready' && memS.audioStatus !== 'ready') {
+    merged.audioStatus = 'ready';
+    merged.audioStoragePath = dbS.audioStoragePath || merged.audioStoragePath || null;
+    merged.audioDuration = dbS.audioDuration ?? merged.audioDuration;
+    merged.audioError = null;
+  }
+  return merged;
+}
+
+function mergeScenesMedia(dbScenes, memScenes) {
+  if (!Array.isArray(memScenes)) return memScenes;
+  if (!Array.isArray(dbScenes) || dbScenes.length === 0) return memScenes;
+  const dbById = new Map(dbScenes.map((s) => [s.id, s]));
+  const merged = memScenes.map((memS) => mergeScene(dbById.get(memS.id), memS));
+  const memIds = new Set(memScenes.map((s) => s.id));
+  const extra = dbScenes.filter((s) => !memIds.has(s.id)); // scenes the caller's snapshot predates
+  return [...merged, ...extra];
+}
+
+// Downstream/terminal markers set by phases AFTER media (render/thumbnail/youtube) or by other
+// flows (promise fulfilment) — a media-progress writer with a stale snapshot must never blank them.
+const VIDEO_DOWNSTREAM_FIELDS = [
+  'youtubeVideoId',
+  'youtubePublishedAt',
+  'youtubeUploadStarted',
+  'thumbnailPublishFailed',
+  'thumbnailStoragePath',
+  'renderedVideoStoragePath',
+  'stuckError',
+  'mediaArchived',
+];
+
+/**
+ * Saves `video` the same way saveVideo does, but first re-reads the freshest row and merges media
+ * progress so a save from a stale snapshot can't clobber beats/audio another concurrent writer
+ * already completed (the automation cycle, a manual "Check for updates", the editor autosave, a
+ * manual resume — any two of which can overlap while Gemini Batch jobs are running). Returns the
+ * merged, persisted record — callers should adopt it as their new working copy so their own
+ * "is everything ready?" check runs against the freshest state, not their stale one.
+ */
+export async function persistVideoMediaProgress(video) {
+  if (!video?.id) return upsertVideoRow(video);
+  return chainVideoWrite(video.id, async () => {
+    const fresh = await loadVideo(video.id);
+    if (!fresh) return upsertVideoRow(video); // not in the DB yet — nothing to merge against
+
+    const merged = {
+      ...video,
+      scenes: mergeScenesMedia(fresh.scenes, video.scenes),
+      // The caller is the one actively managing batches (submitting / resolving) — trust its list,
+      // but never lose a recovery-cycle bump another writer made.
+      pendingImageBatches: Array.isArray(video.pendingImageBatches) ? video.pendingImageBatches : fresh.pendingImageBatches || [],
+      batchRecoveryCycles: Math.max(Number(fresh.batchRecoveryCycles) || 0, Number(video.batchRecoveryCycles) || 0),
+    };
+    for (const f of VIDEO_DOWNSTREAM_FIELDS) {
+      if (fresh[f] !== undefined && fresh[f] !== null && fresh[f] !== false) merged[f] = fresh[f];
+    }
+    // top-level columns — the DB is always the source of truth for these
+    merged.promisedFollowUp = fresh.promisedFollowUp;
+    merged.promiseFulfilled = fresh.promiseFulfilled;
+
+    return upsertVideoRow(merged);
+  });
 }
 
 export async function loadVideo(id) {

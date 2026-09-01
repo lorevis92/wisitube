@@ -13,7 +13,7 @@ import AutomationMirrorStep, { INCOMPLETE_POLL_MS } from './steps/AutomationMirr
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost, btnPrimary } from './theme';
-import { createId, saveVideo, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
+import { createId, saveVideo, persistVideoMediaProgress, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
@@ -305,7 +305,7 @@ export default function App() {
         console.warn('[autosave] refusing to save — no openVideoChannelId for the open video', projectId);
         return;
       }
-      saveVideo({
+      const record = {
         id: projectId,
         channelId: openVideoChannelId,
         createdAt: createdAt || Date.now(),
@@ -316,9 +316,14 @@ export default function App() {
         // Frozen at save time so the channel dashboard never has to re-derive it (and risk
         // picking the raw topic — which can repeat across videos — over the generated title).
         displayTitle: project.titles?.[project.selectedTitle] || settings.topic?.slice(0, 60) || 'Untitled video',
-        // Unlike idb-keyval's local writes, this now goes over the network and can genuinely fail
-        // (auth, connectivity, RLS) — surface it instead of an unhandled promise rejection.
-      }).catch((err) => console.error('[autosave] saveVideo failed', err));
+      };
+      // While this video still has Gemini Batch jobs outstanding, the automation cycle (or a
+      // dashboard "Check for updates") may be resolving them into the same row at the same time —
+      // merge-persist so the editor autosave's snapshot can't wipe images another writer just saved.
+      // Unlike idb-keyval's local writes, this goes over the network and can genuinely fail (auth,
+      // connectivity, RLS) — surface it instead of an unhandled promise rejection.
+      const save = (project.pendingImageBatches || []).length > 0 ? persistVideoMediaProgress : saveVideo;
+      save(record).catch((err) => console.error('[autosave] save failed', err));
     }, 800);
     return () => clearTimeout(timer);
   }, [project, settings, projectId, createdAt, openVideoChannelId]);
@@ -632,8 +637,11 @@ export default function App() {
           videoId: record.id,
           channelId: record.channelId,
           settings: record.settings || settings,
+          // Merge-persist, not a blind overwrite: the automation cycle can be resuming the same
+          // video's batches at the same moment — whichever saved last would otherwise wipe the
+          // other's freshly-downloaded images.
           persist: (proj) =>
-            saveVideo({
+            persistVideoMediaProgress({
               id: record.id,
               channelId: record.channelId,
               createdAt: record.createdAt,
