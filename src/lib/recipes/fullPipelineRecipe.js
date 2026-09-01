@@ -444,11 +444,16 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // Preflight for a brand-new video on a local_folder channel — don't spend money generating a
   // video that then can't be written anywhere. A resumed video skips this: its files already exist
   // and the export is retried on its own at the publish phase.
+  // Logged as a real 'error' (not a muted 'skipped') so the owner actually sees that the export
+  // folder needs setting up / re-granting — the automation cycle can only CHECK the folder
+  // permission, never prompt for it, so this needs a visible nudge to the Automation settings.
   if (!wasResumed && channel.automation_export_mode === 'local_folder') {
     const pre = await localExportPreflight();
     if (!pre.ok) {
-      report('eligibility', `Local folder export not ready: ${pre.reason}`);
-      return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reason: `local folder export not ready — ${pre.reason}` };
+      const message = `Local folder export can't run: ${pre.reason}. Open Automation settings for this channel and click "Choose export folder", then run the cycle again.`;
+      await logStep(channelId, null, 'youtube', 'error', message);
+      report('youtube', 'Local folder export not set up — see Automation settings');
+      return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reasonLogged: true, reason: message };
     }
   }
 

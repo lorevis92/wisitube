@@ -354,7 +354,19 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       .then((updated) => {
         if (updated) setChannels((list) => (list || []).map((c) => (c.id === channelId ? updated : c)));
       })
-      .catch((err) => console.error('[AutomationStep] failed to save channel automation settings', channelId, err));
+      .catch((err) => {
+        // Not swallowed to the console only — a failed setting change (e.g. a column that doesn't
+        // exist yet because a DB migration wasn't run) would otherwise leave the UI showing a value
+        // that never actually persisted, and the automation cycle silently using the old one.
+        console.error('[AutomationStep] failed to save channel automation settings', channelId, err);
+        window.alert(
+          `Could not save this setting (${Object.keys(patch).join(', ')}): ${String(err?.message || err)}\n\n` +
+            'The change on screen has NOT been saved. If this mentions a missing column, the required one-time ' +
+            'Supabase migration has not been run yet.'
+        );
+        // Resync from the DB so the UI stops showing the un-saved value.
+        loadChannels();
+      });
   }
 
   function toggleChannelExpanded(channelId) {
@@ -443,8 +455,23 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   }
 
   function runRealCycle() {
-    const ok = window.confirm('This will generate real content and publish to YouTube. Continue?');
-    console.warn('[run-cycle-debug] "Run real cycle" confirm popup result:', ok);
+    const enabled = (channels || []).filter((c) => c.automation_enabled);
+    const localFolderChannels = enabled.filter((c) => c.automation_export_mode === 'local_folder');
+    const youtubeChannels = enabled.filter((c) => c.automation_export_mode !== 'local_folder');
+
+    let msg = 'This will generate real content';
+    if (youtubeChannels.length) msg += ' and publish it to YouTube';
+    if (localFolderChannels.length) {
+      const names = localFolderChannels.map((c) => c.name || 'a channel').join(', ');
+      msg +=
+        `. ${localFolderChannels.length} channel${localFolderChannels.length === 1 ? '' : 's'} ` +
+        `(${names}) ${localFolderChannels.length === 1 ? 'is' : 'are'} set to LOCAL FOLDER export — ` +
+        'those videos are written to your chosen folder, not uploaded. Make sure you\'ve granted folder ' +
+        'access this session ("Choose export folder") first';
+    }
+    msg += '. Continue?';
+
+    const ok = window.confirm(msg);
     if (!ok) return;
     runCycle(false);
   }

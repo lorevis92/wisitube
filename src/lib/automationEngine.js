@@ -330,8 +330,10 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
           if (result.skipped) {
             // The recipe declined to start a new video (today: a local_folder channel with no
             // usable export folder set up — see fullPipelineRecipe.js's preflight). Nothing was
-            // generated, nothing spent; end this channel's turn with the reason.
-            exhaustionReason = result.reason || 'channel not ready to produce a video';
+            // generated, nothing spent; end this channel's turn. When the recipe already logged its
+            // own reason (reasonLogged), don't add a second, muted 'eligibility'/'skipped' row on
+            // top — the recipe's 'error' row is the one the owner needs to see.
+            if (!result.reasonLogged) exhaustionReason = result.reason || 'channel not ready to produce a video';
             break;
           }
 

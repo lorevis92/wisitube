@@ -281,12 +281,14 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   }
 
   // See fullPipelineRecipe.js: don't generate a brand-new video for a local_folder channel that
-  // has no usable export folder set up.
+  // has no usable export folder set up — logged as a visible 'error', not a muted 'skipped'.
   if (!wasResumed && channel.automation_export_mode === 'local_folder') {
     const pre = await localExportPreflight();
     if (!pre.ok) {
-      report('eligibility', `Local folder export not ready: ${pre.reason}`);
-      return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reason: `local folder export not ready — ${pre.reason}` };
+      const message = `Local folder export can't run: ${pre.reason}. Open Automation settings for this channel and click "Choose export folder", then run the cycle again.`;
+      await logStep(channelId, null, 'youtube', 'error', message);
+      report('youtube', 'Local folder export not set up — see Automation settings');
+      return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reasonLogged: true, reason: message };
     }
   }
 
