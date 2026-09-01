@@ -8,6 +8,12 @@ import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
 import { STYLES } from '../lib/pollinations';
 import ExpandableTextarea from '../components/ExpandableTextarea';
+import {
+  isLocalExportSupported,
+  getStoredLocalExportDirectory,
+  pickLocalExportDirectory,
+  ensureLocalExportPermission,
+} from '../lib/localExport';
 
 const SCHEDULER_POLL_MS = 15000;
 const INTERVAL_UNITS = [
@@ -178,6 +184,44 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   const [singleTestLoading, setSingleTestLoading] = useState(false);
   const [singleTestResult, setSingleTestResult] = useState(null); // { googleStatus, googleOk, sentPayload, googleResponse }
   const [singleTestError, setSingleTestError] = useState('');
+
+  // Local-folder export (channel.automation_export_mode === 'local_folder'). One base folder for the
+  // whole app, not per channel — the recipes create a per-channel subfolder inside it.
+  const [exportDirName, setExportDirName] = useState(null); // folder name, or null if none chosen
+  const [exportDirStatus, setExportDirStatus] = useState('unknown'); // 'granted' | 'prompt' | 'denied' | 'none' | 'unsupported'
+  const [exportDirBusy, setExportDirBusy] = useState(false);
+
+  async function refreshExportDirStatus() {
+    if (!isLocalExportSupported()) {
+      setExportDirStatus('unsupported');
+      return;
+    }
+    const handle = await getStoredLocalExportDirectory();
+    if (!handle) {
+      setExportDirName(null);
+      setExportDirStatus('none');
+      return;
+    }
+    setExportDirName(handle.name || 'chosen folder');
+    setExportDirStatus(await ensureLocalExportPermission(handle, { withPrompt: false }));
+  }
+
+  async function chooseExportDir() {
+    setExportDirBusy(true);
+    try {
+      const handle = await pickLocalExportDirectory();
+      setExportDirName(handle.name || 'chosen folder');
+      setExportDirStatus(await ensureLocalExportPermission(handle, { withPrompt: true }));
+    } catch (err) {
+      if (err?.name !== 'AbortError') window.alert(String(err?.message || err));
+    } finally {
+      setExportDirBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    refreshExportDirStatus();
+  }, []);
 
   async function loadChannels() {
     const list = await listChannels();
@@ -741,7 +785,56 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
                 {isExpanded && (
                 <>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 16, marginTop: 12 }}>
+                <div style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 12, marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div>
+                    <div style={label}>Publishing</div>
+                    <select
+                      value={c.automation_export_mode || 'youtube'}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_export_mode: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 6, maxWidth: 320 }}
+                    >
+                      <option value="youtube">Upload to YouTube (API)</option>
+                      <option value="local_folder">Export to a local folder (upload by hand later)</option>
+                    </select>
+                  </div>
+
+                  {(c.automation_export_mode || 'youtube') === 'local_folder' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary, lineHeight: 1.6 }}>
+                        Produced videos are written to <code>{'{folder}/{channel}/{date} - {title}/'}</code> as
+                        <code> video.mp4</code>, <code>thumbnail.jpg</code>, <code>publish-info.txt</code> (and
+                        <code> captions.srt</code> when subtitles exist). Nothing is uploaded — each video stays
+                        "Finished — not published"; use "Mark as published" in the dashboard after uploading it by hand.
+                      </div>
+                      {exportDirStatus === 'unsupported' ? (
+                        <div style={{ ...mono, fontSize: 11, color: T.primary }}>
+                          This browser can't do local folder export — use Chrome, Edge or Opera.
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <button onClick={chooseExportDir} disabled={exportDirBusy} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
+                              {exportDirName ? 'Change export folder' : 'Choose export folder'}
+                            </button>
+                            {exportDirName && (
+                              <span style={{ ...mono, fontSize: 11, color: T.textSecondary }}>
+                                📁 {exportDirName}
+                                {exportDirStatus === 'granted' && <span style={{ color: T.green }}> · access ok</span>}
+                                {exportDirStatus === 'prompt' && <span style={{ color: T.yellow }}> · needs re-granting (click "Change export folder")</span>}
+                                {exportDirStatus === 'denied' && <span style={{ color: T.primary }}> · access denied</span>}
+                              </span>
+                            )}
+                          </div>
+                          {!exportDirName && (
+                            <div style={{ ...mono, fontSize: 11, color: T.yellow }}>
+                              No folder chosen yet — the automation cycle will fail this channel's publish step until one is set.
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ) : (
                     <label
                       style={{
                         display: 'flex',
@@ -763,6 +856,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       />
                       Auto-publish to YouTube
                     </label>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 16, marginTop: 12 }}>
                     <label
                       style={{
                         display: 'flex',

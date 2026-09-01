@@ -58,6 +58,11 @@ export function determineResumePhase(project, outline) {
   // that must still resolve to null.
   if (project?.youtubeUploadStarted) return null;
 
+  // Local-folder export mode (channel.automation_export_mode === 'local_folder', see
+  // src/lib/localExport.js): the files were written out and the video deliberately stays "not
+  // published" for a manual upload — terminal for automation, don't re-export it every cycle.
+  if (project?.localExportedAt) return null;
+
   // Media + render + thumbnail all done and persisted, and publish was never even started — the only
   // thing left is a safe first publish. thumbnailStoragePath alone proves render succeeded too (the
   // thumbnail phase has always run strictly after render in both the manual and automated

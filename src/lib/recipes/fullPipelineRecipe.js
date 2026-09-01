@@ -28,6 +28,8 @@ import { isCreditExhaustedMessage } from '../providerErrors';
 import { renderVideoForExport } from '../videoRenderEngine';
 import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
+import { buildSrtFromScenes } from '../srtBuilder';
+import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
@@ -427,6 +429,17 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       `resuming incomplete video "${plan.title}" from the "${resumePhase}" phase (attempt ${attempts}/${MAX_RESUME_ATTEMPTS})`
     );
     report('resume', `Resuming "${plan.title}" — continuing from ${resumePhase}`);
+  }
+
+  // Preflight for a brand-new video on a local_folder channel — don't spend money generating a
+  // video that then can't be written anywhere. A resumed video skips this: its files already exist
+  // and the export is retried on its own at the publish phase.
+  if (!wasResumed && channel.automation_export_mode === 'local_folder') {
+    const pre = await localExportPreflight();
+    if (!pre.ok) {
+      report('eligibility', `Local folder export not ready: ${pre.reason}`);
+      return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reason: `local folder export not ready — ${pre.reason}` };
+    }
   }
 
   if (shouldRunPhase(resumePhase, 'suggestion')) {
@@ -878,6 +891,52 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       thumbnailBlob = await downloadMediaAsBlob(project.thumbnailStoragePath);
     } catch (err) {
       console.error('[fullPipelineRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
+      throw err;
+    }
+  }
+
+  // ---- Phase: publish (local folder export) ----
+  // channel.automation_export_mode === 'local_folder' replaces the YouTube upload entirely: the
+  // finished video + thumbnail + a publish-info sheet are written to the folder the user picked in
+  // Automation settings, and the video is left WITHOUT youtubeVideoId — it stays "Finished — not
+  // published" in the dashboard, where the owner uses "Mark as published" after uploading by hand.
+  if (channel.automation_export_mode === 'local_folder') {
+    try {
+      const srt = buildSrtFromScenes(project.scenes, !!project.staticBackground);
+      const folder = await runLocalExport({
+        channelName: channel.name,
+        dateStr: exportDateString(createdAt),
+        title: plan.title,
+        videoBlob,
+        thumbnailBlob,
+        srtContent: srt,
+        publishInfo: {
+          title: plan.title,
+          description: plan.description,
+          tags: plan.tags,
+          categoryId: channel.automation_youtube_category || DEFAULT_YOUTUBE_CATEGORY_ID,
+          language: settings.language || 'English',
+          privacyStatus: 'public',
+          publishAt: null,
+          seriesName: suggestion.series || null,
+          madeForKids: channel.automation_made_for_kids === true,
+        },
+      });
+      // Terminal for automation — determineResumePhase returns null once this is set, so the next
+      // cycle's findResumableVideo won't pick the video up and re-export it.
+      project = { ...project, localExportedAt: Date.now() };
+      await persist();
+      await logStep(
+        channelId,
+        videoId,
+        'youtube',
+        'success',
+        `exported to local folder "${folder}" — upload it to YouTube manually, then use "Mark as published"`
+      );
+      report('youtube', `Exported to ${folder}`);
+      return { videoId, youtubeVideoId: null, costUsd: await totalCostForVideo(channelId, videoId) };
+    } catch (err) {
+      await logStep(channelId, videoId, 'youtube', 'error', `local folder export failed: ${String(err?.message || err)}`);
       throw err;
     }
   }

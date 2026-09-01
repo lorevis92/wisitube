@@ -7,6 +7,8 @@ import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
 import { generateThumbnail } from '../lib/thumbnailEngine';
 import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
 import { renderVideoForExport } from '../lib/videoRenderEngine';
+import { buildSrtFromScenes } from '../lib/srtBuilder';
+import { runLocalExport, exportDateString, isLocalExportSupported, localExportUnsupportedMessage } from '../lib/localExport';
 import ExpandableTextarea from '../components/ExpandableTextarea';
 
 // Official YouTube video category IDs (googleapis.com/youtube/v3/videoCategories) — the ones
@@ -100,6 +102,13 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   const [ytVideoId, setYtVideoId] = useState(project.youtubeVideoId || '');
   const [ytErrors, setYtErrors] = useState({}); // { upload, thumbnail, captions, playlist }
   const [ytFormError, setYtFormError] = useState('');
+
+  // Local-folder export instead of a YouTube upload — driven by the channel's automation_export_mode
+  // (the same setting the automation cycle honours), so the manual and automatic paths stay aligned.
+  const localExportMode = channel?.automation_export_mode === 'local_folder';
+  const [localExportBusy, setLocalExportBusy] = useState(false);
+  const [localExportDone, setLocalExportDone] = useState('');
+  const [localExportError, setLocalExportError] = useState('');
 
   const isYoutubeConnected = !!channel?.youtube_connected;
 
@@ -380,6 +389,58 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     return ok;
   }
 
+  // "Export to local folder" — the manual counterpart of the recipes' local_folder publish branch.
+  // Writes video.mp4 / thumbnail.jpg / publish-info.txt (+ captions.srt) and does NOT set
+  // youtubeVideoId: the video stays "not published" for a manual upload + "Mark as published".
+  async function exportToLocalFolder() {
+    setLocalExportError('');
+    setLocalExportDone('');
+    if (!isLocalExportSupported()) {
+      setLocalExportError(localExportUnsupportedMessage());
+      return;
+    }
+    const videoBlob = renderedBlob || project.renderedVideoBlob;
+    if (!videoBlob) {
+      setLocalExportError('Render the video first.');
+      return;
+    }
+    setLocalExportBusy(true);
+    try {
+      const thumbBlob = thumbReady
+        ? await new Promise((resolve) => thumbCanvasRef.current.toBlob(resolve, 'image/jpeg', 0.9))
+        : null;
+      const srt = ytUploadCaptions ? buildSrtFromScenes(project.scenes, !!project.staticBackground) : '';
+      const folder = await runLocalExport({
+        withPrompt: true, // this runs from a button click — a permission prompt is allowed
+        channelName: channel?.name || 'channel',
+        dateStr: exportDateString(),
+        title: ytTitle || project.titles?.[project.selectedTitle] || 'video',
+        videoBlob,
+        thumbnailBlob: thumbBlob,
+        srtContent: srt,
+        publishInfo: {
+          title: ytTitle,
+          description: ytDescription,
+          tags: ytTags.split(',').map((t) => t.trim()).filter(Boolean),
+          categoryId: ytCategory,
+          language: settings.language || 'English',
+          privacyStatus: ytPrivacy,
+          publishAt: ytScheduleMode === 'schedule' ? ytPublishAt : null,
+          seriesName: project.series || null,
+          madeForKids: ytMadeForKids,
+        },
+      });
+      setLocalExportDone(folder);
+      // Same terminal marker the recipe sets — keeps an automation cycle from re-exporting this
+      // video, and it's harmless for a hand-made one. Autosave persists it.
+      setProject((p) => ({ ...p, localExportedAt: p.localExportedAt || Date.now() }));
+    } catch (err) {
+      if (err?.name !== 'AbortError') setLocalExportError(String(err?.message || err));
+    } finally {
+      setLocalExportBusy(false);
+    }
+  }
+
   async function runCaptions(videoId) {
     return setCaptions(videoId, project, { channel, metadata: buildYtMetadata(), onProgress: handleYtProgress });
   }
@@ -592,13 +653,18 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         </div>
       </div>
 
-      {/* Publish to YouTube — only for a channel that's actually gone through the OAuth connect
-          flow (ChannelDashboardStep); everyone else just downloads/copies the pack above. */}
-      {isYoutubeConnected && (
+      {/* Publish — shown for a channel that's gone through the OAuth connect flow
+          (ChannelDashboardStep), OR one set to local-folder export mode; everyone else just
+          downloads/copies the pack above. */}
+      {(isYoutubeConnected || localExportMode) && (
         <div style={card}>
-          <div style={label}>8 · Publish to YouTube</div>
+          <div style={label}>8 · {localExportMode ? 'Export the video' : 'Publish to YouTube'}</div>
           <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 6, fontFamily: FONT.ui }}>
-            Publishing to <strong>{channel.youtube_channel_name || 'your connected channel'}</strong>. Render the video above first.
+            {localExportMode ? (
+              <>Fill in the metadata below — it goes into <code>publish-info.txt</code> for when you upload by hand. Render the video above first.</>
+            ) : (
+              <>Publishing to <strong>{channel.youtube_channel_name || 'your connected channel'}</strong>. Render the video above first.</>
+            )}
           </div>
 
           <div style={{ marginTop: 16 }}>
@@ -762,6 +828,35 @@ export default function ExportStep({ project, setProject, settings, channel, cha
                   )
               )}
             </div>
+          ) : localExportMode ? (
+            <>
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginBottom: 8, lineHeight: 1.6 }}>
+                  This channel is set to <strong>local folder export</strong> — writes{' '}
+                  <code>video.mp4</code>, <code>thumbnail.jpg</code>, <code>publish-info.txt</code> to the folder
+                  you picked in Automation settings. Nothing is uploaded; use "Mark as published" in the channel
+                  dashboard after uploading by hand.
+                </div>
+                <button
+                  onClick={exportToLocalFolder}
+                  disabled={localExportBusy || !videoUrl}
+                  style={{ ...btnPrimary, padding: '12px 20px', opacity: localExportBusy || !videoUrl ? 0.6 : 1 }}
+                >
+                  {localExportBusy ? 'Exporting…' : '📁 Export to local folder'}
+                </button>
+                {!videoUrl && (
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6 }}>Render the video first.</div>
+                )}
+                {localExportDone && (
+                  <div style={{ fontSize: 12, color: T.green, fontFamily: FONT.ui, marginTop: 8 }}>
+                    ✓ Exported to <code>{localExportDone}</code>. Upload it to YouTube, then use "Mark as published".
+                  </div>
+                )}
+                {localExportError && (
+                  <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui, marginTop: 8 }}>{localExportError}</div>
+                )}
+              </div>
+            </>
           ) : (
             <>
               <div style={{ marginTop: 18 }}>

@@ -178,6 +178,7 @@ const VIDEO_DOWNSTREAM_FIELDS = [
   'youtubeVideoId',
   'youtubePublishedAt',
   'youtubeUploadStarted',
+  'localExportedAt',
   'thumbnailPublishFailed',
   'thumbnailStoragePath',
   'renderedVideoStoragePath',
@@ -316,6 +317,13 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists program_manager_chat jsonb;
+//
+// Required one-time setup for the local-folder export alternative to YouTube publishing (see
+// src/lib/localExport.js) — 'youtube' (default) publishes via the API; 'local_folder' writes the
+// finished video + thumbnail + a publish sheet into a user-picked local folder tree instead:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_export_mode text not null default 'youtube';
 
 function fromChannelRow(row) {
   return {
@@ -399,6 +407,9 @@ function fromChannelRow(row) {
     // Opt-in (default off): when true, videos open with a brief welcome introducing the channel's
     // purpose, built from `niche` — see ChannelDashboardStep.jsx and api/generate-outline.js.
     automation_channel_intro: !!row.automation_channel_intro,
+    // 'youtube' (default) publishes via the API; 'local_folder' writes the finished files to a
+    // user-picked local folder tree instead and leaves the video "not published" (src/lib/localExport.js).
+    automation_export_mode: row.automation_export_mode || 'youtube',
   };
 }
 
@@ -455,6 +466,7 @@ export async function saveChannel(channel) {
     automation_daily_spend_usd: channel.automation_daily_spend_usd ?? 0,
     automation_auto_publish: channel.automation_auto_publish ?? true,
     automation_channel_intro: !!channel.automation_channel_intro,
+    automation_export_mode: channel.automation_export_mode || 'youtube',
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

@@ -327,6 +327,14 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
           });
           console.warn('[run-cycle-debug] runAutomationCycle() recipe() returned', result);
 
+          if (result.skipped) {
+            // The recipe declined to start a new video (today: a local_folder channel with no
+            // usable export folder set up — see fullPipelineRecipe.js's preflight). Nothing was
+            // generated, nothing spent; end this channel's turn with the reason.
+            exhaustionReason = result.reason || 'channel not ready to produce a video';
+            break;
+          }
+
           if (result.inProgress) {
             // Gemini Batch jobs are still running for this video (see fullPipelineRecipe.js's
             // media phase) — nothing failed, there's just nothing left to do until Google
