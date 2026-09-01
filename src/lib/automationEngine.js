@@ -245,7 +245,14 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
   console.warn('[run-cycle-debug] runAutomationCycle() entered', { dryRun });
   const allChannels = await listChannels();
   console.warn('[run-cycle-debug] runAutomationCycle() listChannels() returned', allChannels.length, 'channels');
-  const channels = allChannels.filter((c) => c.automation_enabled === true);
+  // Deterministic, stable processing order: oldest channel first, by creation time. listChannels()
+  // returns updated_at DESC, which is reshuffled constantly (this very cycle bumps updated_at on
+  // every channel it touches — daily counters, topic_scoring_cache — as does any dashboard edit), so
+  // iterating it directly would systematically favour or starve a channel purely by how recently
+  // something else happened to touch its row. created_at never changes.
+  const channels = allChannels
+    .filter((c) => c.automation_enabled === true)
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   console.warn('[run-cycle-debug] runAutomationCycle()', channels.length, 'channels have automation_enabled === true');
 
   // Proactive, non-blocking low-balance heads-up — real cycles only (a dry run spends nothing).
