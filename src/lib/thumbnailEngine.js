@@ -74,9 +74,6 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider) {
  * why the Storage backup they'd be used for stays in ExportStep.jsx.
  */
 export async function generateThumbnail(project, { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed } = {}) {
-  // TEMPORARY debug (render→thumbnail freeze investigation) — remove once root-caused.
-  const dbg = (m, x) => console.warn(`[rt-debug] generateThumbnail — ${m}`, x !== undefined ? x : '');
-  dbg('ENTER', { videoId, thumbIdx, hasConcept: !!project.thumbnails?.[thumbIdx], provider: settings.imageProvider });
   const concept = project.thumbnails[thumbIdx];
   const provider = settings.imageProvider || 'pollinations';
   // A thumbnail is a single image — never worth submitting to Gemini Batch and waiting up to
@@ -92,7 +89,6 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already uses
   // for every scene beat — routes nanobanana/gptimage through fal.ai instead of always hitting
   // Pollinations regardless of the provider chosen for the rest of the video.
-  dbg('START generateImage', { effectiveThumbnailProvider });
   const { imageUrl, costUsd } = await withTimeout(
     (signal) =>
       generateImage(
@@ -105,17 +101,10 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
     THUMBNAIL_GENERATE_TIMEOUT_MS,
     `Thumbnail image generation (${effectiveThumbnailProvider})`
   );
-  dbg('DONE generateImage', { costUsd, imageUrlKind: typeof imageUrl === 'string' ? imageUrl.slice(0, 24) : typeof imageUrl });
   // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
-  if (costUsd > 0) {
-    dbg('START recordCost');
-    await recordCost({ channelId, videoId, provider: effectiveThumbnailProvider, type: 'image', amountUsd: costUsd });
-    dbg('DONE recordCost');
-  }
+  if (costUsd > 0) await recordCost({ channelId, videoId, provider: effectiveThumbnailProvider, type: 'image', amountUsd: costUsd });
 
-  dbg('START loadImage');
   const img = await withTimeout(() => loadImage(imageUrl), THUMBNAIL_DOWNLOAD_TIMEOUT_MS, 'Thumbnail image download');
-  dbg('DONE loadImage', { w: img.width, h: img.height });
   const c = makeCanvas(1280, 720);
   const ctx = c.getContext('2d');
   // cover-fit
@@ -133,11 +122,8 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   ctx.fillRect(0, 0, 1280, 720);
   ctx.drawImage(img, (1280 - dw) / 2, (720 - dh) / 2, dw, dh);
 
-  dbg('canvas composited (cover-fit done)');
   if (effectiveThumbnailProvider === 'pollinations') {
-    dbg('START document.fonts.ready');
     await document.fonts.ready;
-    dbg('DONE document.fonts.ready');
     // bottom gradient for legibility
     const g = ctx.createLinearGradient(0, 380, 0, 720);
     g.addColorStop(0, 'rgba(0,0,0,0)');
@@ -174,8 +160,5 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   // Premium providers (nanobanana/gptimage) already baked the text into the generated image
   // itself (see thumbnailPrompt) — the cover-fit above is the only processing it needs.
 
-  dbg('START canvasToBlob');
-  const blob = await canvasToBlob(c);
-  dbg('DONE canvasToBlob', { size: blob?.size, type: blob?.type });
-  return blob;
+  return canvasToBlob(c);
 }

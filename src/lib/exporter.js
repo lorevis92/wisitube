@@ -53,7 +53,6 @@ async function renderMixedAudio(items, total) {
  * MediaRecorder/WebM path.
  */
 export async function renderToMp4({ items, width, height, subtitles = false, staticBackground = null, textStyle = null, onProgress, signal }) {
-  console.warn('[rt-debug] renderToMp4 ENTER', { items: items?.length, width, height });
   if (typeof window === 'undefined' || typeof window.VideoEncoder === 'undefined' || typeof window.AudioEncoder === 'undefined') {
     throw new WebCodecsUnsupportedError();
   }
@@ -87,9 +86,7 @@ export async function renderToMp4({ items, width, height, subtitles = false, sta
   const audioSource = new AudioBufferSource({ codec: audioCodec, bitrate: AUDIO_BITRATE });
   output.addAudioTrack(audioSource);
 
-  console.warn('[rt-debug] renderToMp4 — START output.start()');
   await output.start();
-  console.warn('[rt-debug] renderToMp4 — DONE output.start(); START renderMixedAudio');
 
   const abortIfNeeded = async () => {
     if (!signal?.aborted) return;
@@ -103,7 +100,6 @@ export async function renderToMp4({ items, width, height, subtitles = false, sta
   await audioSource.add(renderedAudio);
   audioSource.close();
   await abortIfNeeded();
-  console.warn('[rt-debug] renderToMp4 — DONE audio; START video frame loop', { totalFrames });
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
     await abortIfNeeded();
@@ -114,15 +110,9 @@ export async function renderToMp4({ items, width, height, subtitles = false, sta
 
     if (frameIndex % 30 === 0 && onProgress) onProgress(frameIndex, totalFrames);
   }
-  // TEMPORARY debug (render→thumbnail freeze investigation) — remove once root-caused.
-  console.warn('[rt-debug] renderToMp4 — frame loop done, START videoSource.close()');
   videoSource.close();
-  console.warn('[rt-debug] renderToMp4 — DONE videoSource.close(); START output.finalize()');
   if (onProgress) onProgress(totalFrames, totalFrames);
 
   await output.finalize();
-  console.warn('[rt-debug] renderToMp4 — DONE output.finalize(); building Blob');
-  const blob = new Blob([output.target.buffer], { type: 'video/mp4' });
-  console.warn('[rt-debug] renderToMp4 — RETURN', { size: blob.size });
-  return blob;
+  return new Blob([output.target.buffer], { type: 'video/mp4' });
 }
