@@ -48,6 +48,20 @@ const PROMPT_STAGES = [
   { key: 'programManager', stageLabel: 'Content Program Manager' },
 ];
 
+// Full, absolute date+time — same convention as AutomationMirrorStep.jsx's "Videos in progress" /
+// "Recently completed" lists. Used for the video-card timestamp so it stays a fixed reference that
+// never shifts when a video is merely opened (which bumps updated_at via autosave).
+function formatDateTime(ts) {
+  return ts ? new Date(ts).toLocaleString() : 'unknown time';
+}
+
+// The video grid is ordered by creation time, newest first — deliberately NOT updated_at: opening a
+// video (even just to view it) triggers App.jsx's debounced autosave, which rewrites updated_at, so
+// ordering by it would reshuffle the grid every time a card is clicked. created_at is immutable.
+function sortVideosForGrid(list) {
+  return [...(list || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
 function timeAgo(ts) {
   if (!ts) return '';
   const sec = Math.floor((Date.now() - ts) / 1000);
@@ -187,7 +201,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       // every local mutation below reports here, so components that never do their own fetch (like
       // ExportStep) can't end up looking at a stale copy of e.g. the YouTube connection state.
       onChannelChange?.(ch || null);
-      setVideos(list);
+      setVideos(sortVideosForGrid(list));
       setTotalSpent(costs.total);
       // Phase 3: the Blob itself never survives a reload (see stripBlobsForSync, src/lib/db.js) —
       // storagePath is the Supabase Storage backup, sign a short-lived URL to preview it. A video's
@@ -592,7 +606,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       // The moved video no longer belongs here — reload from the server rather than just filtering
       // it out locally, so the grid reflects exactly what's actually saved.
       const fresh = await listVideosByChannel(channelId);
-      setVideos(fresh);
+      setVideos(sortVideosForGrid(fresh));
       setMoveOpenForId(null);
     } catch (err) {
       setMoveError('Move failed: ' + String(err.message || err));
@@ -627,7 +641,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     try {
       await saveVideo({ ...v, youtubeVideoId: id, youtubePublishedAt: v.youtubePublishedAt || Date.now() });
       const fresh = await listVideosByChannel(channelId);
-      setVideos(fresh);
+      setVideos(sortVideosForGrid(fresh));
       setYtEditOpenForId(null);
     } catch (err) {
       setYtEditError('Failed to save: ' + String(err.message || err));
@@ -646,7 +660,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     try {
       await saveVideo({ ...v, youtubeVideoId: null });
       const fresh = await listVideosByChannel(channelId);
-      setVideos(fresh);
+      setVideos(sortVideosForGrid(fresh));
       setYtEditOpenForId(null);
     } catch (err) {
       setYtEditError('Failed to save: ' + String(err.message || err));
@@ -1383,13 +1397,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                   </a>
                 )}
                 <div style={{ fontFamily: FONT.ui, fontSize: 14, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{title}</div>
-                <div style={{ ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <div style={{ ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                   <span>
                     {isArchived
                       ? `${sceneCount} scene${sceneCount === 1 ? '' : 's'} · media archived`
                       : `${sceneCount} scene${sceneCount === 1 ? '' : 's'} · ${readyCount}/${sceneCount} ready`}
                   </span>
-                  <span>{timeAgo(v.updatedAt)}</span>
+                  <span>created {formatDateTime(v.createdAt)}</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 'auto' }}>
                   <button

@@ -17,7 +17,11 @@ export default function ChannelsListStep({ onOpenChannel, isMobile }) {
     (async () => {
       const [list, total] = await Promise.all([listChannels(), getTotalCostAllChannels()]);
       if (cancelled) return;
-      setChannels(list);
+      // Order by creation time, newest first — NOT updated_at (listChannels' own order): the
+      // automation cycle rewrites updated_at on every channel it touches (daily counters,
+      // topic_scoring_cache), and every dashboard edit does too, so ordering by it would reshuffle
+      // this list constantly. created_at is immutable. Same fix as ChannelDashboardStep's video grid.
+      setChannels([...list].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
       setTotalSpent(total);
       const counts = {};
       const urls = {};
