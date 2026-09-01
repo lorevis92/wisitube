@@ -13,7 +13,9 @@
 // Every phase has its own try/catch so a failure anywhere returns a clear JSON error with a phase
 // tag instead of an uncaught rejection that Vercel turns into a generic platform 502.
 
-export const config = { maxDuration: 90 };
+// 120s (up from 90): with max_tokens raised to 8000 a full 16-scene chunk can legitimately take
+// longer to generate — don't let the fix for truncation trade itself for a platform 504.
+export const config = { maxDuration: 120 };
 
 // The "channel voice" half of the system prompt — narration tone and shot-writing style. Safe to
 // override per-channel (see creativeOverride below): no required JSON field name or hard
@@ -291,7 +293,12 @@ Rules:
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
-          max_tokens: 4000,
+          // A full 16-scene full_pipeline chunk (MAX_SCENES_PER_CALL) is ~2 image_beats/scene with
+          // long premium-provider prompts (character proper names + verbatim on-screen text) and
+          // was landing right at the old 4000 ceiling — truncated mid-JSON → "Could not parse AI
+          // JSON". 8000 leaves wide margin; the DIAGNOSTIC stop_reason/usage logs below confirm
+          // whether it's now always enough.
+          max_tokens: 8000,
           system: systemPrompt,
           messages: [
             {
@@ -341,7 +348,7 @@ Rules:
       return res.status(502).json({ error: 'Could not read Anthropic response content', detail: String(err?.message || err).slice(0, 300) });
     }
 
-    // DIAGNOSTIC: Anthropic says outright when it stopped because it hit max_tokens (4000 here) —
+    // DIAGNOSTIC: Anthropic says outright when it stopped because it hit max_tokens (8000 here) —
     // that truncates the JSON mid-object and is the most likely cause of a downstream parse failure.
     if (data?.stop_reason && data.stop_reason !== 'end_turn') {
       console.warn(
