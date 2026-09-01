@@ -25,6 +25,13 @@ import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
+import { withTimeout } from '../asyncTimeout';
+
+// Hang guards for render/thumbnail — see fullPipelineRecipe.js's identical constants.
+const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
+const RENDERED_UPLOAD_TIMEOUT_MS = 8 * 60 * 1000;
+const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
+const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
@@ -512,12 +519,21 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   if (shouldRunPhase(resumePhase, 'render')) {
   try {
     await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
-      videoBlob = await renderVideoForExport(project, settings, {
-        onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
-      });
+      videoBlob = await withTimeout(
+        () =>
+          renderVideoForExport(project, settings, {
+            onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
+          }),
+        RENDER_TIMEOUT_MS,
+        'Video render'
+      );
       // Backed up to Storage (same pattern as the thumbnail phase below) so a resumed session
       // interrupted anywhere after this point can skip re-rendering entirely.
-      const renderedVideoStoragePath = await uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob);
+      const renderedVideoStoragePath = await withTimeout(
+        () => uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob),
+        RENDERED_UPLOAD_TIMEOUT_MS,
+        'Rendered video upload to Storage'
+      );
       project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
       await persist();
     });
@@ -552,7 +568,11 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         overlayText: concept.overlay_text || '',
         seed: Math.floor(Math.random() * 999999),
       });
-      const thumbnailStoragePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob);
+      const thumbnailStoragePath = await withTimeout(
+        () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),
+        THUMBNAIL_UPLOAD_TIMEOUT_MS,
+        'Thumbnail upload to Storage'
+      );
       project = { ...project, thumbnailStoragePath };
       await persist();
     });
@@ -566,9 +586,14 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     // Already done on an earlier attempt — read the backed-up thumbnail back rather than
     // regenerating it, since it's about to be needed for the YouTube phase below.
     try {
-      thumbnailBlob = await downloadMediaAsBlob(project.thumbnailStoragePath);
+      thumbnailBlob = await withTimeout(
+        () => downloadMediaAsBlob(project.thumbnailStoragePath),
+        THUMBNAIL_RESTORE_TIMEOUT_MS,
+        'Thumbnail restore from Storage'
+      );
     } catch (err) {
       console.error('[staticBackgroundRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
+      await logStep(channelId, videoId, 'thumbnail', 'error', `could not restore the saved thumbnail: ${String(err?.message || err)}`);
       throw err;
     }
   }

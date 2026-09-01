@@ -17,6 +17,13 @@ import { STYLES, loadImage } from './pollinations';
 import { generateImage } from './sceneOrchestrator';
 import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from './promptBuilders';
 import { recordCost } from './db';
+import { withTimeout } from './asyncTimeout';
+
+// Neither generateImage (called directly here, not via mediaGenerationEngine's wrapped path) nor
+// loadImage has a timeout of its own — a stalled provider response or a hung image download would
+// otherwise freeze the recipe's thumbnail phase forever with no error. See src/lib/asyncTimeout.js.
+const THUMBNAIL_GENERATE_TIMEOUT_MS = 150000; // provider call — api/generate-image maxDuration is 90s + margin
+const THUMBNAIL_DOWNLOAD_TIMEOUT_MS = 45000; // <img> decode of the returned URL/data-URI
 
 function makeCanvas(width, height) {
   if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
@@ -82,16 +89,22 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already uses
   // for every scene beat — routes nanobanana/gptimage through fal.ai instead of always hitting
   // Pollinations regardless of the provider chosen for the rest of the video.
-  const { imageUrl, costUsd } = await generateImage(thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider), effectiveThumbnailProvider, [], {
-    width: 1280,
-    height: 720,
-    seed,
-    quality: 'medium',
-  });
+  const { imageUrl, costUsd } = await withTimeout(
+    (signal) =>
+      generateImage(
+        thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider),
+        effectiveThumbnailProvider,
+        [],
+        { width: 1280, height: 720, seed, quality: 'medium' },
+        signal
+      ),
+    THUMBNAIL_GENERATE_TIMEOUT_MS,
+    `Thumbnail image generation (${effectiveThumbnailProvider})`
+  );
   // Real spend only — Pollinations always returns costUsd: 0, so nothing gets logged for it.
   if (costUsd > 0) await recordCost({ channelId, videoId, provider: effectiveThumbnailProvider, type: 'image', amountUsd: costUsd });
 
-  const img = await loadImage(imageUrl);
+  const img = await withTimeout(() => loadImage(imageUrl), THUMBNAIL_DOWNLOAD_TIMEOUT_MS, 'Thumbnail image download');
   const c = makeCanvas(1280, 720);
   const ctx = c.getContext('2d');
   // cover-fit

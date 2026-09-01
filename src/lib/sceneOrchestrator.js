@@ -21,7 +21,9 @@ async function withRetry(fn) {
   try {
     return await fn();
   } catch (err) {
-    if (isCreditExhaustedMessage(err?.message)) throw err;
+    // A caller-imposed timeout/abort (see src/lib/asyncTimeout.js) is final — retrying just reuses
+    // the already-aborted signal and burns the backoff for nothing. Credit exhaustion likewise.
+    if (isCreditExhaustedMessage(err?.message) || err?.name === 'AbortError' || err?.name === 'TimeoutError') throw err;
     await sleep(RETRY_BACKOFF_MS);
     return await fn();
   }

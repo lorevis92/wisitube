@@ -30,6 +30,7 @@ import { generateThumbnail } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
+import { withTimeout } from '../asyncTimeout';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
@@ -217,6 +218,16 @@ const DEFAULT_LANGUAGE = 'English';
 const DEFAULT_FORMAT = '16:9';
 const DEFAULT_KOKORO_VOICE = 'af_heart';
 const DEFAULT_YOUTUBE_CATEGORY_ID = '27'; // Education
+
+// Hang guards for the render/thumbnail phases (see src/lib/asyncTimeout.js). renderVideoForExport,
+// uploadMedia (Supabase Storage — no signal support) and downloadMediaAsBlob have no timeout of
+// their own: a stalled connection or a muxer that never finalizes would otherwise freeze the recipe
+// (and the whole automation cycle) forever with no error row. Generous — these are "definitely
+// stuck", not "slow but working" thresholds.
+const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
+const RENDERED_UPLOAD_TIMEOUT_MS = 8 * 60 * 1000;
+const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
+const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 
 // Same mapping as ExportStep.jsx's own local constant — duplicated rather than imported since
 // ExportStep.jsx doesn't export it (small, stable, controlled-duplication pattern already used
@@ -833,14 +844,23 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   if (shouldRunPhase(resumePhase, 'render')) {
   try {
     await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
-      videoBlob = await renderVideoForExport(project, settings, {
-        onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
-      });
+      videoBlob = await withTimeout(
+        () =>
+          renderVideoForExport(project, settings, {
+            onProgress: (frameIndex, totalFrames) => report('render', `${Math.round((frameIndex / totalFrames) * 100)}%`),
+          }),
+        RENDER_TIMEOUT_MS,
+        'Video render'
+      );
       // Backed up to Storage (same pattern as the thumbnail phase below) — a video the automation
       // publishes right after this in the same call never needs to read it back, but a resumed
       // session interrupted anywhere after this point (thumbnail, YouTube) can skip re-rendering
       // entirely instead of redoing this potentially slow, CPU-heavy phase from scratch.
-      const renderedVideoStoragePath = await uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob);
+      const renderedVideoStoragePath = await withTimeout(
+        () => uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob),
+        RENDERED_UPLOAD_TIMEOUT_MS,
+        'Rendered video upload to Storage'
+      );
       project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
       await persist();
     });
@@ -871,7 +891,11 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         overlayText: concept.overlay_text || '',
         seed: Math.floor(Math.random() * 999999),
       });
-      const thumbnailStoragePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob);
+      const thumbnailStoragePath = await withTimeout(
+        () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),
+        THUMBNAIL_UPLOAD_TIMEOUT_MS,
+        'Thumbnail upload to Storage'
+      );
       project = { ...project, thumbnailStoragePath };
       await persist();
     });
@@ -888,9 +912,14 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // Already done on an earlier attempt — read the backed-up thumbnail back rather than
     // regenerating it, since it's about to be needed for the YouTube phase below.
     try {
-      thumbnailBlob = await downloadMediaAsBlob(project.thumbnailStoragePath);
+      thumbnailBlob = await withTimeout(
+        () => downloadMediaAsBlob(project.thumbnailStoragePath),
+        THUMBNAIL_RESTORE_TIMEOUT_MS,
+        'Thumbnail restore from Storage'
+      );
     } catch (err) {
       console.error('[fullPipelineRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
+      await logStep(channelId, videoId, 'thumbnail', 'error', `could not restore the saved thumbnail: ${String(err?.message || err)}`);
       throw err;
     }
   }
