@@ -613,12 +613,30 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 
       // youtubePublishedAt drives the storage cleanup window (src/lib/mediaArchival.js).
-      project = { ...project, youtubeVideoId, youtubePublishedAt: project.youtubePublishedAt || Date.now() };
+      // thumbnailPublishFailed / 'published_with_issues' — see fullPipelineRecipe.js's identical
+      // handling: a video that went live without its custom thumbnail is not a clean green success.
+      const thumbnailPublishFailed = subErrors.some((m) => m.startsWith('thumbnail:'));
+      project = {
+        ...project,
+        youtubeVideoId,
+        youtubePublishedAt: project.youtubePublishedAt || Date.now(),
+        thumbnailPublishFailed,
+      };
       await persist();
 
-      const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
-      await logStep(channelId, videoId, 'youtube', 'success', message);
-      report('youtube', 'Published to YouTube');
+      if (subErrors.length) {
+        await logStep(
+          channelId,
+          videoId,
+          'youtube',
+          'published_with_issues',
+          `published (${youtubeVideoId}) but ${subErrors.length} finishing step(s) failed: ${subErrors.join('; ')}`
+        );
+        report('youtube', `Published — but ${subErrors.map((m) => m.split(':')[0]).join(', ')} failed`);
+      } else {
+        await logStep(channelId, videoId, 'youtube', 'success', `published (${youtubeVideoId})`);
+        report('youtube', 'Published to YouTube');
+      }
     } catch (err) {
       if (isNetworkError(err)) {
         const message =

@@ -356,7 +356,23 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   async function runThumbnail(videoId) {
     // no custom thumbnail made — YouTube's auto-picked one applies; skip the toBlob() call entirely.
     const thumbBlob = thumbReady ? await new Promise((resolve) => thumbCanvasRef.current.toBlob(resolve, 'image/png')) : null;
-    return setThumbnail(videoId, thumbBlob, { channel, onProgress: handleYtProgress, expectedThumbnailPath: project.thumbnailStoragePath });
+    // The outline always produces at least one thumbnail concept for a full-pipeline video, so a
+    // custom thumbnail is intended whenever project.thumbnails is non-empty — even if it was never
+    // backed up to Storage (no thumbnailStoragePath). Without this, a reload that loses the
+    // in-memory canvas (e.g. right after reconnecting YouTube) would let publish go through with a
+    // null blob and no storagePath, and setThumbnail would treat it as a silent "no thumbnail
+    // wanted" no-op.
+    const thumbnailExpected = Array.isArray(project.thumbnails) && project.thumbnails.length > 0;
+    const ok = await setThumbnail(videoId, thumbBlob, {
+      channel,
+      onProgress: handleYtProgress,
+      expectedThumbnailPath: project.thumbnailStoragePath,
+      thumbnailExpected,
+    });
+    // Clear the "published without its thumbnail" marker (set by the automation recipes, surfaced in
+    // the dashboard) once a retry from here actually attaches one. Autosave persists it.
+    if (ok && project.thumbnailPublishFailed) setProject((p) => ({ ...p, thumbnailPublishFailed: false }));
+    return ok;
   }
 
   async function runCaptions(videoId) {
@@ -377,13 +393,16 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       setYtFormError('Scheduled publish time must be in the future.');
       return;
     }
-    // A thumbnail was made and backed up for this video (thumbnailStoragePath set) but isn't
-    // actually loaded right now (thumbReady false — most likely the Storage restore above failed).
-    // Blocks the click instead of letting it through to publish with no cover unnoticed — same
-    // failure youtubePublishEngine.js's setThumbnail now also refuses to silently swallow, caught
-    // here BEFORE the upload even starts instead of after. THUMBNAIL_NOT_READY is a sentinel the
-    // render below recognizes to show a clickable retry rather than plain text.
-    if (project.thumbnailStoragePath && !thumbReady) {
+    // A custom thumbnail is intended for this video — either it was made and backed up
+    // (thumbnailStoragePath set) or the outline defined a concept for it (project.thumbnails
+    // non-empty) — but it isn't actually loaded right now (thumbReady false: the Storage restore
+    // failed, or a reload lost the in-memory canvas, e.g. right after reconnecting YouTube). Blocks
+    // the click instead of letting it through to publish with no cover unnoticed — same failure
+    // youtubePublishEngine.js's setThumbnail now also refuses to silently swallow, caught here
+    // BEFORE the upload even starts. THUMBNAIL_NOT_READY is a sentinel the render below recognizes
+    // to show a clickable retry rather than plain text.
+    const thumbnailIntended = !!project.thumbnailStoragePath || (Array.isArray(project.thumbnails) && project.thumbnails.length > 0);
+    if (thumbnailIntended && !thumbReady) {
       setYtFormError('THUMBNAIL_NOT_READY');
       return;
     }
@@ -677,14 +696,20 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
           {ytFormError === 'THUMBNAIL_NOT_READY' ? (
             <div style={{ marginTop: 12, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
-              Thumbnail failed to load —{' '}
-              <button
-                onClick={restoreThumbnailFromStorage}
-                style={{ background: 'none', border: 'none', padding: 0, color: T.primary, textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
-              >
-                click here to retry
-              </button>{' '}
-              before publishing.
+              {project.thumbnailStoragePath ? (
+                <>
+                  Thumbnail failed to load —{' '}
+                  <button
+                    onClick={restoreThumbnailFromStorage}
+                    style={{ background: 'none', border: 'none', padding: 0, color: T.primary, textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+                  >
+                    click here to retry
+                  </button>{' '}
+                  before publishing.
+                </>
+              ) : (
+                <>This video is meant to have a custom thumbnail but none is ready — generate one in the Thumbnail section above before publishing.</>
+              )}
             </div>
           ) : (
             ytFormError && <div style={{ marginTop: 12, fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>{ytFormError}</div>

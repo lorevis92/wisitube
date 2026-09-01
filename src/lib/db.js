@@ -542,6 +542,9 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
         displayTitle: v.displayTitle || v.topic || 'Untitled video',
         createdAt: v.createdAt,
         youtubeVideoId: v.youtubeVideoId || null,
+        // Published, but its custom thumbnail failed to attach (see the recipes' youtube phase) —
+        // the dashboard flags it so the owner knows to retry the thumbnail from ExportStep.
+        thumbnailPublishFailed: v.thumbnailPublishFailed === true && !!v.youtubeVideoId,
       });
     }
   }

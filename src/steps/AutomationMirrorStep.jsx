@@ -610,6 +610,11 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                       <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
                         {item.channelName} · started {formatDateTime(item.createdAt)}
                       </div>
+                      {item.thumbnailPublishFailed && (
+                        <div style={{ ...mono, fontSize: 11, color: T.yellow, marginTop: 4 }}>
+                          ⚠ Published without its custom thumbnail — open it in Export and retry the thumbnail step (no re-upload needed).
+                        </div>
+                      )}
                     </div>
                     {item.youtubeVideoId ? (
                       <a

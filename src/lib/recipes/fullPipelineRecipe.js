@@ -884,9 +884,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       };
 
       // publishToYoutube never throws for a degraded (but non-fatal) thumbnail/captions/playlist
-      // phase — same as the manual UI, where each of those stays independently retryable and
-      // doesn't block the upload that already succeeded. Collected here only to attach a warning
-      // to the 'success' log message, not to fail the phase outright.
+      // phase — the video upload already succeeded and re-running it would risk a duplicate. Each
+      // sub-error is collected here; a video that goes live WITHOUT its custom thumbnail (or
+      // captions, or playlist) is not a clean 'success' though — it used to be logged as one, green,
+      // with the real problem buried in a "with issues:" suffix nobody reads. It's now logged with
+      // a distinct 'published_with_issues' status (amber in AutomationStep's history), and a missing
+      // thumbnail specifically is persisted so the dashboard can flag it and the owner can retry the
+      // thumbnail from ExportStep without re-uploading the video.
       const subErrors = [];
       youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
         channel,
@@ -902,13 +906,30 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       // Persisted so a later Storyboard/Editor/Export session (or a resumed browser tab) knows
       // this video is already live — without this, ExportStep.jsx would have no way to tell and
       // could re-upload the same video as a duplicate. youtubePublishedAt drives the storage
-      // cleanup window (src/lib/mediaArchival.js).
-      project = { ...project, youtubeVideoId, youtubePublishedAt: project.youtubePublishedAt || Date.now() };
+      // cleanup window (src/lib/mediaArchival.js). thumbnailPublishFailed is set/cleared every
+      // publish so a retry that succeeds clears the flag.
+      const thumbnailPublishFailed = subErrors.some((m) => m.startsWith('thumbnail:'));
+      project = {
+        ...project,
+        youtubeVideoId,
+        youtubePublishedAt: project.youtubePublishedAt || Date.now(),
+        thumbnailPublishFailed,
+      };
       await persist();
 
-      const message = subErrors.length ? `published (${youtubeVideoId}) with issues: ${subErrors.join('; ')}` : `published (${youtubeVideoId})`;
-      await logStep(channelId, videoId, 'youtube', 'success', message);
-      report('youtube', 'Published to YouTube');
+      if (subErrors.length) {
+        await logStep(
+          channelId,
+          videoId,
+          'youtube',
+          'published_with_issues',
+          `published (${youtubeVideoId}) but ${subErrors.length} finishing step(s) failed: ${subErrors.join('; ')}`
+        );
+        report('youtube', `Published — but ${subErrors.map((m) => m.split(':')[0]).join(', ')} failed`);
+      } else {
+        await logStep(channelId, videoId, 'youtube', 'success', `published (${youtubeVideoId})`);
+        report('youtube', 'Published to YouTube');
+      }
     } catch (err) {
       if (isNetworkError(err)) {
         const message =

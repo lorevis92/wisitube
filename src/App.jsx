@@ -604,6 +604,7 @@ export default function App() {
       // refuse to offer a full re-upload (see its project.youtubeVideoId branch).
       youtubeVideoId: record.youtubeVideoId || null,
       youtubePublishedAt: record.youtubePublishedAt || null,
+      thumbnailPublishFailed: record.thumbnailPublishFailed === true,
       pendingImageBatches: record.pendingImageBatches || [],
       batchRecoveryCycles: record.batchRecoveryCycles || 0,
       // Same reason as staticBackground/staticTextStyle above: without these, resuming this video

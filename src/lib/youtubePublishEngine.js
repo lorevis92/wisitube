@@ -130,22 +130,29 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
 /**
  * Attaches a custom thumbnail to a video that's just finished uploading.
  *
- * expectedThumbnailPath: pass project.thumbnailStoragePath so a falsy thumbnailBlob can be told
- * apart from two very different situations: no thumbnail was ever made for this video (falsy path
- * too — a genuine no-op, YouTube's auto-picked one applies, returns true silently as before), or
- * one WAS made and backed up (path present) but the blob isn't available right now — a real
- * failure (a failed Storage restore, most likely — see ExportStep.jsx's restoreThumbnailFromStorage)
- * that used to be silently swallowed as if it were the first case, letting a video go live with no
- * cover unnoticed. That case is now reported through onProgress like every other phase failure
- * here, and returns false instead of true.
+ * expectedThumbnailPath / thumbnailExpected: two ways to say "this video is supposed to have a
+ * custom thumbnail", so a falsy thumbnailBlob can be told apart from a genuine "no custom thumbnail
+ * wanted" no-op (YouTube's auto-picked one applies, returns true silently). expectedThumbnailPath
+ * is project.thumbnailStoragePath — set once a thumbnail was generated AND backed up to Storage.
+ * thumbnailExpected is a plain boolean for the case where the backup itself never succeeded (so
+ * there's no storagePath) but a thumbnail was still meant to exist — automation always passes true;
+ * the manual flow passes true whenever the outline defined a thumbnail concept. Either one being
+ * truthy with no blob is a real failure (a failed Storage restore, an in-memory canvas lost to a
+ * reload, a backup that silently failed at generation) — reported through onProgress like every
+ * other phase failure here, returns false instead of letting the video go live coverless unnoticed.
  */
-export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress, expectedThumbnailPath } = {}) {
-  console.log('[yt-upload] phase=runThumbnail:enter', { videoId, hasThumbnail: !!thumbnailBlob, expectedThumbnailPath: !!expectedThumbnailPath });
+export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress, expectedThumbnailPath, thumbnailExpected } = {}) {
+  console.log('[yt-upload] phase=runThumbnail:enter', {
+    videoId,
+    hasThumbnail: !!thumbnailBlob,
+    expectedThumbnailPath: !!expectedThumbnailPath,
+    thumbnailExpected: !!thumbnailExpected,
+  });
   if (!thumbnailBlob) {
-    if (expectedThumbnailPath) {
+    if (expectedThumbnailPath || thumbnailExpected) {
       const message =
-        'A thumbnail was created for this video but could not be loaded for upload — the video published without a custom thumbnail. Restore or regenerate it from the Storyboard/Export page and retry.';
-      console.error('[yt-upload] phase=runThumbnail:missing-blob-but-expected', { videoId, expectedThumbnailPath });
+        'A thumbnail was expected for this video but could not be loaded for upload — the video published without a custom thumbnail. Restore or regenerate it from the Storyboard/Export page and retry.';
+      console.error('[yt-upload] phase=runThumbnail:missing-blob-but-expected', { videoId, expectedThumbnailPath, thumbnailExpected });
       onProgress?.({ kind: 'error', phase: 'thumbnail', message });
       return false;
     }
@@ -291,7 +298,14 @@ export async function publishToYoutube(project, videoBlob, thumbnailBlob, { chan
   const videoId = await uploadVideo(project, videoBlob, { channel, metadata, onProgress });
   console.log('[yt-upload] phase=publishToYoutube:after-upload', { videoId });
   if (videoId) {
-    await setThumbnail(videoId, thumbnailBlob, { channel, onProgress, expectedThumbnailPath: project.thumbnailStoragePath });
+    // Called from the automation recipes only — a full-pipeline/static-background video ALWAYS has a
+    // thumbnail phase, so a missing blob here is always a real failure, never an intentional skip.
+    await setThumbnail(videoId, thumbnailBlob, {
+      channel,
+      onProgress,
+      expectedThumbnailPath: project.thumbnailStoragePath,
+      thumbnailExpected: true,
+    });
     await setCaptions(videoId, project, { channel, metadata, onProgress });
     await addToSeriesPlaylist(videoId, project, { channel, metadata, onProgress });
   }

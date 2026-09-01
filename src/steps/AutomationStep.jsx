@@ -116,6 +116,10 @@ function statusColor(status) {
   // message itself makes it unmistakable.
   if (status === 'credit_exhausted') return T.yellow;
   if (status === 'low_balance_warning') return T.yellow;
+  // The video reached YouTube, but a finishing step (thumbnail / captions / playlist) failed — the
+  // upload itself succeeded so it's not a red 'error', but it's not a clean green 'success' either:
+  // most often a custom thumbnail that never made it, which needs a manual retry from ExportStep.
+  if (status === 'published_with_issues') return T.yellow;
   if (status === 'skipped') return T.textMuted;
   return T.green;
 }

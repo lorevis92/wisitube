@@ -50,6 +50,7 @@ export function buildArchivedProject(record) {
     youtubeVideoId: record.youtubeVideoId || null,
     youtubeUploadStarted: record.youtubeUploadStarted === true,
     youtubePublishedAt: Number(record.youtubePublishedAt) || null,
+    thumbnailPublishFailed: record.thumbnailPublishFailed === true,
     createdByAutomation: record.createdByAutomation === true,
     subtitles: !!record.subtitles,
     // dashboard preview
