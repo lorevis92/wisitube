@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, mono } from '../theme';
-import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, persistVideoMediaProgress, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
-import { resumePendingBatches } from '../lib/batchResumption';
+import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 import { runManagedResume } from '../lib/automationScheduler';
 import { planMediaCleanup, runMediaCleanup, ARCHIVE_AFTER_DAYS } from '../lib/mediaArchival';
@@ -145,45 +144,17 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  // Moved here from AutomationStep.jsx's old "Batches in flight" panel — same function, same
-  // resumePendingBatches call, just triggered from a "Videos in progress" row instead. Re-loads the
-  // full video record (the dashboard list only carries display fields, not the whole
-  // scenes/pendingImageBatches payload), checks its Gemini Batch jobs for anything newly ready, and
-  // persists whatever resumePendingBatches downloaded.
-  async function checkVideoForUpdates(item) {
+  // Runs the channel's own recipe for THIS one video (targetVideoId), through runManagedResume so it
+  // takes the same currently_running lock a scheduled cycle takes (the two are mutually exclusive,
+  // never overlapping on the same channel). The recipe resumes from wherever the video actually left
+  // off (determineResumePhase): a video still awaiting Gemini Batch re-enters the media phase, which
+  // polls Google, and — crucially — if that poll finds every image ready it carries straight on to
+  // render → thumbnail → publish in the SAME call, exactly as an automation cycle would. So both
+  // "Check for updates" (awaiting_batch) and "Resume now" (any other phase) funnel through here:
+  // "check" is just "resume" for a video whose next phase happens to be media.
+  async function continueVideo(item, busyLabel) {
     setBusyVideoId(item.videoId);
-    setBusyLabel('Checking…');
-    try {
-      const video = await loadVideo(item.videoId);
-      if (!video) return;
-      await resumePendingBatches(video, {
-        userId,
-        videoId: item.videoId,
-        channelId: item.channelId,
-        settings: { style: item.style, imageProvider: item.imageProvider },
-        // Merge-persist: the automation cycle may be resolving this same video's batches right now.
-        persist: (p) => persistVideoMediaProgress(p),
-      });
-    } catch (err) {
-      console.error('[AutomationMirrorStep] failed to check batch updates for video', item.videoId, err);
-      window.alert(`Could not check for updates on "${item.displayTitle}": ${String(err.message || err)}`);
-    } finally {
-      setBusyVideoId(null);
-      loadIncomplete();
-    }
-  }
-
-  // "Resume now" — runs just this one video's next phase (and however many follow, in the same
-  // call — see the recipes' shouldRunPhase gating) via the channel's own recipe with targetVideoId
-  // set, so the recipe touches ONLY this video (never findResumableVideo, never the per-channel
-  // exhaustion loop). Routed through runManagedResume so it takes the SAME currently_running lock a
-  // scheduled cycle takes: the two are now mutually exclusive. Before this, the manual resume ran
-  // completely outside the lock, so a scheduler tick firing at the same instant would start a full
-  // runAutomationCycle that resumed other videos on the same channel (and could double-submit
-  // Gemini Batch chunks for this very one) — one click appearing to start several videos at once.
-  async function resumeVideoNow(item) {
-    setBusyVideoId(item.videoId);
-    setBusyLabel('Resuming…');
+    setBusyLabel(busyLabel);
     try {
       const channel = await loadChannel(item.channelId);
       if (!channel) throw new Error('Channel not found');
@@ -191,17 +162,20 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
       if (!recipe) throw new Error(`No recipe available for content_type "${channel.content_type || '(none)'}"`);
       const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
       if (!result.started) {
-        window.alert(`Can't resume "${item.displayTitle}" right now — ${result.reason}`);
+        window.alert(`Can't work on "${item.displayTitle}" right now — ${result.reason}`);
       }
     } catch (err) {
-      console.error('[AutomationMirrorStep] failed to resume video', item.videoId, err);
-      window.alert(`Could not resume "${item.displayTitle}": ${String(err.message || err)}`);
+      console.error('[AutomationMirrorStep] failed to continue video', item.videoId, err);
+      window.alert(`Could not continue "${item.displayTitle}": ${String(err.message || err)}`);
     } finally {
       setBusyVideoId(null);
       loadIncomplete();
       loadCompleted();
     }
   }
+
+  const checkVideoForUpdates = (item) => continueVideo(item, 'Checking…');
+  const resumeVideoNow = (item) => continueVideo(item, 'Resuming…');
 
   // "Reset & retry" — clears the stuck marker (db.js's resetStuckVideo) so this video is eligible
   // for automatic resumption again and "Resume now" stops being disabled for it.
