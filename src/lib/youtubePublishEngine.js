@@ -27,6 +27,43 @@ function blobToDataUri(blob) {
   });
 }
 
+// YouTube's thumbnails.set caps the image at 2 MB and returns HTTP 400 "The provided image content
+// is invalid" (reason invalidImage) for anything over it — a 1280x720 photo-real image saved as
+// lossless PNG (what thumbnailEngine.js and ExportStep's canvas produced until now, and what older
+// videos have backed up in Storage) routinely lands at 2–5 MB. Re-encode through a canvas to JPEG
+// q0.9 (~150–400 KB, baked-in typography survives fine) unless the blob is already a comfortably
+// small JPEG. Runs client-side, like the rest of this module.
+const YT_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
+
+async function toYoutubeThumbnailDataUri(blob) {
+  const alreadyFine = blob.type === 'image/jpeg' && blob.size <= 1.8 * 1024 * 1024;
+  if (alreadyFine) return blobToDataUri(blob);
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const w = bitmap.width || 1280;
+    const h = bitmap.height || 720;
+    let canvas;
+    if (typeof OffscreenCanvas !== 'undefined') {
+      canvas = new OffscreenCanvas(w, h);
+    } else {
+      canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const jpeg = canvas.convertToBlob
+      ? await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 })
+      : await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    if (jpeg && jpeg.size > 0 && jpeg.size <= YT_THUMBNAIL_MAX_BYTES) return blobToDataUri(jpeg);
+    // Re-encode didn't help (or produced nothing) — fall through to the original.
+  } catch (err) {
+    console.error('[yt-upload] thumbnail re-encode to JPEG failed, sending original bytes', err);
+  }
+  return blobToDataUri(blob);
+}
+
 /**
  * Uploads the rendered video and creates the YouTube video (private/scheduled/public per
  * metadata.privacyStatus/publishAt). Returns the new video id, or null on failure (the failure
@@ -161,8 +198,13 @@ export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress
   onProgress?.({ kind: 'error-clear', phase: 'thumbnail' });
   try {
     const refreshToken = channel?.youtube_refresh_token;
-    const dataUrl = await blobToDataUri(thumbnailBlob);
-    console.log('[yt-upload] phase=set-thumbnail:before', { videoId, dataUrlLength: dataUrl?.length });
+    const dataUrl = await toYoutubeThumbnailDataUri(thumbnailBlob);
+    console.log('[yt-upload] phase=set-thumbnail:before', {
+      videoId,
+      dataUrlLength: dataUrl?.length,
+      sourceType: thumbnailBlob.type,
+      sourceBytes: thumbnailBlob.size,
+    });
     let res;
     try {
       res = await fetch('/api/youtube', {

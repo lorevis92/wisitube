@@ -26,9 +26,12 @@ function makeCanvas(width, height) {
   return c;
 }
 
+// JPEG, not PNG: YouTube caps thumbnails at 2 MB and rejects anything larger with an opaque
+// HTTP 400 "invalidImage". A 1280x720 photo-real image as lossless PNG routinely hits 2–5 MB;
+// the same frame as JPEG q0.9 is ~150–400 KB and the baked-in typography survives it fine.
 function canvasToBlob(c) {
-  if (typeof c.convertToBlob === 'function') return c.convertToBlob({ type: 'image/png' });
-  return new Promise((resolve) => c.toBlob(resolve, 'image/png'));
+  if (typeof c.convertToBlob === 'function') return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+  return new Promise((resolve) => c.toBlob(resolve, 'image/jpeg', 0.9));
 }
 
 // Same telegraphic-vs-natural-language branching StoryboardStep.jsx's prompt builder uses for

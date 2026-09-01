@@ -355,7 +355,12 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   async function runThumbnail(videoId) {
     // no custom thumbnail made — YouTube's auto-picked one applies; skip the toBlob() call entirely.
-    const thumbBlob = thumbReady ? await new Promise((resolve) => thumbCanvasRef.current.toBlob(resolve, 'image/png')) : null;
+    // JPEG q0.9, not PNG: a 1280x720 photo-real frame as PNG can exceed YouTube's 2 MB thumbnail
+    // limit and come back HTTP 400 "invalidImage" (youtubePublishEngine.js re-encodes as a safety
+    // net, but producing it right here avoids the round trip).
+    const thumbBlob = thumbReady
+      ? await new Promise((resolve) => thumbCanvasRef.current.toBlob(resolve, 'image/jpeg', 0.9))
+      : null;
     // The outline always produces at least one thumbnail concept for a full-pipeline video, so a
     // custom thumbnail is intended whenever project.thumbnails is non-empty — even if it was never
     // backed up to Storage (no thumbnailStoragePath). Without this, a reload that loses the

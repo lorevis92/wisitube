@@ -522,7 +522,7 @@ async function setThumbnail(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate the request body.
-    let videoId, refreshTokenValue, imageBuffer;
+    let videoId, refreshTokenValue, imageBuffer, imageMime;
     try {
       const body = req.body || {};
       videoId = typeof body.videoId === 'string' ? body.videoId.trim() : '';
@@ -533,10 +533,23 @@ async function setThumbnail(req, res) {
 
       const raw = typeof body.thumbnailBlob === 'string' ? body.thumbnailBlob : '';
       if (!raw) return res.status(400).json({ error: 'Invalid thumbnailBlob' });
-      // Accept both a bare base64 payload and a full data: URL — strip the prefix if present.
-      const base64 = raw.includes(',') ? raw.slice(raw.indexOf(',') + 1) : raw;
+      // Accept both a bare base64 payload and a full data: URL — strip the prefix if present, and
+      // carry the real MIME through from the data: URL rather than assuming PNG (YouTube accepts
+      // JPG/GIF/BMP/PNG; sending JPEG bytes labelled image/png can trip its content sniffing).
+      const comma = raw.indexOf(',');
+      const header = comma === -1 ? '' : raw.slice(0, comma);
+      const base64 = comma === -1 ? raw : raw.slice(comma + 1);
+      const mimeMatch = /^data:([a-z]+\/[a-z0-9.+-]+)/i.exec(header);
+      imageMime = mimeMatch && /^image\//i.test(mimeMatch[1]) ? mimeMatch[1].toLowerCase() : 'image/png';
       imageBuffer = Buffer.from(base64, 'base64');
       if (!imageBuffer.length) return res.status(400).json({ error: 'Empty thumbnailBlob' });
+      // YouTube rejects anything over 2 MB with an opaque HTTP 400 "invalidImage" — catch it here
+      // with a message that actually says what's wrong.
+      if (imageBuffer.length > 2 * 1024 * 1024) {
+        return res.status(400).json({
+          error: `Thumbnail is ${(imageBuffer.length / (1024 * 1024)).toFixed(1)} MB — YouTube's limit is 2 MB. Regenerate it (the app now encodes thumbnails as JPEG, which stays well under).`,
+        });
+      }
     } catch (err) {
       console.error('[youtube-set-thumbnail] phase=validate-body', err?.message, err?.stack);
       return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
@@ -568,7 +581,7 @@ async function setThumbnail(req, res) {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'image/png',
+          'Content-Type': imageMime,
         },
         body: imageBuffer,
       });
