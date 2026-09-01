@@ -57,7 +57,9 @@ export async function downloadMediaAsBlob(path) {
 }
 
 // The per-video `kind` sub-folders that hold the heavy, post-publish-useless media — everything
-// except 'thumbnail' (kept for the dashboard preview). See src/lib/mediaArchival.js.
+// except 'thumbnail' (kept for the dashboard preview). See src/lib/mediaArchival.js. 'rendered-video'
+// is no longer written (the final MP4 is never persisted), kept here only so the cleanup still
+// purges the folders left on videos rendered before that change.
 export const ARCHIVABLE_MEDIA_KINDS = ['scene-image', 'scene-audio', 'rendered-video', 'static-background', 'reference'];
 
 // Every file (with byte size) under ${userId}/${videoId}/${kind} for each of the given kinds.

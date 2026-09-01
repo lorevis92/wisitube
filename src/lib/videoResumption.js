@@ -63,11 +63,10 @@ export function determineResumePhase(project, outline) {
   // published" for a manual upload — terminal for automation, don't re-export it every cycle.
   if (project?.localExportedAt) return null;
 
-  // Media + render + thumbnail all done and persisted, and publish was never even started — the only
-  // thing left is a safe first publish. thumbnailStoragePath alone proves render succeeded too (the
-  // thumbnail phase has always run strictly after render in both the manual and automated
-  // pipelines); renderedVideoStoragePath is a newer field that simply doesn't exist on videos
-  // finished before it was added, so requiring both here would misclassify that older population.
+  // Media + thumbnail done, and publish was never even started — the only thing left is a safe first
+  // publish. thumbnailStoragePath proves render succeeded too (the thumbnail phase always runs
+  // strictly after render). The rendered MP4 itself is never persisted, so the recipe's resume
+  // check re-renders it from the persisted images/audio before publishing.
   if (project?.thumbnailStoragePath) return RESUME_PHASE_PUBLISH;
 
   // A non-empty pendingImageBatches is unambiguous, strong evidence of genuinely being mid-media-
@@ -99,10 +98,10 @@ export function determineResumePhase(project, outline) {
   );
   if (!mediaReady) return 'media';
 
-  if (!project?.renderedVideoStoragePath) return 'render';
-  // A truthy thumbnailStoragePath was already handled above (→ RESUME_PHASE_PUBLISH), so if we're
-  // here the thumbnail still needs to be made.
-  return 'thumbnail';
+  // Media is ready and the thumbnail still needs making (a truthy thumbnailStoragePath was handled
+  // above → RESUME_PHASE_PUBLISH). The rendered MP4 is never persisted, so resume always re-renders
+  // from the persisted images/audio, then makes the thumbnail.
+  return 'render';
 }
 
 /**

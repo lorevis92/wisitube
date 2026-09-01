@@ -119,18 +119,8 @@ export async function rehydrateProjectMedia(project) {
     }
   }
 
-  // Same "blob nulled out by stripBlobsForSync, storagePath is the durable copy" pattern — the
-  // rendered MP4 (see the recipes' render phase, which now uploads it via uploadMedia the same way
-  // thumbnails already were) so a resumed session can skip re-rendering entirely when only a later
-  // phase (thumbnail/YouTube) was actually interrupted.
-  let renderedVideoBlob = project.renderedVideoBlob;
-  if (!renderedVideoBlob && project.renderedVideoStoragePath) {
-    try {
-      renderedVideoBlob = await downloadMediaAsBlob(project.renderedVideoStoragePath);
-    } catch (err) {
-      console.error('[mediaRehydration] could not restore rendered video from storage', project.renderedVideoStoragePath, err);
-    }
-  }
-
-  return { ...project, scenes, references, staticBackground, renderedVideoBlob };
+  // The rendered MP4 is deliberately never persisted (only images, audio and the thumbnail are), so
+  // there's nothing to restore here — a resumed session always re-renders it from those materials.
+  // renderedVideoBlob is only ever a live in-memory blob from the current session.
+  return { ...project, scenes, references, staticBackground, renderedVideoBlob: project.renderedVideoBlob || null };
 }

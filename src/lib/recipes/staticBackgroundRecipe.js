@@ -29,7 +29,6 @@ import { withTimeout } from '../asyncTimeout';
 
 // Hang guards for render/thumbnail — see fullPipelineRecipe.js's identical constants.
 const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
-const RENDERED_UPLOAD_TIMEOUT_MS = 8 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
@@ -515,6 +514,9 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   }
 
   // ---- Phase: render ----
+  // The rendered MP4 is never persisted — only images, audio and the thumbnail are. On a resume
+  // project.renderedVideoBlob is always null so this phase always runs, re-rendering from the
+  // persisted materials. See fullPipelineRecipe.js's identical phase.
   let videoBlob = project.renderedVideoBlob || null;
   if (shouldRunPhase(resumePhase, 'render')) {
   try {
@@ -527,14 +529,9 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         RENDER_TIMEOUT_MS,
         'Video render'
       );
-      // Backed up to Storage (same pattern as the thumbnail phase below) so a resumed session
-      // interrupted anywhere after this point can skip re-rendering entirely.
-      const renderedVideoStoragePath = await withTimeout(
-        () => uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob),
-        RENDERED_UPLOAD_TIMEOUT_MS,
-        'Rendered video upload to Storage'
-      );
-      project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
+      // Kept in-memory on `project` only for the thumbnail/publish phases in this same call
+      // (stripped on every save — stripBlobsForSync). Never backed up to Storage.
+      project = { ...project, renderedVideoBlob: videoBlob };
       await persist();
     });
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');

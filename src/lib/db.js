@@ -181,7 +181,6 @@ const VIDEO_DOWNSTREAM_FIELDS = [
   'localExportedAt',
   'thumbnailPublishFailed',
   'thumbnailStoragePath',
-  'renderedVideoStoragePath',
   'stuckError',
   'mediaArchived',
 ];

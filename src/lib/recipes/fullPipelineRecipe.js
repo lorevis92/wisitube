@@ -225,7 +225,6 @@ const DEFAULT_YOUTUBE_CATEGORY_ID = '27'; // Education
 // (and the whole automation cycle) forever with no error row. Generous — these are "definitely
 // stuck", not "slow but working" thresholds.
 const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
-const RENDERED_UPLOAD_TIMEOUT_MS = 8 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 
@@ -377,11 +376,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   if (resumable) {
     videoId = resumable.id;
     createdAt = resumable.createdAt || Date.now();
-    // blob: URLs never survive a reload — a beat/audio/rendered-video that finished on an earlier
-    // cycle (in a browser session that's since closed) has a storagePath but a dead url/blob.
-    // Rehydrating here, before anything below checks readiness or touches media/render/thumbnail/
-    // YouTube, means those phases always see valid, loadable media regardless of which session each
-    // piece was actually completed in.
+    // blob: URLs never survive a reload — a beat/audio that finished on an earlier cycle (in a
+    // browser session that's since closed) has a storagePath but a dead url/blob. Rehydrating here,
+    // before anything below checks readiness or touches media/render/thumbnail/YouTube, means those
+    // phases always see valid, loadable media regardless of which session each piece was completed
+    // in. (The rendered MP4 is not persisted, so it's never among what gets rehydrated — a resume
+    // always re-renders.)
     project = await rehydrateProjectMedia(resumable);
     // Reached via findResumableVideo (no explicit targetVideoId) → this is an automation video by
     // definition; stamp createdByAutomation so one that predates the flag (matched via the outline
@@ -406,11 +406,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     resumedFromNormalBatchWait = Array.isArray(resumable.pendingImageBatches) && resumable.pendingImageBatches.length > 0;
     resumedReadyToPublish = rawResumePhase === RESUME_PHASE_PUBLISH;
 
-    // Safety net: determineResumePhase says render/thumbnail already happened based on a storage
-    // path being present, but the actual Storage download (rehydrateProjectMedia above) can itself
-    // fail — never proceed past render as if a usable video blob exists when it doesn't. (The
-    // resumedReadyToPublish flag stays set even when this downgrades the phase: publishing is still
-    // safe once the re-render + existing-thumbnail restore below finish.)
+    // The rendered MP4 is never persisted, so any resume that lands at thumbnail-or-later has no
+    // usable video blob and must re-render first (from the still-persisted images/audio). The
+    // resumedReadyToPublish flag stays set even through this downgrade: publishing is still a safe
+    // first attempt once the re-render + existing-thumbnail restore below finish.
     if ((resumePhase === 'thumbnail' || resumePhase === RESUME_PHASE_PUBLISH || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
 
     // A video stuck failing the exact same phase over and over (a systematic problem — a bad
@@ -837,9 +836,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   }
 
   // ---- Phase: render ----
-  // videoBlob defaults to whatever rehydrateProjectMedia already restored from
-  // renderedVideoStoragePath (see the resume check above) — only actually re-rendered when
-  // shouldRunPhase says this phase hasn't happened yet.
+  // The rendered MP4 is never persisted (see the phase body below), so on a resume project
+  // .renderedVideoBlob is always null and this phase always runs — a video interrupted after render
+  // is simply re-rendered from the still-persisted images/audio. Within a single fresh run the blob
+  // set here is reused by the thumbnail/publish phases below.
   let videoBlob = project.renderedVideoBlob || null;
   if (shouldRunPhase(resumePhase, 'render')) {
   try {
@@ -852,16 +852,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         RENDER_TIMEOUT_MS,
         'Video render'
       );
-      // Backed up to Storage (same pattern as the thumbnail phase below) — a video the automation
-      // publishes right after this in the same call never needs to read it back, but a resumed
-      // session interrupted anywhere after this point (thumbnail, YouTube) can skip re-rendering
-      // entirely instead of redoing this potentially slow, CPU-heavy phase from scratch.
-      const renderedVideoStoragePath = await withTimeout(
-        () => uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob),
-        RENDERED_UPLOAD_TIMEOUT_MS,
-        'Rendered video upload to Storage'
-      );
-      project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
+      // The rendered MP4 is deliberately NOT persisted anywhere: only images, audio and the
+      // thumbnail are backed up to Storage, and the final render is always regenerated from those
+      // when needed. It's kept in-memory on `project` only for the thumbnail/publish phases below in
+      // THIS same call (stripped on every save — see stripBlobsForSync). A session interrupted after
+      // the render simply re-renders from the persisted materials on the next resume.
+      project = { ...project, renderedVideoBlob: videoBlob };
       await persist();
     });
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');

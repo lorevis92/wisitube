@@ -112,10 +112,9 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   const isYoutubeConnected = !!channel?.youtube_connected;
 
-  // Resuming a video that was already rendered in a previous session: project.renderedVideoBlob
-  // came back from IndexedDB (see App.jsx handleResume), so rebuild the preview/upload state from
-  // it instead of forcing the user to render again just to get a fresh (but functionally
-  // identical) blob: URL.
+  // If a render blob is still in memory from earlier this session (project.renderedVideoBlob),
+  // rebuild the preview/upload state from it. It never survives a reload — the rendered MP4 isn't
+  // persisted anywhere — so a genuinely resumed session just re-renders.
   useEffect(() => {
     if (!videoUrl && project.renderedVideoBlob) {
       setRenderedBlob(project.renderedVideoBlob);
@@ -244,9 +243,10 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       setVideoUrl(URL.createObjectURL(blob));
       setFileExt(ext);
       setRenderedBlob(blob);
-      // Same pattern as scene images/audio (StoryboardStep.jsx) — the Blob rides on the project
-      // record itself, so App.jsx's existing debounced autosave persists it to IndexedDB. That's
-      // what lets a resumed session (see the mount effect above) skip re-rendering entirely.
+      // In-memory only for the rest of this session (thumbnail/publish/download below) — the
+      // rendered MP4 is deliberately never persisted (stripBlobsForSync drops it on every save, and
+      // it's never backed up to Storage). A reload or a resumed session re-renders it from the
+      // persisted images/audio.
       setProject((p) => ({ ...p, renderedVideoBlob: blob }));
     } catch (e) {
       if (e?.name !== 'AbortError') setError('Render failed: ' + String(e.message || e));
