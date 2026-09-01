@@ -16,15 +16,26 @@ export function withTimeout(fn, timeoutMs, label = 'operation') {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  // TEMPORARY debug (render→thumbnail freeze investigation) — remove once root-caused.
+  console.warn(`[rt-debug] withTimeout START — ${label} (limit ${Math.round(timeoutMs / 1000)}s)`);
+  const startedAt = Date.now();
   return Promise.resolve()
     .then(() => fn(controller.signal))
-    .catch((err) => {
-      if (timedOut) {
-        const e = new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s — treating it as a failure rather than waiting forever.`);
-        e.name = 'TimeoutError';
-        throw e;
+    .then(
+      (result) => {
+        console.warn(`[rt-debug] withTimeout DONE — ${label} (${Math.round((Date.now() - startedAt) / 1000)}s)`);
+        return result;
+      },
+      (err) => {
+        if (timedOut) {
+          console.warn(`[rt-debug] withTimeout TIMEOUT — ${label} (after ${Math.round(timeoutMs / 1000)}s)`);
+          const e = new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s — treating it as a failure rather than waiting forever.`);
+          e.name = 'TimeoutError';
+          throw e;
+        }
+        console.warn(`[rt-debug] withTimeout ERROR — ${label} (${Math.round((Date.now() - startedAt) / 1000)}s): ${String(err?.message || err)}`);
+        throw err;
       }
-      throw err;
-    })
+    )
     .finally(() => clearTimeout(timer));
 }

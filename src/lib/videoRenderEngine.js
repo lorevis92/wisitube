@@ -18,6 +18,9 @@ import { renderToMp4 } from './exporter';
  * to WebCodecs' own encoders.
  */
 export async function renderVideoForExport(project, settings, { onProgress, signal } = {}) {
+  // TEMPORARY debug (render→thumbnail freeze investigation) — remove once root-caused.
+  const dbg = (m, x) => console.warn(`[rt-debug] renderVideoForExport — ${m}`, x !== undefined ? x : '');
+  dbg('ENTER', { scenes: project.scenes?.length, contentType: settings.contentType });
   const dims = settings.format === '9:16' ? { W: 720, H: 1280 } : { W: 1280, H: 720 };
   // content_type 'static_background' scenes have no `images` field at all (see App.jsx's
   // buildScenesFromRaw) — nothing to load beats from, drawFrame never reads `images` in this mode
@@ -41,6 +44,7 @@ export async function renderVideoForExport(project, settings, { onProgress, sign
       throw new Error(`Cannot export: ${missing.length} item(s) need regeneration before rendering — ${missing.join(', ')}.`);
     }
   }
+  dbg('missing-media check passed — START loading items (loadImage + decodeAudio for every scene)');
 
   const items = await Promise.all(
     project.scenes.map(async (s) => ({
@@ -52,6 +56,7 @@ export async function renderVideoForExport(project, settings, { onProgress, sign
       narration: s.narration,
     }))
   );
+  dbg('DONE loading items', { count: items.length });
 
   // project.staticBackground.url is a blob: URL — either still live from this session's own
   // generation, or already rebuilt by rehydrateProjectMedia (src/lib/mediaRehydration.js) from
@@ -63,14 +68,24 @@ export async function renderVideoForExport(project, settings, { onProgress, sign
       bg.type === 'image' && bg.url ? { type: 'image', img: await loadImage(bg.url) } : { type: 'color', color: bg.color || '#111111' };
   }
 
-  return renderToMp4({
+  dbg('START renderToMp4');
+  const wrappedOnProgress =
+    typeof onProgress === 'function'
+      ? (a, b) => {
+          if (b && a >= b) console.warn('[rt-debug] renderVideoForExport — renderToMp4 reported 100% frames (finalization/mux next)');
+          onProgress(a, b);
+        }
+      : onProgress;
+  const out = await renderToMp4({
     items,
     width: dims.W,
     height: dims.H,
     subtitles: project.subtitles,
     staticBackground,
     textStyle: project.staticTextStyle,
-    onProgress,
+    onProgress: wrappedOnProgress,
     signal,
   });
+  dbg('DONE renderToMp4', { blobSize: out?.size, blobType: out?.type });
+  return out;
 }

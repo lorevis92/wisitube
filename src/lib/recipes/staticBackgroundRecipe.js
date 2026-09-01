@@ -32,6 +32,10 @@ const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
 const RENDERED_UPLOAD_TIMEOUT_MS = 8 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
+
+// TEMPORARY debug (render→thumbnail freeze investigation) — very loud, remove once root-caused.
+const rt = (videoId, phase, when, extra) =>
+  console.warn(`[rt-debug] [static] videoId=${videoId} | ${phase} | ${when}`, extra !== undefined ? extra : '');
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
@@ -514,11 +518,15 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   }
   }
 
+  rt(videoId, 'transition', 'reached render phase');
+
   // ---- Phase: render ----
   let videoBlob = project.renderedVideoBlob || null;
+  rt(videoId, 'render', `phase reached — willRun=${shouldRunPhase(resumePhase, 'render')} resumePhase=${resumePhase} haveExistingBlob=${!!videoBlob}`);
   if (shouldRunPhase(resumePhase, 'render')) {
   try {
     await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
+      rt(videoId, 'render', 'START renderVideoForExport', { scenes: project.scenes?.length });
       videoBlob = await withTimeout(
         () =>
           renderVideoForExport(project, settings, {
@@ -527,19 +535,27 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         RENDER_TIMEOUT_MS,
         'Video render'
       );
+      rt(videoId, 'render', 'DONE renderVideoForExport', { blobSize: videoBlob?.size, blobType: videoBlob?.type });
       // Backed up to Storage (same pattern as the thumbnail phase below) so a resumed session
       // interrupted anywhere after this point can skip re-rendering entirely.
+      rt(videoId, 'render', 'START upload rendered MP4 to Storage', { blobSize: videoBlob?.size });
       const renderedVideoStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob),
         RENDERED_UPLOAD_TIMEOUT_MS,
         'Rendered video upload to Storage'
       );
+      rt(videoId, 'render', 'DONE upload rendered MP4', { renderedVideoStoragePath });
       project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
+      rt(videoId, 'render', 'START persist after render');
       await persist();
+      rt(videoId, 'render', 'DONE persist after render');
     });
+    rt(videoId, 'render', 'phase block resolved — about to logStep success');
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');
     report('render', 'Render complete');
+    rt(videoId, 'render', 'phase FULLY complete');
   } catch (err) {
+    rt(videoId, 'render', 'CAUGHT ERROR', String(err?.message || err));
     // No DOM-mounted <canvas> exists in the automation context, so WebCodecsUnsupportedError (the
     // manual UI's trigger for its WebM/MediaRecorder fallback) is a hard failure here rather than a
     // fallback opportunity — same known Phase 2a limitation as fullPipelineRecipe.js.
@@ -554,11 +570,14 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // identical to fullPipelineRecipe.js's (thumbnailEngine.js never looks at project.scenes[].images
   // at all — it works from project.thumbnails[thumbIdx], the outline's own thumbnail concepts).
   let thumbnailBlob;
+  rt(videoId, 'thumbnail', `phase reached — willGenerate=${shouldRunPhase(resumePhase, 'thumbnail')} resumePhase=${resumePhase}`);
   if (shouldRunPhase(resumePhase, 'thumbnail')) {
   try {
     await withPhaseNetworkResilience('thumbnail', channelId, videoId, logStep, async () => {
       const concept = plan.thumbnails[0];
+      rt(videoId, 'thumbnail', 'have concept?', { hasConcept: !!concept });
       if (!concept) throw new Error('No thumbnail concept available from the outline');
+      rt(videoId, 'thumbnail', 'START generateThumbnail');
       thumbnailBlob = await generateThumbnail(project, {
         settings,
         channelId,
@@ -568,17 +587,25 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         overlayText: concept.overlay_text || '',
         seed: Math.floor(Math.random() * 999999),
       });
+      rt(videoId, 'thumbnail', 'DONE generateThumbnail', { blobSize: thumbnailBlob?.size, blobType: thumbnailBlob?.type });
+      rt(videoId, 'thumbnail', 'START upload thumbnail to Storage');
       const thumbnailStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),
         THUMBNAIL_UPLOAD_TIMEOUT_MS,
         'Thumbnail upload to Storage'
       );
+      rt(videoId, 'thumbnail', 'DONE upload thumbnail', { thumbnailStoragePath });
       project = { ...project, thumbnailStoragePath };
+      rt(videoId, 'thumbnail', 'START persist after thumbnail');
       await persist();
+      rt(videoId, 'thumbnail', 'DONE persist after thumbnail');
     });
+    rt(videoId, 'thumbnail', 'phase block resolved — about to logStep success');
     await logStep(channelId, videoId, 'thumbnail', 'success', 'thumbnail created');
     report('thumbnail', 'Thumbnail ready');
+    rt(videoId, 'thumbnail', 'phase FULLY complete');
   } catch (err) {
+    rt(videoId, 'thumbnail', 'CAUGHT ERROR', String(err?.message || err));
     await logStep(channelId, videoId, 'thumbnail', 'error', String(err?.message || err));
     throw err;
   }
@@ -586,17 +613,29 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     // Already done on an earlier attempt — read the backed-up thumbnail back rather than
     // regenerating it, since it's about to be needed for the YouTube phase below.
     try {
+      rt(videoId, 'thumbnail', 'START restore thumbnail from Storage', { path: project.thumbnailStoragePath });
       thumbnailBlob = await withTimeout(
         () => downloadMediaAsBlob(project.thumbnailStoragePath),
         THUMBNAIL_RESTORE_TIMEOUT_MS,
         'Thumbnail restore from Storage'
       );
+      rt(videoId, 'thumbnail', 'DONE restore thumbnail', { blobSize: thumbnailBlob?.size });
     } catch (err) {
+      rt(videoId, 'thumbnail', 'CAUGHT ERROR (restore)', String(err?.message || err));
       console.error('[staticBackgroundRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
       await logStep(channelId, videoId, 'thumbnail', 'error', `could not restore the saved thumbnail: ${String(err?.message || err)}`);
       throw err;
     }
   }
+
+  rt(videoId, 'publish', 'reached publish decision', {
+    exportMode: channel.automation_export_mode || 'youtube',
+    hasVideoBlob: !!videoBlob,
+    videoBlobSize: videoBlob?.size,
+    hasThumbBlob: !!thumbnailBlob,
+    thumbBlobSize: thumbnailBlob?.size,
+    autoPublish: channel.automation_auto_publish,
+  });
 
   // ---- Phase: publish (local folder export) ----
   // See fullPipelineRecipe.js's identical branch: 'local_folder' mode writes the finished files to
@@ -604,7 +643,9 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // published".
   if (channel.automation_export_mode === 'local_folder') {
     try {
+      rt(videoId, 'publish', 'START buildSrtFromScenes (local_folder)');
       const srt = buildSrtFromScenes(project.scenes, true);
+      rt(videoId, 'publish', 'START runLocalExport');
       const folder = await runLocalExport({
         channelName: channel.name,
         dateStr: exportDateString(createdAt),
@@ -624,6 +665,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           madeForKids: channel.automation_made_for_kids === true,
         },
       });
+      rt(videoId, 'publish', 'DONE runLocalExport', { folder });
       project = { ...project, localExportedAt: Date.now() };
       await persist();
       await logStep(
@@ -634,8 +676,10 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         `exported to local folder "${folder}" — upload it to YouTube manually, then use "Mark as published"`
       );
       report('youtube', `Exported to ${folder}`);
+      rt(videoId, 'publish', 'local_folder export FULLY complete');
       return { videoId, youtubeVideoId: null, costUsd: await totalCostForVideo(channelId, videoId) };
     } catch (err) {
+      rt(videoId, 'publish', 'CAUGHT ERROR (local_folder)', String(err?.message || err));
       await logStep(channelId, videoId, 'youtube', 'error', `local folder export failed: ${String(err?.message || err)}`);
       throw err;
     }
@@ -649,6 +693,11 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // genuine anomalous mid-generation interruption blocks auto-publish; a video that was simply
   // resumed and finished (or is a safe ready-to-publish resume) still publishes.
   const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
+  rt(videoId, 'publish', 'entering YouTube branch', {
+    autoPublishOff: channel.automation_auto_publish === false,
+    anomalousInterruption,
+    wasResumed,
+  });
   if (channel.automation_auto_publish === false) {
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
@@ -681,6 +730,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       };
 
       const subErrors = [];
+      rt(videoId, 'publish', 'START publishToYoutube');
       youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
         channel,
         metadata,
@@ -689,6 +739,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
         },
       });
+      rt(videoId, 'publish', 'DONE publishToYoutube', { youtubeVideoId, subErrors });
 
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 

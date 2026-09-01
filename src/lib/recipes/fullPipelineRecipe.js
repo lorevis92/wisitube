@@ -36,6 +36,10 @@ import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
+// TEMPORARY debug (render→thumbnail freeze investigation) — very loud, remove once root-caused.
+const rt = (videoId, phase, when, extra) =>
+  console.warn(`[rt-debug] [full] videoId=${videoId} | ${phase} | ${when}`, extra !== undefined ? extra : '');
+
 // Finds the most recent video on this channel that isn't in a terminal state — published
 // (youtubeVideoId set) or explicitly abandoned (stuckError set, see the resume-attempt tracking
 // below) — and that still has something automation can safely do next (determineResumePhase !==
@@ -773,15 +777,19 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         // have downloaded the last few images while this cycle was running) BEFORE deciding whether
         // media is done. Without this the decision runs on this cycle's own snapshot, which is
         // exactly how a video that's actually complete keeps getting left "in progress".
+        rt(videoId, 'media', 'START persistMedia (batch, final readiness merge)');
         await persistMedia();
         const nowAllReady = project.scenes.every((s) => s.audioStatus === 'ready' && (s.images || []).every((im) => im.status === 'ready'));
+        rt(videoId, 'media', 'DONE persistMedia', { nowAllReady });
         if (!nowAllReady) {
           mediaStillInProgress = true;
         } else {
           // Complete — but the merge may have adopted beats/audio a CONCURRENT writer finished, which
           // this process only has a storagePath for, not a blob. Rehydrate so the render phase below
           // sees a usable blob for every scene (no-op for beats that already have one).
+          rt(videoId, 'media', 'START rehydrateProjectMedia (batch, pre-render)');
           project = await rehydrateProjectMedia(project);
+          rt(videoId, 'media', 'DONE rehydrateProjectMedia');
         }
       } else {
         await generateAllMedia(project, { settings, channelId, userId, videoId, onProgress: mediaOnProgress });
@@ -791,6 +799,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       }
     });
 
+    rt(videoId, 'media', 'phase block resolved', { mediaStillInProgress });
     if (mediaStillInProgress) {
       const readyCount = project.scenes.reduce((n, s) => n + (s.images || []).filter((im) => im.status === 'ready').length, 0);
       const totalCount = project.scenes.reduce((n, s) => n + (s.images || []).length, 0);
@@ -833,17 +842,22 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // Not a failure — this video will be picked up again by the resume check on a later cycle.
     // automationEngine.js treats inProgress specially: no upload-count increment (nothing was
     // actually produced yet) and no exhaustion-loop retry on this same channel this cycle.
+    rt(videoId, 'media', 'returning inProgress:true (still waiting on batch)');
     return { videoId, youtubeVideoId: null, costUsd: await totalCostForVideo(channelId, videoId), inProgress: true };
   }
+
+  rt(videoId, 'transition', 'media complete — proceeding to render phase');
 
   // ---- Phase: render ----
   // videoBlob defaults to whatever rehydrateProjectMedia already restored from
   // renderedVideoStoragePath (see the resume check above) — only actually re-rendered when
   // shouldRunPhase says this phase hasn't happened yet.
   let videoBlob = project.renderedVideoBlob || null;
+  rt(videoId, 'render', `phase reached — willRun=${shouldRunPhase(resumePhase, 'render')} resumePhase=${resumePhase} haveExistingBlob=${!!videoBlob}`);
   if (shouldRunPhase(resumePhase, 'render')) {
   try {
     await withPhaseNetworkResilience('render', channelId, videoId, logStep, async () => {
+      rt(videoId, 'render', 'START renderVideoForExport', { scenes: project.scenes?.length });
       videoBlob = await withTimeout(
         () =>
           renderVideoForExport(project, settings, {
@@ -852,21 +866,29 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         RENDER_TIMEOUT_MS,
         'Video render'
       );
+      rt(videoId, 'render', 'DONE renderVideoForExport', { blobSize: videoBlob?.size, blobType: videoBlob?.type });
       // Backed up to Storage (same pattern as the thumbnail phase below) — a video the automation
       // publishes right after this in the same call never needs to read it back, but a resumed
       // session interrupted anywhere after this point (thumbnail, YouTube) can skip re-rendering
       // entirely instead of redoing this potentially slow, CPU-heavy phase from scratch.
+      rt(videoId, 'render', 'START upload rendered MP4 to Storage', { blobSize: videoBlob?.size });
       const renderedVideoStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'rendered-video', 'video', videoBlob),
         RENDERED_UPLOAD_TIMEOUT_MS,
         'Rendered video upload to Storage'
       );
+      rt(videoId, 'render', 'DONE upload rendered MP4', { renderedVideoStoragePath });
       project = { ...project, renderedVideoBlob: videoBlob, renderedVideoStoragePath };
+      rt(videoId, 'render', 'START persist after render');
       await persist();
+      rt(videoId, 'render', 'DONE persist after render');
     });
+    rt(videoId, 'render', 'phase block resolved — about to logStep success');
     await logStep(channelId, videoId, 'render', 'success', 'MP4 rendered');
     report('render', 'Render complete');
+    rt(videoId, 'render', 'phase FULLY complete');
   } catch (err) {
+    rt(videoId, 'render', 'CAUGHT ERROR', String(err?.message || err));
     // No DOM-mounted <canvas> exists in the automation context, so WebCodecsUnsupportedError (the
     // manual UI's trigger for its WebM/MediaRecorder fallback) is a hard failure here rather than a
     // fallback opportunity — a known Phase 2a limitation, not an oversight.
@@ -877,11 +899,14 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
 
   // ---- Phase: thumbnail ----
   let thumbnailBlob;
+  rt(videoId, 'thumbnail', `phase reached — willGenerate=${shouldRunPhase(resumePhase, 'thumbnail')} resumePhase=${resumePhase}`);
   if (shouldRunPhase(resumePhase, 'thumbnail')) {
   try {
     await withPhaseNetworkResilience('thumbnail', channelId, videoId, logStep, async () => {
       const concept = plan.thumbnails[0];
+      rt(videoId, 'thumbnail', 'have concept?', { hasConcept: !!concept, overlayText: concept?.overlay_text });
       if (!concept) throw new Error('No thumbnail concept available from the outline');
+      rt(videoId, 'thumbnail', 'START generateThumbnail');
       thumbnailBlob = await generateThumbnail(project, {
         settings,
         channelId,
@@ -891,17 +916,25 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         overlayText: concept.overlay_text || '',
         seed: Math.floor(Math.random() * 999999),
       });
+      rt(videoId, 'thumbnail', 'DONE generateThumbnail', { blobSize: thumbnailBlob?.size, blobType: thumbnailBlob?.type });
+      rt(videoId, 'thumbnail', 'START upload thumbnail to Storage');
       const thumbnailStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),
         THUMBNAIL_UPLOAD_TIMEOUT_MS,
         'Thumbnail upload to Storage'
       );
+      rt(videoId, 'thumbnail', 'DONE upload thumbnail', { thumbnailStoragePath });
       project = { ...project, thumbnailStoragePath };
+      rt(videoId, 'thumbnail', 'START persist after thumbnail');
       await persist();
+      rt(videoId, 'thumbnail', 'DONE persist after thumbnail');
     });
+    rt(videoId, 'thumbnail', 'phase block resolved — about to logStep success');
     await logStep(channelId, videoId, 'thumbnail', 'success', 'thumbnail created');
     report('thumbnail', 'Thumbnail ready');
+    rt(videoId, 'thumbnail', 'phase FULLY complete');
   } catch (err) {
+    rt(videoId, 'thumbnail', 'CAUGHT ERROR', String(err?.message || err));
     // The thumbnail is a paid fal.ai image too (nanobanana/gptimage) — an exhausted balance here
     // gets the same distinct 'credit_exhausted' status as the media phase.
     const status = isCreditExhaustedMessage(err?.message) ? 'credit_exhausted' : 'error';
@@ -912,12 +945,15 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // Already done on an earlier attempt — read the backed-up thumbnail back rather than
     // regenerating it, since it's about to be needed for the YouTube phase below.
     try {
+      rt(videoId, 'thumbnail', 'START restore thumbnail from Storage', { path: project.thumbnailStoragePath });
       thumbnailBlob = await withTimeout(
         () => downloadMediaAsBlob(project.thumbnailStoragePath),
         THUMBNAIL_RESTORE_TIMEOUT_MS,
         'Thumbnail restore from Storage'
       );
+      rt(videoId, 'thumbnail', 'DONE restore thumbnail', { blobSize: thumbnailBlob?.size });
     } catch (err) {
+      rt(videoId, 'thumbnail', 'CAUGHT ERROR (restore)', String(err?.message || err));
       console.error('[fullPipelineRecipe] could not restore thumbnail from storage on resume', project.thumbnailStoragePath, err);
       await logStep(channelId, videoId, 'thumbnail', 'error', `could not restore the saved thumbnail: ${String(err?.message || err)}`);
       throw err;
@@ -929,9 +965,19 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // finished video + thumbnail + a publish-info sheet are written to the folder the user picked in
   // Automation settings, and the video is left WITHOUT youtubeVideoId — it stays "Finished — not
   // published" in the dashboard, where the owner uses "Mark as published" after uploading by hand.
+  rt(videoId, 'publish', 'reached publish decision', {
+    exportMode: channel.automation_export_mode || 'youtube',
+    hasVideoBlob: !!videoBlob,
+    videoBlobSize: videoBlob?.size,
+    hasThumbBlob: !!thumbnailBlob,
+    thumbBlobSize: thumbnailBlob?.size,
+    autoPublish: channel.automation_auto_publish,
+  });
   if (channel.automation_export_mode === 'local_folder') {
     try {
+      rt(videoId, 'publish', 'START buildSrtFromScenes (local_folder)');
       const srt = buildSrtFromScenes(project.scenes, !!project.staticBackground);
+      rt(videoId, 'publish', 'START runLocalExport');
       const folder = await runLocalExport({
         channelName: channel.name,
         dateStr: exportDateString(createdAt),
@@ -951,6 +997,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           madeForKids: channel.automation_made_for_kids === true,
         },
       });
+      rt(videoId, 'publish', 'DONE runLocalExport', { folder });
       // Terminal for automation — determineResumePhase returns null once this is set, so the next
       // cycle's findResumableVideo won't pick the video up and re-export it.
       project = { ...project, localExportedAt: Date.now() };
@@ -963,8 +1010,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         `exported to local folder "${folder}" — upload it to YouTube manually, then use "Mark as published"`
       );
       report('youtube', `Exported to ${folder}`);
+      rt(videoId, 'publish', 'local_folder export FULLY complete');
       return { videoId, youtubeVideoId: null, costUsd: await totalCostForVideo(channelId, videoId) };
     } catch (err) {
+      rt(videoId, 'publish', 'CAUGHT ERROR (local_folder)', String(err?.message || err));
       await logStep(channelId, videoId, 'youtube', 'error', `local folder export failed: ${String(err?.message || err)}`);
       throw err;
     }
@@ -987,6 +1036,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // what keeps a video that actually died mid-upload out of both this branch and findResumableVideo
   // on the next cycle (determineResumePhase returns null for it).
   const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
+  rt(videoId, 'publish', 'entering YouTube branch', {
+    autoPublishOff: channel.automation_auto_publish === false,
+    anomalousInterruption,
+    wasResumed,
+    resumedFromNormalBatchWait,
+    resumedReadyToPublish,
+  });
   if (channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
@@ -1034,6 +1090,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       // thumbnail specifically is persisted so the dashboard can flag it and the owner can retry the
       // thumbnail from ExportStep without re-uploading the video.
       const subErrors = [];
+      rt(videoId, 'publish', 'START publishToYoutube');
       youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
         channel,
         metadata,
@@ -1042,6 +1099,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
         },
       });
+      rt(videoId, 'publish', 'DONE publishToYoutube', { youtubeVideoId, subErrors });
 
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 

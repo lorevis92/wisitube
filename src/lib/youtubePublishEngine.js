@@ -36,10 +36,17 @@ function blobToDataUri(blob) {
 const YT_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
 
 async function toYoutubeThumbnailDataUri(blob) {
+  // TEMPORARY debug (render→thumbnail freeze investigation) — remove once root-caused.
+  console.warn('[rt-debug] toYoutubeThumbnailDataUri ENTER', { type: blob?.type, size: blob?.size });
   const alreadyFine = blob.type === 'image/jpeg' && blob.size <= 1.8 * 1024 * 1024;
-  if (alreadyFine) return blobToDataUri(blob);
+  if (alreadyFine) {
+    console.warn('[rt-debug] toYoutubeThumbnailDataUri — already small JPEG, blobToDataUri direct');
+    return blobToDataUri(blob);
+  }
   try {
+    console.warn('[rt-debug] toYoutubeThumbnailDataUri — START createImageBitmap');
     const bitmap = await createImageBitmap(blob);
+    console.warn('[rt-debug] toYoutubeThumbnailDataUri — DONE createImageBitmap', { w: bitmap.width, h: bitmap.height });
     const w = bitmap.width || 1280;
     const h = bitmap.height || 720;
     let canvas;
@@ -53,14 +60,17 @@ async function toYoutubeThumbnailDataUri(blob) {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(bitmap, 0, 0);
     bitmap.close?.();
+    console.warn('[rt-debug] toYoutubeThumbnailDataUri — START canvas → JPEG');
     const jpeg = canvas.convertToBlob
       ? await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 })
       : await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    console.warn('[rt-debug] toYoutubeThumbnailDataUri — DONE canvas → JPEG', { size: jpeg?.size });
     if (jpeg && jpeg.size > 0 && jpeg.size <= YT_THUMBNAIL_MAX_BYTES) return blobToDataUri(jpeg);
     // Re-encode didn't help (or produced nothing) — fall through to the original.
   } catch (err) {
     console.error('[yt-upload] thumbnail re-encode to JPEG failed, sending original bytes', err);
   }
+  console.warn('[rt-debug] toYoutubeThumbnailDataUri — falling back to blobToDataUri(original)');
   return blobToDataUri(blob);
 }
 
@@ -74,7 +84,7 @@ async function toYoutubeThumbnailDataUri(blob) {
  * publishAt, madeForKids } — scheduleMode is 'now' | 'schedule', same as ExportStep's ytScheduleMode.
  */
 export async function uploadVideo(project, videoBlob, { channel, metadata, onProgress } = {}) {
-  console.log('[yt-upload] phase=runUpload:enter');
+  console.warn('[rt-debug] uploadVideo ENTER', { videoBlobSize: videoBlob?.size });
   onProgress?.({ kind: 'error-clear', phase: 'upload' });
   onProgress?.({ kind: 'upload-progress', percent: 0 });
   try {
@@ -84,7 +94,7 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
 
     const publishAt = metadata.scheduleMode === 'schedule' && metadata.publishAt ? new Date(metadata.publishAt).toISOString() : null;
 
-    console.log('[yt-upload] phase=init-upload:before', { channelId: channel?.id, publishAt });
+    console.warn('[rt-debug] uploadVideo — START POST /api/youtube init-upload');
     let initRes;
     try {
       initRes = await fetch('/api/youtube', {
@@ -108,7 +118,7 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
       console.error('[yt-upload] phase=init-upload:fetch-error', err?.message, err?.stack);
       throw err;
     }
-    console.log('[yt-upload] phase=init-upload:after', { status: initRes.status, ok: initRes.ok });
+    console.warn('[rt-debug] uploadVideo — DONE init-upload', { status: initRes.status, ok: initRes.ok });
 
     let initData;
     try {
@@ -138,12 +148,7 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
 
     console.log('[yt-upload] phase=video-blob:resolved', { size: videoBlob.size, type: videoBlob.type });
 
-    console.log('[yt-upload] phase=upload-video-to-youtube:before', {
-      uploadUrl: initData.uploadUrl,
-      blobSize: videoBlob.size,
-      hasAccessToken: !!initData.accessToken,
-      hasProgressCallback: true,
-    });
+    console.warn('[rt-debug] uploadVideo — START PUT video bytes to YouTube session URL', { blobSize: videoBlob.size });
     let videoId;
     try {
       videoId = await uploadVideoToYoutube(initData.uploadUrl, videoBlob, initData.accessToken, (p) =>
@@ -153,7 +158,7 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
       console.error('[yt-upload] phase=upload-video-to-youtube:error', err?.message, err?.stack);
       throw err;
     }
-    console.log('[yt-upload] phase=upload-video-to-youtube:after', { videoId });
+    console.warn('[rt-debug] uploadVideo — DONE PUT video bytes', { videoId });
 
     onProgress?.({ kind: 'video-id', videoId });
     return videoId;
@@ -198,13 +203,10 @@ export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress
   onProgress?.({ kind: 'error-clear', phase: 'thumbnail' });
   try {
     const refreshToken = channel?.youtube_refresh_token;
+    console.warn('[rt-debug] setThumbnail — START toYoutubeThumbnailDataUri');
     const dataUrl = await toYoutubeThumbnailDataUri(thumbnailBlob);
-    console.log('[yt-upload] phase=set-thumbnail:before', {
-      videoId,
-      dataUrlLength: dataUrl?.length,
-      sourceType: thumbnailBlob.type,
-      sourceBytes: thumbnailBlob.size,
-    });
+    console.warn('[rt-debug] setThumbnail — DONE toYoutubeThumbnailDataUri', { dataUrlLength: dataUrl?.length });
+    console.warn('[rt-debug] setThumbnail — START POST /api/youtube set-thumbnail');
     let res;
     try {
       res = await fetch('/api/youtube', {
@@ -216,7 +218,7 @@ export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress
       console.error('[yt-upload] phase=set-thumbnail:fetch-error', err?.message, err?.stack);
       throw err;
     }
-    console.log('[yt-upload] phase=set-thumbnail:after', { status: res.status, ok: res.ok });
+    console.warn('[rt-debug] setThumbnail — DONE POST /api/youtube set-thumbnail', { status: res.status, ok: res.ok });
     const data = await res.json();
     if (!res.ok) {
       // error is a string for our own validation failures, but a boolean flag when it's a
@@ -336,22 +338,28 @@ export async function addToSeriesPlaylist(videoId, project, { channel, metadata,
  * checkbox toggles ExportStep exposes for the later phases).
  */
 export async function publishToYoutube(project, videoBlob, thumbnailBlob, { channel, metadata, onProgress } = {}) {
-  console.log('[yt-upload] phase=publishToYoutube:enter');
+  // TEMPORARY debug (render→thumbnail freeze investigation) — remove once root-caused.
+  console.warn('[rt-debug] publishToYoutube ENTER', { videoBlobSize: videoBlob?.size, thumbBlobSize: thumbnailBlob?.size });
+  console.warn('[rt-debug] publishToYoutube — START uploadVideo');
   const videoId = await uploadVideo(project, videoBlob, { channel, metadata, onProgress });
-  console.log('[yt-upload] phase=publishToYoutube:after-upload', { videoId });
+  console.warn('[rt-debug] publishToYoutube — DONE uploadVideo', { videoId });
   if (videoId) {
     // Called from the automation recipes only — a full-pipeline/static-background video ALWAYS has a
     // thumbnail phase, so a missing blob here is always a real failure, never an intentional skip.
+    console.warn('[rt-debug] publishToYoutube — START setThumbnail');
     await setThumbnail(videoId, thumbnailBlob, {
       channel,
       onProgress,
       expectedThumbnailPath: project.thumbnailStoragePath,
       thumbnailExpected: true,
     });
+    console.warn('[rt-debug] publishToYoutube — DONE setThumbnail; START setCaptions');
     await setCaptions(videoId, project, { channel, metadata, onProgress });
+    console.warn('[rt-debug] publishToYoutube — DONE setCaptions; START addToSeriesPlaylist');
     await addToSeriesPlaylist(videoId, project, { channel, metadata, onProgress });
+    console.warn('[rt-debug] publishToYoutube — DONE addToSeriesPlaylist');
   }
-  console.log('[yt-upload] phase=publishToYoutube:exit');
+  console.warn('[rt-debug] publishToYoutube EXIT', { videoId });
   return videoId;
 }
 
