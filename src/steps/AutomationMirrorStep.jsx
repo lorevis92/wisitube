@@ -74,8 +74,12 @@ function formatCountsDetail(item) {
 }
 
 // Explains WHY a video isn't moving right now (waitingReason, see db.js's listIncompleteVideos),
-// distinct from WHERE it is (phaseLabel above it).
-function formatWaitingReason(item) {
+// distinct from WHERE it is (phaseLabel above it). `live` is the current run's event state when it
+// belongs to THIS video — listIncompleteVideos is a periodic DB read that has no idea a cycle is
+// mid-phase on the row, so without this cross-check the same video the "Current phase" panel shows
+// actively progressing would be labelled "Idle" here.
+function formatWaitingReason(item, live) {
+  if (live) return '▶ Active — a cycle is generating this video right now';
   if (item.waitingReason === 'awaiting_batch') return "⏳ Waiting on Google's batch processing";
   if (item.waitingReason === 'stuck') return item.stuckMessage || '⚠ Stuck — needs manual review';
   return '⏸ Idle — not part of an active cycle right now';
@@ -143,6 +147,17 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
+  // The live run advances a video through phases far faster than the 30s poll above notices. When
+  // the run's video or phase changes, re-read the DB lists straight away so the "Videos in progress"
+  // card can't sit on a stale count (or a stale "Idle") while "Current phase" shows real progress.
+  useEffect(() => {
+    if (run?.videoId) {
+      loadIncomplete();
+      loadCompleted();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.videoId, run?.phase]);
 
   // Runs the channel's own recipe for THIS one video (targetVideoId), through runManagedResume so it
   // takes the same currently_running lock a scheduled cycle takes (the two are mutually exclusive,
@@ -455,7 +470,13 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
             {incompleteVideos.map((item) => {
               const rowBusy = busyVideoId === item.videoId;
               const anyBusy = busyVideoId !== null;
-              const countsDetail = formatCountsDetail(item);
+              // The live run's event state, but only when it's genuinely THIS video (run is cleared
+              // between cycles, so a non-null match means a cycle is on this row right now).
+              const live = run && run.videoId && run.videoId === item.videoId ? run : null;
+              const phaseText = live ? PHASE_LABELS[live.phase] || live.phase || item.phaseLabel : item.phaseLabel;
+              // live.phaseDetail is the recipe's own progress message ("13/48 scenes written",
+              // "42% rendered", …) — always fresher than the DB-count readout while a cycle runs.
+              const countsDetail = live ? live.phaseDetail || formatCountsDetail(item) : formatCountsDetail(item);
               return (
                 <div
                   key={item.videoId}
@@ -463,7 +484,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 8,
-                    border: `1px solid ${item.stuck ? T.primaryBorder : T.border}`,
+                    border: `1px solid ${live ? T.green : item.stuck ? T.primaryBorder : T.border}`,
                     background: item.stuck ? T.primaryLight : 'transparent',
                     borderRadius: 4,
                     padding: 10,
@@ -471,12 +492,19 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                 >
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{item.displayTitle}</div>
-                    <div style={{ ...mono, fontSize: 11, color: item.stuck ? T.primary : T.textSecondary, marginTop: 4 }}>
-                      {item.channelName} · {item.phaseLabel}
+                    <div style={{ ...mono, fontSize: 11, color: live ? T.green : item.stuck ? T.primary : T.textSecondary, marginTop: 4 }}>
+                      {item.channelName} · {phaseText}
                     </div>
                     {countsDetail && <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 2 }}>{countsDetail}</div>}
-                    <div style={{ fontFamily: FONT.ui, fontSize: 11, color: item.waitingReason === 'stuck' ? T.primary : T.textSecondary, marginTop: 4 }}>
-                      {formatWaitingReason(item)}
+                    <div
+                      style={{
+                        fontFamily: FONT.ui,
+                        fontSize: 11,
+                        color: live ? T.green : item.waitingReason === 'stuck' ? T.primary : T.textSecondary,
+                        marginTop: 4,
+                      }}
+                    >
+                      {formatWaitingReason(item, live)}
                     </div>
                     <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 4 }}>started {formatDateTime(item.createdAt)}</div>
                   </div>
@@ -493,8 +521,9 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                     {item.waitingReason === 'awaiting_batch' && (
                       <button
                         onClick={() => checkVideoForUpdates(item)}
-                        disabled={anyBusy}
-                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                        disabled={anyBusy || !!live}
+                        title={live ? 'A cycle is already working on this video' : undefined}
+                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy || live ? 0.6 : 1 }}
                       >
                         🔄 Check for updates
                       </button>
@@ -503,9 +532,20 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                     {item.waitingReason !== 'awaiting_batch' && (
                       <button
                         onClick={() => resumeVideoNow(item)}
-                        disabled={anyBusy || item.waitingReason === 'stuck'}
-                        title={item.waitingReason === 'stuck' ? 'Reset & retry first — this video has failed the same phase too many times in a row' : undefined}
-                        style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, opacity: anyBusy || item.waitingReason === 'stuck' ? 0.6 : 1 }}
+                        disabled={anyBusy || item.waitingReason === 'stuck' || !!live}
+                        title={
+                          live
+                            ? 'A cycle is already working on this video'
+                            : item.waitingReason === 'stuck'
+                            ? 'Reset & retry first — this video has failed the same phase too many times in a row'
+                            : undefined
+                        }
+                        style={{
+                          ...btnPrimary,
+                          padding: '6px 10px',
+                          fontSize: 10,
+                          opacity: anyBusy || item.waitingReason === 'stuck' || live ? 0.6 : 1,
+                        }}
                       >
                         ▶ Resume now
                       </button>
@@ -514,8 +554,8 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                     {item.waitingReason === 'stuck' && (
                       <button
                         onClick={() => resetAndRetry(item)}
-                        disabled={anyBusy}
-                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                        disabled={anyBusy || !!live}
+                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: anyBusy || live ? 0.6 : 1 }}
                       >
                         🔁 Reset &amp; retry
                       </button>
@@ -523,8 +563,9 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
 
                     <button
                       onClick={() => deleteVideoRow(item)}
-                      disabled={anyBusy}
-                      style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '6px 10px', fontSize: 10, opacity: anyBusy ? 0.6 : 1 }}
+                      disabled={anyBusy || !!live}
+                      title={live ? 'A cycle is generating this video right now' : undefined}
+                      style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '6px 10px', fontSize: 10, opacity: anyBusy || live ? 0.6 : 1 }}
                     >
                       🗑 Delete
                     </button>
