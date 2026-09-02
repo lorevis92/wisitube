@@ -13,10 +13,17 @@
 // "Stop" always has something real to stop regardless of which one started it. Dry runs never go
 // through here — they don't spend money or touch automation_daily_upload_count, so they have no
 // need for the lock and keep using AutomationStep.jsx's own local stop ref exactly as before.
-import { getSchedulerSettings, saveSchedulerSettings, logAutomationStep, getLastRealAutomationLogEntry } from './db';
-import { runAutomationCycle } from './automationEngine';
+import { getSchedulerSettings, saveSchedulerSettings, logAutomationStep, getLastRealAutomationLogEntry, listIncompleteVideos, loadChannel } from './db';
+import { runAutomationCycle, getRecipeForContentType, logStep } from './automationEngine';
 
 const TICK_MS = 60 * 1000;
+
+// The lightweight pending-batch poll (pollPendingImageBatches below) runs on its OWN fixed 60s
+// timer, completely independent of the user-configured cycle interval (intervalValue/intervalUnit,
+// e.g. every 6 hours) — a Gemini Batch job that finishes 20 minutes into a 6h gap should be picked
+// up and carried through to render/thumbnail/publish within a minute, not sit idle until the next
+// full cycle. Same cadence as TICK_MS, kept as its own named constant so the two can be tuned apart.
+const BATCH_POLL_TICK_MS = 60 * 1000;
 const UNIT_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
 
 // A cycle stuck this long is presumed dead, not still legitimately working — see runManagedCycle's
@@ -257,7 +264,92 @@ export async function forceUnlock() {
   await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
 }
 
+// Guards against a slow poll (a video whose batch just finished re-entering render → thumbnail →
+// publish can take minutes) still working through its video list when the next 60s batch tick
+// fires — same "one at a time within this tab" role claimedLocally plays for the full cycle.
+let pollingBatches = false;
+
+/**
+ * Lightweight, independent poll for in-flight Gemini Batch jobs — the second heartbeat, separate
+ * from the full automation cycle (tick/runManagedCycle) in every way that matters:
+ *
+ *  - Runs every BATCH_POLL_TICK_MS (60s), NOT on the user's configured cycle interval.
+ *  - Touches ONLY videos that already have a non-empty pendingImageBatches (db.js's
+ *    listIncompleteVideos → waitingReason 'awaiting_batch' / hasPendingBatches). It never starts a
+ *    new video, never fetches a suggestion, never touches budget, daily counters or the program
+ *    manager — its only effect is checking batch status and letting an already-started video
+ *    continue once its images are all ready.
+ *  - For each such video it calls the exact same per-video continuation
+ *    AutomationMirrorStep.jsx's "Check for updates" button uses: runManagedResume(() =>
+ *    recipe(channel, { targetVideoId })). The recipe re-enters the media phase, polls Google, and
+ *    if every image is ready carries straight on to render → thumbnail → publish in the same call.
+ *  - Takes the SAME currently_running lock (via runManagedResume) as a full cycle and a manual
+ *    resume, so it can never overlap either. If the lock is held it stops for this round and the
+ *    next 60s tick retries — nothing is logged for a blocked poll (unlike the full cycle's
+ *    'scheduler'/'blocked' rows), since a batch poll being skipped is routine, not noteworthy.
+ *  - Active automatically whenever "Enable unattended background mode" is on (its timer is started
+ *    and stopped alongside the main one in startScheduler/stopSchedulerTimer) — no separate setting.
+ */
+async function pollPendingImageBatches({ userId }) {
+  if (pollingBatches) return;
+
+  let settings;
+  try {
+    settings = await getSchedulerSettings();
+  } catch (err) {
+    console.error('[automationScheduler] pending-batch poll: failed to read scheduler settings', err);
+    return;
+  }
+  // The timer is only running while the scheduler is enabled, but re-check anyway — another tab may
+  // have turned it off since this tab's timer was last (re)started.
+  if (!settings.enabled) return;
+  // A full cycle or a manual action holds the lock — skip this round entirely (down to the DB
+  // sweep below) and let the next 60s tick retry once it frees up.
+  if (settings.currentlyRunning) return;
+
+  let videos;
+  try {
+    videos = await listIncompleteVideos(userId);
+  } catch (err) {
+    console.error('[automationScheduler] pending-batch poll: failed to list incomplete videos', err);
+    return;
+  }
+  const awaitingBatch = videos.filter((v) => v.hasPendingBatches);
+  if (awaitingBatch.length === 0) return;
+
+  pollingBatches = true;
+  try {
+    for (const item of awaitingBatch) {
+      let channel;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        channel = await loadChannel(item.channelId);
+      } catch (err) {
+        console.error('[automationScheduler] pending-batch poll: failed to load channel', item.channelId, err);
+        continue;
+      }
+      if (!channel) continue;
+      const recipe = getRecipeForContentType(channel.content_type);
+      if (!recipe) {
+        console.warn('[automationScheduler] pending-batch poll: no recipe for content_type', channel.content_type, '- skipping', item.videoId);
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
+      if (!result.started) {
+        // The lock was taken between the currentlyRunning check above and here (a full cycle tick,
+        // a manual resume) — stop and let the next batch tick retry the remaining videos.
+        console.warn('[automationScheduler] pending-batch poll: lock became unavailable mid-sweep, retrying next tick —', result.reason);
+        break;
+      }
+    }
+  } finally {
+    pollingBatches = false;
+  }
+}
+
 let timerId = null;
+let batchTimerId = null;
 
 // True once a tick has seen the configured interval elapse while another cycle still held the
 // lock — from that point on, every 60s tick retries regardless of the interval timer, instead of
@@ -323,9 +415,20 @@ async function tick({ userId, onUpdate, onProgress, onCycleEnd }) {
 export function startScheduler({ userId, onUpdate, onProgress, onCycleEnd }) {
   stopSchedulerTimer();
   timerId = setInterval(() => tick({ userId, onUpdate, onProgress, onCycleEnd }), TICK_MS);
+  // Independent lightweight batch poll — see pollPendingImageBatches. Its own timer so a long full
+  // cycle awaited inside tick() can't delay it, and vice versa. Errors are swallowed to a console
+  // line: one failed poll must never tear the interval down.
+  batchTimerId = setInterval(
+    () => pollPendingImageBatches({ userId }).catch((err) => console.error('[automationScheduler] pending-batch poll threw', err)),
+    BATCH_POLL_TICK_MS
+  );
 }
 
 export function stopSchedulerTimer() {
+  if (batchTimerId) {
+    clearInterval(batchTimerId);
+    batchTimerId = null;
+  }
   if (timerId) {
     clearInterval(timerId);
     timerId = null;
