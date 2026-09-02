@@ -24,11 +24,16 @@ import { parseBeatKey, collectPendingBeatItems, submitImageBatchChunk } from './
 // media-phase attempt (see that file's mediaStillInProgress rollback).
 export const MAX_RECOVERY_CYCLES = 5;
 
-// Same timeout values mediaGenerationEngine.js uses for the equivalent kinds of calls — a status
-// check is small/quick, a results fetch can carry several images' worth of base64 data (bigger,
-// gets the longer budget), an upload is a single image going to Storage.
-const STATUS_TIMEOUT_MS = 20000;
-const RESULTS_TIMEOUT_MS = 45000;
+// api/gemini-batch.js runs as a Serverless Function with maxDuration 60s, and Google's own
+// batch status/results endpoints are occasionally slow for a specific job (seconds of queueing on
+// their side, not a real problem). The client timeout therefore sits just under that 60s server
+// ceiling rather than at the old aggressive 20s — a status/results call that's merely slow must not
+// be aborted and retried forever, silently stalling an otherwise-healthy video. A status-check
+// timeout is already handled as "leave the entry, re-check next pass" (see resumePendingBatches),
+// never as a job failure, so a generous budget here has no downside. Upload is a single image to
+// Supabase Storage — a different, genuinely quick operation — so it keeps the tight budget.
+const STATUS_TIMEOUT_MS = 55000;
+const RESULTS_TIMEOUT_MS = 55000;
 const UPLOAD_TIMEOUT_MS = 20000;
 
 function base64ToBlob(base64, mimeType) {
@@ -217,9 +222,15 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
       // TEMPORARY diagnostic — the real state Google reports for this specific job, right now.
       console.warn('[resume-batch] job status', entry.jobId, status.state, status.googleState);
     } catch (err) {
+      // A timeout or transient network error checking ONE job's status is a "couldn't get an answer
+      // yet" situation, never a job failure: the entry is left exactly as-is (no beats marked error,
+      // batchRecoveryCycles untouched) and re-checked on the next pass. The recipe's own
+      // mediaStillInProgress rollback then keeps this from counting against resumeAttempts, since
+      // the job is still outstanding. So repeated timeouts here can't mark the video stuck — they
+      // only delay it, which is why STATUS_TIMEOUT_MS above is generous.
       console.error('[batchResumption] status check failed for', entry.jobId, err);
-      onProgress?.({ kind: 'message', text: `Could not check batch ${entry.jobId}: ${String(err.message || err)}` });
-      continue; // leave this entry exactly as-is — re-checked on the next resume
+      onProgress?.({ kind: 'message', text: `Could not check batch ${entry.jobId} yet (${String(err.message || err)}) — will retry` });
+      continue;
     }
 
     if (status.state === 'succeeded') {
