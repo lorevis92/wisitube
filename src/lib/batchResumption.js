@@ -36,6 +36,47 @@ const STATUS_TIMEOUT_MS = 55000;
 const RESULTS_TIMEOUT_MS = 55000;
 const UPLOAD_TIMEOUT_MS = 20000;
 
+// How long a single job may keep getting 503 / "UNAVAILABLE" from Google's status endpoint before
+// it's treated as lost and its scenes resubmitted. Deliberately a full hour, not minutes: the
+// status endpoint can be down while the underlying generation job runs fine, and giving up early
+// means paying to generate the same images a second time (a recovery batch), not just a delay.
+// Tracked per-job on the pendingImageBatches entry (unavailableSince / unavailableCount) and kept
+// entirely separate from batchRecoveryCycles / resumeAttempts — a 503 is Google being unreachable,
+// not a job or a prompt actually failing.
+const SERVICE_UNAVAILABLE_GIVE_UP_MS = 60 * 60 * 1000;
+
+// A Google 503 / "UNAVAILABLE" specifically — NOT our own client-side timeout (AbortError), which
+// carries no information about Google's health and keeps the existing "just retry next pass" path.
+function isServiceUnavailable(err) {
+  if (err?.name === 'AbortError') return false;
+  if (Number(err?.httpStatus) === 503) return true;
+  return /\b503\b|unavailable/i.test(String(err?.message || err || ''));
+}
+
+// Immutably patch one pendingImageBatches entry (matched by jobId).
+function updateBatchEntry(project, jobId, fields) {
+  return {
+    ...project,
+    pendingImageBatches: (project.pendingImageBatches || []).map((e) => (e.jobId === jobId ? { ...e, ...fields } : e)),
+  };
+}
+
+// Recompute project.googleServiceIssue { since, retryCount } from whichever pending entries still
+// carry a 503 clock. A { resubmittedAt } marker is left in place here — only a clean status check
+// (Google answering again) clears that, in the loop below.
+function withServiceIssueFromEntries(project) {
+  const affected = (project.pendingImageBatches || []).filter((e) => e.unavailableSince);
+  if (affected.length > 0) {
+    const since = Math.min(...affected.map((e) => e.unavailableSince));
+    const retryCount = Math.max(...affected.map((e) => Number(e.unavailableCount) || 0));
+    return { ...project, googleServiceIssue: { since, retryCount } };
+  }
+  if (project.googleServiceIssue?.resubmittedAt || !project.googleServiceIssue) return project;
+  const next = { ...project };
+  delete next.googleServiceIssue;
+  return next;
+}
+
 function base64ToBlob(base64, mimeType) {
   const byteChars = atob(base64);
   const byteNumbers = new Array(byteChars.length);
@@ -103,8 +144,14 @@ async function fetchBatchStatus(jobId) {
       body: JSON.stringify({ action: 'status', jobId }),
       signal,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || data.error || 'Batch status check failed');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.detail || (typeof data.error === 'string' ? data.error : '') || `Batch status check failed (HTTP ${res.status})`);
+      // api/gemini-batch.js's status action passes Google's HTTP status straight through as
+      // data.status on an error — used by isServiceUnavailable to tell a real 503 from anything else.
+      err.httpStatus = Number(data.status) || res.status;
+      throw err;
+    }
     return data;
   }, STATUS_TIMEOUT_MS, 'Batch status check');
 }
@@ -214,6 +261,10 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
   // from the browser console instead of guessed at.
   console.warn('[resume-batch] START', pending.length, JSON.parse(JSON.stringify(pending)));
 
+  // Jobs given up on this pass after a full hour of 503s — the resubmit + user-facing marker are
+  // applied after the completeness check below (which is what actually re-queues their scenes).
+  const serviceGiveUps = [];
+
   for (const entry of pending) {
     let status;
     try {
@@ -222,15 +273,91 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
       // TEMPORARY diagnostic — the real state Google reports for this specific job, right now.
       console.warn('[resume-batch] job status', entry.jobId, status.state, status.googleState);
     } catch (err) {
-      // A timeout or transient network error checking ONE job's status is a "couldn't get an answer
-      // yet" situation, never a job failure: the entry is left exactly as-is (no beats marked error,
-      // batchRecoveryCycles untouched) and re-checked on the next pass. The recipe's own
-      // mediaStillInProgress rollback then keeps this from counting against resumeAttempts, since
-      // the job is still outstanding. So repeated timeouts here can't mark the video stuck — they
-      // only delay it, which is why STATUS_TIMEOUT_MS above is generous.
+      if (isServiceUnavailable(err)) {
+        const since = entry.unavailableSince || Date.now();
+        const count = (Number(entry.unavailableCount) || 0) + 1;
+        const elapsedMs = Date.now() - since;
+        const minutes = Math.round(elapsedMs / 60000);
+
+        if (elapsedMs < SERVICE_UNAVAILABLE_GIVE_UP_MS) {
+          // Still inside the patient window — record the per-job consecutive-503 clock and wait.
+          // Never touches beats or batchRecoveryCycles: Google being unreachable is not a job failure.
+          current = updateBatchEntry(current, entry.jobId, { unavailableSince: since, unavailableCount: count });
+          current = withServiceIssueFromEntries(current);
+          // eslint-disable-next-line no-await-in-loop
+          await persist?.(current);
+          onProgress?.({
+            kind: 'message',
+            text: `Google's batch service is unavailable for job ${entry.jobId} (503, retry ${count}, ${minutes}m so far) — holding off; we keep retrying for up to an hour before resubmitting, to avoid paying twice for the same images.`,
+          });
+          continue;
+        }
+
+        // An hour of solid 503s on the STATUS endpoint. Before writing the job off, try the RESULTS
+        // endpoint directly — it's a separate Google endpoint and may be healthy even while status
+        // isn't, which would mean the images are already generated and paid for: nothing to resubmit.
+        onProgress?.({
+          kind: 'message',
+          text: `Job ${entry.jobId} has been unreachable for over an hour — trying a direct results fetch before writing it off.`,
+        });
+        let salvaged = null;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          salvaged = await fetchBatchResultsFor(entry.jobId);
+        } catch (resErr) {
+          console.error('[batchResumption] last-ditch results fetch also failed for', entry.jobId, resErr);
+        }
+        if (Array.isArray(salvaged) && salvaged.length > 0) {
+          // eslint-disable-next-line no-await-in-loop
+          current = await applyBatchResults(current, salvaged, {
+            userId,
+            videoId,
+            channelId,
+            resolution: entry.resolution || resolution,
+            onProgress,
+          });
+          current = { ...current, pendingImageBatches: current.pendingImageBatches.filter((e) => e.jobId !== entry.jobId) };
+          current = withServiceIssueFromEntries(current);
+          // eslint-disable-next-line no-await-in-loop
+          await persist?.(current);
+          onProgress?.({
+            kind: 'message',
+            text: `Recovered job ${entry.jobId} straight from its results despite the status outage — no resubmission and no extra cost.`,
+          });
+          continue;
+        }
+
+        // Genuinely lost. Drop the entry (leave its beats un-ready, NOT errored) so the completeness
+        // check below resubmits them through the normal recovery path — which respects
+        // MAX_RECOVERY_CYCLES and the spend that implies. The user-facing marker/message is applied
+        // after that check, once we know whether a recovery batch actually went out.
+        current = { ...current, pendingImageBatches: current.pendingImageBatches.filter((e) => e.jobId !== entry.jobId) };
+        serviceGiveUps.push({ jobId: entry.jobId, since, retryCount: count });
+        // eslint-disable-next-line no-await-in-loop
+        await persist?.(current);
+        continue;
+      }
+
+      // Any OTHER status-check failure (our own timeout, transient network): unchanged — no counter,
+      // no beats touched, just re-check next pass. The recipe's mediaStillInProgress rollback keeps
+      // this from counting against resumeAttempts while the job stays outstanding.
       console.error('[batchResumption] status check failed for', entry.jobId, err);
       onProgress?.({ kind: 'message', text: `Could not check batch ${entry.jobId} yet (${String(err.message || err)}) — will retry` });
       continue;
+    }
+
+    // A real status came back — Google IS answering for this job. Clear any 503 clock it carried
+    // and, if nothing is in an outage anymore, drop the whole service-issue banner (including a
+    // resubmitted marker — Google is fully back).
+    if (entry.unavailableSince || entry.unavailableCount || current.googleServiceIssue) {
+      current = updateBatchEntry(current, entry.jobId, { unavailableSince: null, unavailableCount: 0 });
+      const stillOutage = (current.pendingImageBatches || []).some((e) => e.unavailableSince);
+      if (!stillOutage && current.googleServiceIssue) {
+        current = { ...current };
+        delete current.googleServiceIssue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await persist?.(current);
     }
 
     if (status.state === 'succeeded') {
@@ -282,7 +409,8 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
   // were never claimed by ANY job at all (a chunk that failed to submit — see
   // geminiBatchImageEngine.js — or was simply never included). collectTrulyMissingBeats already
   // excludes anything still claimed by an in-flight job, so this is safe to run every time.
-  const wasBatchInvolved = pending.length > 0 || (Number(current.batchRecoveryCycles) || 0) > 0;
+  const cyclesBeforeCompleteness = Number(current.batchRecoveryCycles) || 0;
+  const wasBatchInvolved = pending.length > 0 || cyclesBeforeCompleteness > 0;
   if (wasBatchInvolved) {
     const missing = collectTrulyMissingBeats(current);
     if (missing.length > 0) {
@@ -318,6 +446,34 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
         }
       }
     }
+  }
+
+  // A job (or more than one) was written off this pass after its full hour of 503s. Record the
+  // user-facing marker now that the completeness check above has had its chance to re-queue the
+  // affected scenes — resubmittedAt is only set if a recovery batch actually went out (Google might
+  // still be refusing submits too, or the recovery cap may be spent).
+  if (serviceGiveUps.length > 0) {
+    const since = Math.min(...serviceGiveUps.map((g) => g.since));
+    const retryCount = Math.max(...serviceGiveUps.map((g) => g.retryCount));
+    const resubmitted = (Number(current.batchRecoveryCycles) || 0) > cyclesBeforeCompleteness;
+    const recoveryExhausted = cyclesBeforeCompleteness >= MAX_RECOVERY_CYCLES;
+    if (!recoveryExhausted) {
+      // Not stuck yet — keep the reassuring banner, now flipped to the "we resubmitted" variant
+      // once a recovery batch actually went out.
+      current = {
+        ...current,
+        googleServiceIssue: resubmitted ? { since, retryCount, resubmittedAt: Date.now() } : { since, retryCount },
+      };
+      await persist?.(current);
+    }
+    onProgress?.({
+      kind: 'message',
+      text: recoveryExhausted
+        ? `${serviceGiveUps.length} job(s) written off after more than an hour of Google 503s, but the recovery limit is already spent — needs manual regeneration.`
+        : resubmitted
+        ? `${serviceGiveUps.length} job(s) written off after more than an hour of Google 503s — the affected scenes have been resubmitted as a fresh batch.`
+        : `${serviceGiveUps.length} job(s) written off after more than an hour of Google 503s — couldn't resubmit yet, will retry.`,
+    });
   }
 
   // TEMPORARY diagnostic (remove once root-caused) — confirms this function actually reached its

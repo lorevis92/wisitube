@@ -85,6 +85,17 @@ function formatWaitingReason(item, live) {
   return '⏸ Idle — not part of an active cycle right now';
 }
 
+// Reassuring readout for a Google batch-service outage (src/lib/batchResumption.js's
+// googleServiceIssue). Two distinct states: still patiently retrying inside the one-hour window, vs.
+// the outage outlasted the hour and the affected scenes were resubmitted as a fresh batch.
+function formatGoogleServiceIssue(gsi) {
+  if (!gsi) return null;
+  if (gsi.resubmittedAt) {
+    return "🔁 Google's batch service was down for over an hour — we've resubmitted the affected scenes as a fresh batch. Nothing you need to do.";
+  }
+  return "🟡 Google's service is having a temporary hiccup — we'll keep retrying for up to an hour before resubmitting, to avoid paying twice for the same images.";
+}
+
 export default function AutomationMirrorStep({ run, userId, onResume, isMobile }) {
   const [incompleteVideos, setIncompleteVideos] = useState(null); // null = still loading
   const [completedVideos, setCompletedVideos] = useState(null);
@@ -506,6 +517,22 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                     >
                       {formatWaitingReason(item, live)}
                     </div>
+                    {!live && formatGoogleServiceIssue(item.googleServiceIssue) && (
+                      <div
+                        style={{
+                          fontFamily: FONT.ui,
+                          fontSize: 11,
+                          color: item.googleServiceIssue?.resubmittedAt ? T.textSecondary : T.yellow,
+                          background: item.googleServiceIssue?.resubmittedAt ? 'transparent' : 'rgba(184,112,0,0.08)',
+                          borderRadius: 4,
+                          padding: item.googleServiceIssue?.resubmittedAt ? 0 : '6px 8px',
+                          marginTop: 6,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {formatGoogleServiceIssue(item.googleServiceIssue)}
+                      </div>
+                    )}
                     <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 4 }}>started {formatDateTime(item.createdAt)}</div>
                   </div>
 

@@ -632,6 +632,10 @@ export async function listIncompleteVideos(userId) {
         stuckMessage: v.stuckError || null,
         waitingReason: hasPendingBatches ? 'awaiting_batch' : stuck ? 'stuck' : 'idle',
         hasPendingBatches,
+        // Set by src/lib/batchResumption.js while Google's batch service is returning 503s for one
+        // of this video's jobs — { since, retryCount, resubmittedAt? }. Surfaced reassuringly in the
+        // dashboard (AutomationMirrorStep.jsx) so an hour-long Google hiccup doesn't look like a hang.
+        googleServiceIssue: v.googleServiceIssue || null,
         // Needed by the "Check for updates" button's resumePendingBatches call (settings.style/
         // imageProvider) — carried here so the dashboard never needs the full channel record just
         // for this one button.
