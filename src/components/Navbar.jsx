@@ -1,13 +1,66 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { T, FONT } from '../theme';
+import { listChannels } from '../lib/db';
 
-export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut, hasActiveAutomation, idleVideoCount, onReturnToAutomation, onHome }) {
+export default function Navbar({
+  tabs,
+  activeTab,
+  onTab,
+  isMobile,
+  userEmail,
+  onSignOut,
+  hasActiveAutomation,
+  idleVideoCount,
+  onReturnToAutomation,
+  onHome,
+  onSelectChannel,
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // "Canali" submenu. On desktop it's hover-driven (onMouseEnter/Leave on the row); on mobile,
+  // where there is no hover, the same state is toggled by tapping the row.
+  const [channelsOpen, setChannelsOpen] = useState(false);
+  // "Impostazioni account" section — click-toggled on both platforms.
+  const [accountOpen, setAccountOpen] = useState(false);
+  // null = not loaded yet. Fetched fresh every time the menu opens so a channel created / renamed /
+  // deleted elsewhere in the app is always reflected here without any cross-component wiring.
+  const [channels, setChannels] = useState(null);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      // Collapse the sub-sections so the menu always reopens in its top-level state.
+      setChannelsOpen(false);
+      setAccountOpen(false);
+      return;
+    }
+    let cancelled = false;
+    listChannels()
+      .then((list) => {
+        if (cancelled) return;
+        // Newest first — created_at is immutable, unlike listChannels' own updated_at order which
+        // the automation cycle reshuffles constantly (same reasoning as ChannelsListStep).
+        setChannels([...list].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+      })
+      .catch((err) => {
+        console.error('[Navbar] failed to load channels for the nav menu', err);
+        if (!cancelled) setChannels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [menuOpen]);
+
+  function selectChannel(channel) {
+    setMenuOpen(false);
+    setChannelsOpen(false);
+    onSelectChannel?.(channel);
+  }
 
   const hamburger = (
     <button
       onClick={() => setMenuOpen((v) => !v)}
       aria-label="Menu"
+      aria-haspopup="menu"
+      aria-expanded={menuOpen}
       style={{
         border: `1px solid ${T.border}`,
         borderRadius: 3,
@@ -164,6 +217,180 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
     </button>
   );
 
+  const menuItemStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    width: '100%',
+    background: 'transparent',
+    border: 'none',
+    padding: '9px 10px',
+    borderRadius: 4,
+    fontSize: 12,
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    fontFamily: FONT.ui,
+    color: T.text,
+    cursor: 'pointer',
+    textAlign: 'left',
+  };
+
+  const channelItemStyle = {
+    display: 'block',
+    width: '100%',
+    background: 'transparent',
+    border: 'none',
+    padding: '8px 10px',
+    borderRadius: 4,
+    fontSize: 12,
+    fontWeight: 600,
+    fontFamily: FONT.ui,
+    color: T.text,
+    cursor: 'pointer',
+    textAlign: 'left',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  };
+
+  const hintStyle = { padding: '8px 10px', fontSize: 11, color: T.textMuted, fontFamily: FONT.ui };
+
+  // Desktop: a flyout panel to the right of the menu. Mobile: an inline, indented list under the row.
+  const submenuStyle = isMobile
+    ? {
+        display: 'flex',
+        flexDirection: 'column',
+        marginLeft: 4,
+        paddingLeft: 8,
+        borderLeft: `2px solid ${T.border}`,
+        maxHeight: 260,
+        overflowY: 'auto',
+      }
+    : {
+        position: 'absolute',
+        top: 0,
+        left: '100%',
+        minWidth: 220,
+        maxHeight: 320,
+        overflowY: 'auto',
+        background: '#FFFFFF',
+        border: `1px solid ${T.border}`,
+        borderRadius: 6,
+        padding: 6,
+        boxShadow: '0 8px 24px rgba(0,0,0,0.10)',
+        zIndex: 200,
+      };
+
+  const channelList = (
+    <>
+      {channels === null && <div style={hintStyle}>Caricamento…</div>}
+      {channels?.length === 0 && <div style={hintStyle}>Nessun canale</div>}
+      {channels?.map((c) => (
+        <button
+          key={c.id}
+          style={channelItemStyle}
+          onClick={() => selectChannel(c)}
+          onMouseEnter={(e) => (e.currentTarget.style.background = T.surface)}
+          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+        >
+          {c.name || 'Canale senza nome'}
+        </button>
+      ))}
+    </>
+  );
+
+  const menuPanel = (
+    <div
+      role="menu"
+      style={{
+        marginTop: 10,
+        width: isMobile ? '100%' : 280,
+        maxWidth: '100%',
+        border: `1px solid ${T.border}`,
+        borderRadius: 4,
+        background: '#FFFFFF',
+        padding: 6,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+      }}
+    >
+      {/* ---- Canali ---- */}
+      <div
+        style={{ position: 'relative' }}
+        onMouseEnter={isMobile ? undefined : () => setChannelsOpen(true)}
+        onMouseLeave={isMobile ? undefined : () => setChannelsOpen(false)}
+      >
+        <button
+          style={menuItemStyle}
+          onClick={isMobile ? () => setChannelsOpen((v) => !v) : undefined}
+          aria-haspopup="menu"
+          aria-expanded={channelsOpen}
+        >
+          <span>Canali</span>
+          <span aria-hidden style={{ color: T.textMuted }}>{isMobile ? (channelsOpen ? '▾' : '▸') : '▸'}</span>
+        </button>
+        {channelsOpen && <div style={submenuStyle}>{channelList}</div>}
+      </div>
+
+      {/* ---- Impostazioni account ---- */}
+      <div>
+        <button style={menuItemStyle} onClick={() => setAccountOpen((v) => !v)} aria-expanded={accountOpen}>
+          <span>Impostazioni account</span>
+          <span aria-hidden style={{ color: T.textMuted }}>{accountOpen ? '▾' : '▸'}</span>
+        </button>
+        {accountOpen && (
+          <div style={{ padding: '2px 10px 10px' }}>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                color: T.textSecondary,
+                fontFamily: FONT.ui,
+              }}
+            >
+              Email
+            </div>
+            <div style={{ fontSize: 12, color: T.text, fontFamily: FONT.ui, marginTop: 2 }}>{userEmail || '—'}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 8 }}>
+              Foto profilo e altre opzioni in arrivo.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ---- Sign out ---- */}
+      <button
+        style={{ ...menuItemStyle, color: T.primary }}
+        onClick={() => {
+          setMenuOpen(false);
+          onSignOut?.();
+        }}
+      >
+        Sign out
+      </button>
+
+      {/* ---- Ecosystem footer chrome (unchanged) ---- */}
+      <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 8, paddingLeft: 10, paddingRight: 10, paddingBottom: 4 }}>
+        <a
+          href="https://wisiverse.com"
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: T.primary, fontFamily: FONT.ui, fontWeight: 700, fontSize: 12, textTransform: 'uppercase', textDecoration: 'none' }}
+        >
+          wisiverse.com →
+        </a>
+        <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: FONT.ui, marginTop: 4 }}>
+          WisiTube — AI faceless video studio. Part of the WiSiVERSE ecosystem.
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <nav
       style={{
@@ -199,66 +426,7 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
             </div>
           </div>
         )}
-        {menuOpen && (
-          <div
-            style={{
-              marginTop: 10,
-              border: `1px solid ${T.border}`,
-              borderRadius: 4,
-              background: '#FFFFFF',
-              padding: 12,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 8,
-            }}
-          >
-            <a
-              href="https://wisiverse.com"
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: T.primary, fontFamily: FONT.ui, fontWeight: 700, fontSize: 12, textTransform: 'uppercase', textDecoration: 'none' }}
-            >
-              wisiverse.com →
-            </a>
-            <span style={{ color: T.textSecondary, fontSize: 11, fontFamily: FONT.ui }}>
-              WisiTube — AI faceless video studio. Part of the WiSiVERSE ecosystem.
-            </span>
-            {userEmail && (
-              <div
-                style={{
-                  marginTop: 4,
-                  paddingTop: 10,
-                  borderTop: `1px solid ${T.border}`,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 10,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <span style={{ color: T.text, fontSize: 12, fontFamily: FONT.ui }}>{userEmail}</span>
-                <button
-                  onClick={onSignOut}
-                  style={{
-                    background: 'transparent',
-                    color: T.textSecondary,
-                    border: `1px solid ${T.border}`,
-                    borderRadius: 3,
-                    padding: '6px 12px',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    fontFamily: FONT.ui,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+        {menuOpen && menuPanel}
       </div>
     </nav>
   );

@@ -749,6 +749,29 @@ export default function App() {
     setTab('channels');
   }
 
+  // Global nav menu (Navbar.jsx's "Canali" submenu) — jump straight to the Create screen for a
+  // specific channel, no detour through the Channels list and the channel dashboard. Reuses
+  // openChannel for the channel-switch bookkeeping, then mirrors startNewProjectWithTopic's own
+  // open-video teardown + content_type/settings work — but keyed off the passed channel object
+  // directly (listChannels returns the same fromChannelRow shape loadChannel does), since the
+  // currentChannelId openChannel just set isn't visible synchronously here.
+  function openChannelFromMenu(channel) {
+    if (!channel?.id || inFlight) return; // nav is locked during scene generation
+    openChannel(channel);
+    setCurrentChannel(channel);
+    generationRef.current += 1;
+    setProject(null);
+    setProjectId(null);
+    setCreatedAt(null);
+    setOpenVideoChannelId(null);
+    setTitleOptions(null);
+    setPendingPlan(null);
+    setGenerationError('');
+    setSceneProgress({ current: 0, total: 0 });
+    setSettings((s) => ({ ...s, topic: '', series: null, contentType: channel.content_type || 'full_pipeline' }));
+    setTab('create');
+  }
+
   const hasPlan = !!project;
   const hasMedia = hasPlan && project.scenes.every((s) => isSceneMediaReady(s, settings.contentType === 'static_background'));
   const currentVideoTitle = hasPlan
@@ -798,6 +821,7 @@ export default function App() {
         idleVideoCount={idleVideoCount}
         onReturnToAutomation={() => setTab('automation-mirror')}
         onHome={backToChannels}
+        onSelectChannel={openChannelFromMenu}
       />
 
       {archivedVideoNotice && (
