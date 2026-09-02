@@ -22,7 +22,7 @@ import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
 import { generateAllMediaViaBatch } from '../geminiBatchImageEngine';
-import { resumePendingBatches } from '../batchResumption';
+import { resumePendingBatches, MAX_RECOVERY_CYCLES } from '../batchResumption';
 import { rehydrateProjectMedia } from '../mediaRehydration';
 import { isCreditExhaustedMessage } from '../providerErrors';
 import { renderVideoForExport } from '../videoRenderEngine';
@@ -411,6 +411,30 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // resumedReadyToPublish flag stays set even through this downgrade: publishing is still a safe
     // first attempt once the re-render + existing-thumbnail restore below finish.
     if ((resumePhase === 'thumbnail' || resumePhase === RESUME_PHASE_PUBLISH || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
+
+    // Self-heal for videos the pre-fix resume-attempt miscount wrongly marked stuck (see the
+    // mediaStillInProgress rollback below): the ONLY way to be flagged stuck in the "media" phase
+    // while batch jobs are still outstanding AND the recovery loop isn't exhausted is that bug —
+    // a genuinely stuck media phase has no jobs left, or has burned through MAX_RECOVERY_CYCLES.
+    // Clear the flag and the counter so the video resumes normally; the fixed rollback keeps it
+    // from re-accumulating. Tightly scoped so nothing legitimately stuck is un-stuck.
+    if (
+      project?.stuckError &&
+      resumePhase === 'media' &&
+      Array.isArray(project.pendingImageBatches) &&
+      project.pendingImageBatches.length > 0 &&
+      (Number(project.batchRecoveryCycles) || 0) < MAX_RECOVERY_CYCLES
+    ) {
+      project = { ...project, stuckError: null, resumeAttempts: 0, lastResumePhase: null };
+      await persist();
+      await logStep(
+        channelId,
+        videoId,
+        'resume',
+        'recovered',
+        'cleared a "stuck in media" flag that was raised only by the pre-fix batch-wait resume-attempt miscount — batch jobs are still legitimately outstanding'
+      );
+    }
 
     // A video stuck failing the exact same phase over and over (a systematic problem — a bad
     // prompt, a persistently failing provider, corrupted state) would otherwise retry forever,
@@ -820,16 +844,24 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   }
 
   if (mediaStillInProgress) {
-    // Roll back this call's resume-attempt bump when the media phase ended PURELY waiting on Google
-    // — the original batch jobs are still running, nothing has failed. A long batch, however many
-    // cycles it spans, is a normal wait, not a failed media-phase attempt, and must never
-    // accumulate toward the MAX_RESUME_ATTEMPTS "stuck" cap. Any sign of actual failure keeps the
-    // count: a beat that errored, or a recovery batch having been needed (batchResumption.js's
-    // completeness check) — that's the path the stuck cap exists to eventually stop.
+    // Roll back this call's resume-attempt bump when the media phase ended still waiting on Google —
+    // batch jobs (original OR a recovery batch) are still outstanding, so nothing has actually
+    // failed. A long batch, however many cycles it spans, is a normal wait, not a failed media-phase
+    // attempt, and must never accumulate toward the MAX_RESUME_ATTEMPTS "stuck" cap.
+    //
+    // Earlier this also disqualified the rollback whenever ANY beat was currently 'error' or a
+    // recovery batch had ever been submitted (batchRecoveryCycles > 0). Both are routine for a large
+    // video: Gemini Batch drops a few items per batch, batchResumption.js resubmits them, and that
+    // recovery batch is itself just "waiting on Google". With the 60s pollPendingImageBatches poll
+    // calling this recipe every minute (instead of a full cycle every few hours), that wrongly made
+    // any video needing a single recovery batch hit the stuck cap in ~5 minutes. The recovery loop
+    // has its OWN independent cap (MAX_RECOVERY_CYCLES) — that, not the resume-attempts cap, is what
+    // stops a genuinely cursed beat. So the only real "stuck in media" signal left here is: recovery
+    // fully exhausted and beats still missing (jobsStillOutstanding goes false once the last
+    // recovery batch resolves without a new one being submitted — see batchResumption.js).
     const jobsStillOutstanding = Array.isArray(project.pendingImageBatches) && project.pendingImageBatches.length > 0;
-    const anyImageErrored = project.scenes.some((s) => (s.images || []).some((im) => im.status === 'error'));
-    const recoveryWasNeeded = (Number(project.batchRecoveryCycles) || 0) > 0;
-    const purelyWaitingOnGoogle = jobsStillOutstanding && !anyImageErrored && !recoveryWasNeeded;
+    const recoveryExhausted = (Number(project.batchRecoveryCycles) || 0) >= MAX_RECOVERY_CYCLES;
+    const purelyWaitingOnGoogle = jobsStillOutstanding && !recoveryExhausted;
     if (wasResumed && purelyWaitingOnGoogle && project.resumeAttempts !== priorResumeAttempts) {
       project = { ...project, resumeAttempts: priorResumeAttempts, lastResumePhase: priorLastResumePhase };
       await persistMedia();

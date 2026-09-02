@@ -19,7 +19,10 @@ import { parseBeatKey, collectPendingBeatItems, submitImageBatchChunk } from './
 // rejected by Gemini (or anything else keeps producing a non-ready beat), this stops after this
 // many recovery batches rather than resubmitting it forever. Tracked on project.batchRecoveryCycles
 // so the count survives across separate resumePendingBatches calls (e.g. across app reopens).
-const MAX_RECOVERY_CYCLES = 5;
+// Exported because fullPipelineRecipe.js's resume-attempt bookkeeping needs the same threshold: a
+// recovery batch that's still within this cap is a normal "waiting on Google" state, not a failed
+// media-phase attempt (see that file's mediaStillInProgress rollback).
+export const MAX_RECOVERY_CYCLES = 5;
 
 // Same timeout values mediaGenerationEngine.js uses for the equivalent kinds of calls — a status
 // check is small/quick, a results fetch can carry several images' worth of base64 data (bigger,
