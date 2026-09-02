@@ -51,7 +51,7 @@ JSON schema:
 {
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end, written to match the chosen angle",
   "tags": [15 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator, one strong focal subject, exaggerated emotion, no text in image" }],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator: one strong focal subject, exaggerated emotion, no text in image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\") — never a generic stand-in like \"a businessman\" or \"a shocked man\"" }],
   "character_bible": [array of objects, one per recurring character: { "id": string, "name": string, "base_description": string, "variants": [{ "label": string, "description": string }] }],
   "outline": [array of chapter objects: { "id": string, "title": string, "summary": string, "scene_count": number }],
   "total_scenes": [total scenes for this video, computed from the chosen video length]
@@ -59,6 +59,7 @@ JSON schema:
 
 Rules:
 - The sum of every chapter's scene_count MUST equal exactly [total scenes for this video].
+- thumbnail_concepts: when this video centers on a real, identifiable person or a well-known named character (the same figures listed in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — the same principle as the title naming its real subject, not a generic lookalike description. Only fall back to a generic figure when the video genuinely has no single identifiable person or character at its center.
 - Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).
 - Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids.
 - [If a premium image provider is selected: additional guidance on when to keep character descriptions minimal.]
