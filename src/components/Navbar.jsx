@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { T, FONT } from '../theme';
 
-export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut, hasActiveAutomation, idleVideoCount, onReturnToAutomation }) {
+export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, onSignOut, hasActiveAutomation, idleVideoCount, onReturnToAutomation, onHome }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const hamburger = (
@@ -22,12 +22,27 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
     </button>
   );
 
+  // WiSiVERSE wordmark pattern: the "WiSi" oval mark (logo-wisi.png) + the property name ("TUBE")
+  // as text alongside it, together forming "WiSiTUBE" — never the full word spelled out as plain
+  // text. The whole lockup is one clickable control back to home (the Channels list).
   const brand = (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+    <button
+      onClick={onHome}
+      aria-label="WiSiTUBE — home"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+      }}
+    >
       <img
-        src="/logo-wisitube.png"
-        alt="WisiTube"
-        style={{ height: 28 }}
+        src="/logo-wisi.png"
+        alt=""
+        style={{ height: 26, display: 'block' }}
         onError={(e) => {
           e.currentTarget.style.display = 'none';
         }}
@@ -42,9 +57,9 @@ export default function Navbar({ tabs, activeTab, onTab, isMobile, userEmail, on
           letterSpacing: '0.03em',
         }}
       >
-        WisiTube
+        TUBE
       </span>
-    </div>
+    </button>
   );
 
   const pills = (

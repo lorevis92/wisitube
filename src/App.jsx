@@ -797,6 +797,7 @@ export default function App() {
         hasActiveAutomation={!!currentAutomationRun}
         idleVideoCount={idleVideoCount}
         onReturnToAutomation={() => setTab('automation-mirror')}
+        onHome={backToChannels}
       />
 
       {archivedVideoNotice && (
