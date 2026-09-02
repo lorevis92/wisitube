@@ -80,6 +80,8 @@ function formatCountsDetail(item) {
 // actively progressing would be labelled "Idle" here.
 function formatWaitingReason(item, live) {
   if (live) return '▶ Active — a cycle is generating this video right now';
+  if (item.waitingReason === 'ready_to_publish')
+    return '🟢 Ready to publish — render + thumbnail are done. Automation will publish it on its next pass, or use "Publish now".';
   if (item.waitingReason === 'awaiting_batch') return "⏳ Waiting on Google's batch processing";
   if (item.waitingReason === 'stuck') return item.stuckMessage || '⚠ Stuck — needs manual review';
   return '⏸ Idle — not part of an active cycle right now';
@@ -495,7 +497,9 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 8,
-                    border: `1px solid ${live ? T.green : item.stuck ? T.primaryBorder : T.border}`,
+                    border: `1px solid ${
+                      live || item.waitingReason === 'ready_to_publish' ? T.green : item.stuck ? T.primaryBorder : T.border
+                    }`,
                     background: item.stuck ? T.primaryLight : 'transparent',
                     borderRadius: 4,
                     padding: 10,
@@ -574,7 +578,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                           opacity: anyBusy || item.waitingReason === 'stuck' || live ? 0.6 : 1,
                         }}
                       >
-                        ▶ Resume now
+                        {item.waitingReason === 'ready_to_publish' ? '▶ Publish now' : '▶ Resume now'}
                       </button>
                     )}
 
@@ -658,6 +662,11 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                           ⚠ Published without its custom thumbnail — open it in Export and retry the thumbnail step (no re-upload needed).
                         </div>
                       )}
+                      {!item.youtubeVideoId && item.publishSkipped?.reason && (
+                        <div style={{ fontFamily: FONT.ui, fontSize: 11, color: T.textSecondary, marginTop: 4, lineHeight: 1.5 }}>
+                          Not published: {item.publishSkipped.reason}. Publish it by hand from Export, or clear the skip to let automation retry.
+                        </div>
+                      )}
                     </div>
                     {item.youtubeVideoId ? (
                       <a
@@ -681,20 +690,24 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                       </a>
                     ) : (
                       <span
-                        title="The video is fully produced (render + thumbnail done) but was never published — auto-publish is off for this channel, or it's awaiting manual review after an anomalous interruption."
+                        title={
+                          item.publishSkipped?.reason
+                            ? `Automation did not publish this: ${item.publishSkipped.reason}.`
+                            : 'Fully produced (render + thumbnail done) but not published.'
+                        }
                         style={{
                           ...mono,
                           fontSize: 10,
                           fontWeight: 700,
                           textTransform: 'uppercase',
-                          color: T.textMuted,
-                          border: `1px solid ${T.border}`,
+                          color: item.publishSkipped ? T.yellow : T.textMuted,
+                          border: `1px solid ${item.publishSkipped ? T.yellow : T.border}`,
                           borderRadius: 3,
                           padding: '4px 8px',
                           flexShrink: 0,
                         }}
                       >
-                        ◻ Finished — not published
+                        {item.publishSkipped ? '◻ Not published' : '◻ Finished — not published'}
                       </span>
                     )}
                   </div>
