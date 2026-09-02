@@ -26,12 +26,24 @@ const TICK_MS = 60 * 1000;
 const BATCH_POLL_TICK_MS = 60 * 1000;
 const UNIT_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
 
-// A cycle stuck this long is presumed dead, not still legitimately working — see runManagedCycle's
-// stale-lock recovery below. Well above how long a real cycle should ever sit on one channel (even
-// the slowest Gemini Batch jobs rarely run past a couple hours, and a healthy cycle moves on to the
-// next channel rather than blocking on one), so this only ever fires for a genuinely abandoned lock.
-const STALE_LOCK_MS = 4 * 60 * 60 * 1000;
-const STALE_LOCK_HOURS = STALE_LOCK_MS / (60 * 60 * 1000);
+// Lock liveness — see withSchedulerLock. Whoever holds currently_running rewrites last_heartbeat_at
+// every HEARTBEAT_INTERVAL_MS for as long as it's working; if that signal goes quiet for
+// HEARTBEAT_STALE_MS the holder's tab is gone (closed, asleep, crashed) or its event loop is wedged,
+// and the lock is orphaned — the next acquire attempt reclaims it. This works for EVERY lock holder
+// identically (full cycle, single resume, the lightweight batch poll), all of which go through
+// withSchedulerLock, and it also makes a failed release write below self-correcting: the heartbeat
+// stops either way, so the lock never sits stuck longer than HEARTBEAT_STALE_MS.
+//
+// 3 min is ~6 missed 30s beats — long enough that a brief tab backgrounding / GC pause / slow
+// network run of heartbeat writes doesn't trip it, short enough that a genuinely dead lock is
+// reclaimed in minutes instead of the hours the old start-time threshold needed.
+const HEARTBEAT_INTERVAL_MS = 30 * 1000;
+const HEARTBEAT_STALE_MS = 3 * 60 * 1000;
+
+// Fallback only for a lock acquired before last_heartbeat_at existed (heartbeat is null, so there's
+// nothing recent to judge liveness by) — the original "started this long ago" heuristic. A real
+// cycle can legitimately run a couple hours, hence still generous.
+const LEGACY_STALE_LOCK_MS = 4 * 60 * 60 * 1000;
 
 function intervalMs(settings) {
   const unitMs = UNIT_MS[settings.intervalUnit] || UNIT_MS.hours;
@@ -47,6 +59,46 @@ function formatElapsed(ms) {
   const days = Math.floor(totalHr / 24);
   const remHr = totalHr % 24;
   return `${days}d ${remHr}h`;
+}
+
+// Is the currently_running lock in `settings` orphaned? Judged by the heartbeat's age
+// (HEARTBEAT_STALE_MS) when there is one, falling back to the lock's start time + the legacy
+// multi-hour threshold only for a lock acquired before last_heartbeat_at existed. Shared by
+// withSchedulerLock (which acts on it) and pollPendingImageBatches (which must not skip a round on
+// a lock that's actually dead). Callers should have already checked settings.currentlyRunning.
+function lockStaleness(settings) {
+  const heartbeatAt = settings.lastHeartbeatAt || null;
+  const startedAt = settings.currentRunStartedAt || null;
+  const heartbeatAgeMs = heartbeatAt ? Date.now() - heartbeatAt : null;
+  const startAgeMs = startedAt ? Date.now() - startedAt : null;
+  const stale =
+    heartbeatAgeMs !== null
+      ? heartbeatAgeMs > HEARTBEAT_STALE_MS
+      : startAgeMs !== null && startAgeMs > LEGACY_STALE_LOCK_MS;
+  return { stale, heartbeatAt, startedAt, heartbeatAgeMs, startAgeMs };
+}
+
+// Release the currently_running lock, retrying a failed write a couple times before giving up — a
+// single lost release used to orphan the lock until the stale threshold. Even if every attempt
+// fails, the heartbeat has already stopped (see withSchedulerLock's finally), so the lock is still
+// reclaimed within HEARTBEAT_STALE_MS; this just makes the clean path robust.
+async function releaseLock(label) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
+      return;
+    } catch (err) {
+      console.error(`[automationScheduler] withSchedulerLock(${label}) failed to release the DB lock (attempt ${attempt}/3)`, err);
+      // eslint-disable-next-line no-await-in-loop
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+  console.error(
+    `[automationScheduler] withSchedulerLock(${label}) gave up releasing the DB lock — the heartbeat has stopped, so the stale check will reclaim it within ${Math.round(
+      HEARTBEAT_STALE_MS / 60000
+    )} min.`
+  );
 }
 
 // Turns automationEngine.js's { channelId, channelName, step, message, videoId, project } onProgress
@@ -99,18 +151,17 @@ let claimedLocally = false;
  * immediately why nothing happened, without having to go dig through automation_daily_upload_count
  * or query anything else themselves.
  *
- * When the blocking cycle has been running longer than STALE_LOCK_HOURS, the lock is instead
- * presumed abandoned — most likely the tab/computer that held it went away (closed, slept, crashed,
- * lost network) mid-cycle, before the finally below that normally releases it ever got to run —
- * auto-released (logged as 'stale_lock_released', never as an ordinary success), and this same call
- * falls through to acquire the lock fresh and actually run, rather than waiting for a later tick to
- * separately notice the lock is free.
+ * When the blocking lock's heartbeat has gone quiet (HEARTBEAT_STALE_MS — see withSchedulerLock),
+ * the lock is instead presumed abandoned: the tab/computer that held it went away (closed, slept,
+ * crashed, lost network) or its event loop wedged, so the heartbeat writes stopped. Auto-released
+ * (logged as 'stale_lock_released', never as an ordinary success), and this same call falls through
+ * to acquire the lock fresh, rather than waiting for a later tick to notice the lock is free.
  *
  * Returns { started: true } once runAutomationCycle has finished (successfully, with an error, an
  * inProgress:true "still waiting on Gemini Batch" result, or stopped) — the lock is always released
- * in a finally, so an uncaught exception can never leave currently_running stuck true forever. The
- * remaining gap this can't close is the tab going away entirely (see the stale-lock recovery
- * above), not an exception — nothing throws in that case, there's nothing for a finally to catch.
+ * in a finally (with a retry — see releaseLock), and the heartbeat is stopped there first, so even
+ * a total failure to write the release leaves the lock reclaimable within HEARTBEAT_STALE_MS. A tab
+ * that vanishes mid-run is covered by the same heartbeat mechanism.
  */
 export async function runManagedCycle({ userId, onUpdate, onProgress }) {
   return withSchedulerLock({ label: 'cycle', resetInterval: true }, ({ shouldStop }) =>
@@ -152,10 +203,13 @@ async function withSchedulerLock({ label, resetInterval }, task) {
       currentRunStartedAt: settings.currentRunStartedAt,
       elapsedMs: settings.currentRunStartedAt ? Date.now() - settings.currentRunStartedAt : null,
     });
-    const startedAt = settings.currentRunStartedAt;
+    const { stale, startedAt, heartbeatAt, heartbeatAgeMs } = lockStaleness(settings);
     const elapsedMs = startedAt ? Date.now() - startedAt : null;
     const elapsed = startedAt ? formatElapsed(elapsedMs) : 'an unknown amount of time';
     const startedAtText = startedAt ? new Date(startedAt).toLocaleString() : 'an unknown time';
+    const heartbeatText = heartbeatAt
+      ? `last heartbeat ${formatElapsed(heartbeatAgeMs)} ago`
+      : 'no heartbeat recorded (lock predates the heartbeat mechanism)';
     let lastLineText = 'no recent automation log entry found to diagnose further';
     try {
       // Deliberately NOT listAutomationLog({ limit: 1 }) — that's a global "most recent row"
@@ -173,13 +227,12 @@ async function withSchedulerLock({ label, resetInterval }, task) {
       lastLineText = `could not read the automation log to diagnose further: ${String(err.message || err)}`;
     }
 
-    // A lock only ever known to be this old is presumed abandoned (see STALE_LOCK_MS above), not
-    // still legitimately in progress — auto-release it and fall through to the ordinary
-    // acquire-and-run path below instead of returning blocked, so this same tick recovers
-    // immediately rather than leaving the scheduler sitting idle until someone notices and clicks
-    // "Force unlock" (potentially days, exactly what actually happened here once already).
-    if (elapsedMs !== null && elapsedMs > STALE_LOCK_MS) {
-      const staleMessage = `stale lock auto-released after ${elapsed} (started ${startedAtText}, past the ${STALE_LOCK_HOURS}h threshold) — ${lastLineText}`;
+    // Orphaned lock — the holder's heartbeat has gone quiet (or, for a pre-heartbeat lock, it's
+    // simply older than the legacy threshold). Auto-release and fall through to acquire fresh, so
+    // this same tick recovers instead of the scheduler sitting idle until someone clicks
+    // "Force unlock" (which is exactly what happened before this).
+    if (stale) {
+      const staleMessage = `stale lock auto-released (started ${startedAtText}, ${elapsed} ago; ${heartbeatText}) — ${lastLineText}`;
       console.warn('[automationScheduler] auto-releasing stale lock:', staleMessage);
       try {
         // A distinct status, never 'success' or 'blocked' — this must stay visibly different in the
@@ -200,7 +253,7 @@ async function withSchedulerLock({ label, resetInterval }, task) {
     } else {
       return {
         started: false,
-        reason: `an automation ${label === 'resume' ? 'cycle or resume' : 'cycle'} has been running for ${elapsed} (started ${startedAtText}) — ${lastLineText}`,
+        reason: `an automation ${label === 'resume' ? 'cycle or resume' : 'cycle'} has been running for ${elapsed} (started ${startedAtText}; ${heartbeatText}) — ${lastLineText}`,
       };
     }
   }
@@ -218,16 +271,33 @@ async function withSchedulerLock({ label, resetInterval }, task) {
   // claimedLocally always gets released, whatever fails.
   console.warn(`[run-cycle-debug] withSchedulerLock(${label}) acquiring lock — claimedLocally = true`);
   claimedLocally = true;
+  let heartbeatTimer = null;
   try {
     stopRequested = false;
     const startedAt = Date.now();
     // lastRunStartedAt drives the scheduler's interval timer — only a real cycle bumps it; a manual
-    // single-video resume must not push the next scheduled cycle out.
+    // single-video resume must not push the next scheduled cycle out. lastHeartbeatAt is written
+    // SEPARATELY, just below, not in this acquire patch — so a deployment where the DB column isn't
+    // there yet still acquires the lock cleanly and just degrades to the legacy stale threshold.
     const lockPatch = { currentlyRunning: true, currentRunStartedAt: startedAt };
     if (resetInterval) lockPatch.lastRunStartedAt = startedAt;
     console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to write currently_running=true to DB`);
     await saveSchedulerSettings(lockPatch);
     console.warn(`[run-cycle-debug] withSchedulerLock(${label}) wrote currently_running=true, about to run task()`);
+
+    // Keep the liveness signal fresh for as long as this task runs. If this tab is closed / put to
+    // sleep / its event loop wedged, these writes simply stop and another acquire attempt reclaims
+    // the lock within HEARTBEAT_STALE_MS — regardless of which lock holder this is (cycle, resume,
+    // batch poll), and regardless of whether the release below succeeds. Fire-and-forget: a single
+    // failed write is retried on the next interval; a missing column (pre-migration) just leaves
+    // lastHeartbeatAt null, which lockStaleness handles by falling back to the legacy threshold.
+    const beat = () =>
+      saveSchedulerSettings({ lastHeartbeatAt: Date.now() }).catch((err) =>
+        console.error(`[automationScheduler] withSchedulerLock(${label}) heartbeat write failed (retrying next interval)`, err)
+      );
+    beat();
+    heartbeatTimer = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+
     try {
       await task({ shouldStop: () => stopRequested });
       console.warn(`[run-cycle-debug] withSchedulerLock(${label}) task() resolved normally`);
@@ -237,14 +307,15 @@ async function withSchedulerLock({ label, resetInterval }, task) {
       // internally, or a video left inProgress:true awaiting Gemini Batch — none of these are
       // exceptions, they're all just different normal return paths) or, in the unlikely case
       // something above it truly threw, on that exception too — inProgress:true never bypasses this.
-      try {
-        console.warn(`[run-cycle-debug] withSchedulerLock(${label}) finally — releasing DB lock (currently_running=false)`);
-        await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
-        console.warn(`[run-cycle-debug] withSchedulerLock(${label}) DB lock released`);
-      } catch (err) {
-        console.warn(`[run-cycle-debug] withSchedulerLock(${label}) FAILED to release DB lock — see error below`, err);
-        console.error('[automationScheduler] failed to release currently_running lock', err);
+      // Stop the heartbeat BEFORE releasing: if the release write then fails, the now-frozen
+      // heartbeat guarantees the stale check reclaims the lock within HEARTBEAT_STALE_MS.
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
       }
+      console.warn(`[run-cycle-debug] withSchedulerLock(${label}) finally — releasing DB lock (currently_running=false)`);
+      await releaseLock(label);
+      console.warn(`[run-cycle-debug] withSchedulerLock(${label}) DB lock release attempt done`);
     }
   } finally {
     console.warn(`[run-cycle-debug] withSchedulerLock(${label}) outer finally — claimedLocally = false`);
@@ -253,9 +324,10 @@ async function withSchedulerLock({ label, resetInterval }, task) {
 }
 
 // Manual escape hatch for a lock that's genuinely stuck (see AutomationStep.jsx's "Force unlock"
-// button) — for a lock under STALE_LOCK_HOURS old that's stuck for a reason the automatic
-// recovery above doesn't cover yet, or simply when someone doesn't want to wait out the threshold
-// (e.g. the acquire write's response was lost after it had already committed server-side, leaving
+// button) — for a lock whose heartbeat is somehow still being written by a runaway timer the
+// automatic recovery above therefore won't touch, or simply when someone doesn't want to wait out
+// even the (now short) heartbeat-stale window (e.g. the acquire write's response was lost after it
+// had already committed server-side, leaving
 // currently_running=true with no in-memory runManagedCycle call left anywhere to release it,
 // including in another tab/session entirely, which this module's own claimedLocally guard can't see
 // at all). Resets the DB lock only — never touches claimedLocally, which is scoped to whichever tab
@@ -303,9 +375,11 @@ async function pollPendingImageBatches({ userId }) {
   // The timer is only running while the scheduler is enabled, but re-check anyway — another tab may
   // have turned it off since this tab's timer was last (re)started.
   if (!settings.enabled) return;
-  // A full cycle or a manual action holds the lock — skip this round entirely (down to the DB
-  // sweep below) and let the next 60s tick retry once it frees up.
-  if (settings.currentlyRunning) return;
+  // A LIVE full cycle or manual action holds the lock — skip this round entirely (down to the DB
+  // sweep below) and let the next 60s tick retry once it frees up. A STALE lock (dead holder, quiet
+  // heartbeat) must NOT short-circuit here, or the poll would starve forever behind an orphaned
+  // lock — fall through so runManagedResume → withSchedulerLock can auto-release and reclaim it.
+  if (settings.currentlyRunning && !lockStaleness(settings).stale) return;
 
   let videos;
   try {
@@ -334,12 +408,21 @@ async function pollPendingImageBatches({ userId }) {
         console.warn('[automationScheduler] pending-batch poll: no recipe for content_type', channel.content_type, '- skipping', item.videoId);
         continue;
       }
-      // eslint-disable-next-line no-await-in-loop
-      const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
+      let result;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
+      } catch (err) {
+        // The recipe threw (e.g. a video that resolves to "stuck", or a genuine phase failure).
+        // withSchedulerLock's finally already released the lock before this propagated — just move
+        // on to the next video so one bad video can't starve the rest of the sweep.
+        console.error('[automationScheduler] pending-batch poll: resume threw for', item.videoId, err);
+        continue;
+      }
       if (!result.started) {
-        // The lock was taken between the currentlyRunning check above and here (a full cycle tick,
-        // a manual resume) — stop and let the next batch tick retry the remaining videos.
-        console.warn('[automationScheduler] pending-batch poll: lock became unavailable mid-sweep, retrying next tick —', result.reason);
+        // The lock was taken between the check above and here (a full cycle tick, a manual resume) —
+        // stop and let the next batch tick retry the remaining videos.
+        console.warn('[automationScheduler] pending-batch poll: lock unavailable mid-sweep, retrying next tick —', result.reason);
         break;
       }
     }

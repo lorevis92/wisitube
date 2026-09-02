@@ -871,7 +871,14 @@ export async function getLastRealAutomationLogEntry() {
 // automationScheduler.js's runManagedCycle). ----
 // wisitube_scheduler_settings columns: user_id, enabled, interval_value, interval_unit
 // ('minutes'|'hours'|'days'), last_run_started_at, last_run_finished_at, currently_running,
-// current_run_started_at, updated_at.
+// current_run_started_at, last_heartbeat_at, updated_at.
+//
+// last_heartbeat_at is the lock's liveness signal: whatever holds currently_running (a full cycle, a
+// single resume, or the lightweight batch poll — all via automationScheduler.js's withSchedulerLock)
+// rewrites it every ~30s for as long as it's working. A heartbeat that's gone quiet for a few
+// minutes means the holder's tab is closed / asleep / wedged and the lock is orphaned — see
+// withSchedulerLock's stale-lock recovery, which reclaims it far faster than the old fixed
+// multi-hour "started this long ago" threshold could.
 //
 // Required one-time setup in Supabase (no migration tooling in this repo — run manually in the SQL
 // editor once):
@@ -885,8 +892,11 @@ export async function getLastRealAutomationLogEntry() {
 //     last_run_finished_at timestamptz,
 //     currently_running boolean not null default false,
 //     current_run_started_at timestamptz,
+//     last_heartbeat_at timestamptz,
 //     updated_at timestamptz not null default now()
 //   );
+//   -- If the table already exists from before last_heartbeat_at was added:
+//   alter table wisitube_scheduler_settings add column if not exists last_heartbeat_at timestamptz;
 //   alter table wisitube_scheduler_settings enable row level security;
 //   create policy "scheduler settings are per-user" on wisitube_scheduler_settings
 //     for all using (user_id = auth.uid()) with check (user_id = auth.uid());
@@ -902,6 +912,7 @@ const SCHEDULER_DEFAULTS = {
   lastRunFinishedAt: null,
   currentlyRunning: false,
   currentRunStartedAt: null,
+  lastHeartbeatAt: null,
 };
 
 function fromSchedulerRow(row) {
@@ -914,6 +925,7 @@ function fromSchedulerRow(row) {
     lastRunFinishedAt: row.last_run_finished_at ? new Date(row.last_run_finished_at).getTime() : null,
     currentlyRunning: !!row.currently_running,
     currentRunStartedAt: row.current_run_started_at ? new Date(row.current_run_started_at).getTime() : null,
+    lastHeartbeatAt: row.last_heartbeat_at ? new Date(row.last_heartbeat_at).getTime() : null,
   };
 }
 
@@ -963,6 +975,8 @@ export async function saveSchedulerSettings(patch) {
   if ('currentlyRunning' in patch) row.currently_running = !!patch.currentlyRunning;
   if ('currentRunStartedAt' in patch)
     row.current_run_started_at = patch.currentRunStartedAt ? new Date(patch.currentRunStartedAt).toISOString() : null;
+  if ('lastHeartbeatAt' in patch)
+    row.last_heartbeat_at = patch.lastHeartbeatAt ? new Date(patch.lastHeartbeatAt).toISOString() : null;
 
   // TEMPORARY diagnostic — remove once the RLS 403 on this upsert is root-caused. Re-reads the
   // session (not the one captured above) right at the point of the request, so this reflects
