@@ -6,7 +6,7 @@
 // memory/IndexedDB for the current session only, stripped out before every write to wisitube_videos
 // (see stripBlobsForSync below). Real Blob persistence is Phase 3.
 import { supabase } from './supabase';
-import { determineResumePhase, RESUME_PHASE_PUBLISH } from './videoResumption';
+import { determineResumePhase } from './videoResumption';
 
 export function createId() {
   return crypto.randomUUID();
@@ -182,7 +182,6 @@ const VIDEO_DOWNSTREAM_FIELDS = [
   'thumbnailPublishFailed',
   'thumbnailStoragePath',
   'stuckError',
-  'publishSkipped',
   'mediaArchived',
 ];
 
@@ -554,7 +553,6 @@ function computeVideoCounts(project) {
 // (project.stuckError set) is labeled with that message instead, by the caller — this only ever
 // describes ordinary progress.
 function describeIncompletePhase(project, phase, counts) {
-  if (phase === RESUME_PHASE_PUBLISH) return 'Ready to publish — automation will publish this on its next pass';
   if (phase === 'suggestion') return 'Writing outline';
 
   if (phase === 'scenes') {
@@ -609,17 +607,13 @@ export async function listIncompleteVideos(userId) {
     // eslint-disable-next-line no-await-in-loop
     const videos = await listVideosByChannel(channel.id);
     for (const v of videos) {
-      // Anything automation still has work left on stays here — including a fully-produced video
-      // whose publish never started (RESUME_PHASE_PUBLISH): it is NOT "completed", automation will
-      // publish it, so it must not hide in "Recently completed" looking finished. determineResumePhase
-      // returns null (→ excluded, shown as completed) once the video is published, its upload was
-      // attempted, it was local-exported, or automation deliberately skipped publishing it
-      // (project.publishSkipped — see src/lib/videoResumption.js).
+      // Thumbnail created (or already published, which implies it) → "completed", shown in
+      // listRecentCompletedVideos instead — see that function's own comment.
+      if (v.thumbnailStoragePath || v.youtubeVideoId) continue;
       const phase = determineResumePhase(v, v.outline);
-      if (phase === null) continue;
+      if (phase === null) continue; // nothing left for automation to do AND no thumbnail — nothing to surface
       const counts = computeVideoCounts(v);
       const hasPendingBatches = Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0;
-      const readyToPublish = phase === RESUME_PHASE_PUBLISH;
       const stuck = !!v.stuckError;
       results.push({
         videoId: v.id,
@@ -636,9 +630,8 @@ export async function listIncompleteVideos(userId) {
         isStaticBackground: !!v.staticBackground,
         stuck,
         stuckMessage: v.stuckError || null,
-        waitingReason: stuck ? 'stuck' : readyToPublish ? 'ready_to_publish' : hasPendingBatches ? 'awaiting_batch' : 'idle',
+        waitingReason: hasPendingBatches ? 'awaiting_batch' : stuck ? 'stuck' : 'idle',
         hasPendingBatches,
-        readyToPublish,
         // Set by src/lib/batchResumption.js while Google's batch service is returning 503s for one
         // of this video's jobs — { since, retryCount, resubmittedAt? }. Surfaced reassuringly in the
         // dashboard (AutomationMirrorStep.jsx) so an hour-long Google hiccup doesn't look like a hang.
@@ -666,14 +659,12 @@ export async function resetStuckVideo(id) {
   return saveVideo({ ...video, resumeAttempts: 0, stuckError: null });
 }
 
-// Every video, across every one of this user's channels, that automation has genuinely nothing left
-// to do on (determineResumePhase returns null): published; upload already attempted; local-exported;
-// or a publish automation deliberately skipped (project.publishSkipped — auto-publish off, or an
-// anomalous interruption held for manual review). A fully-produced video whose publish just hasn't
-// started yet is NOT here — it's RESUME_PHASE_PUBLISH and stays under "Videos in progress" so it
-// doesn't look abandoned. The UI badge (AutomationMirrorStep.jsx) reads youtubeVideoId ("✓
-// Published") vs publishSkipped ("◻ Not published — <reason>") vs neither ("◻ Finished — not
-// published"). Most-recent first, capped at `limit`.
+// Every video, across every one of this user's channels, whose YouTube listing thumbnail has been
+// created — "completed" regardless of publish status. That covers: published videos; videos
+// finished on a channel with auto-publish off; and videos finished but awaiting manual review (or a
+// later cycle's publish). The UI badge (AutomationMirrorStep.jsx) tells published ("✓ Published",
+// links to YouTube) from not ("◻ Finished — not published") using youtubeVideoId. Most-recent
+// first, capped at `limit`. For the dashboard's collapsible "Recently completed" section.
 export async function listRecentCompletedVideos(userId, limit = 10) {
   const channels = await listChannels();
   const results = [];
@@ -681,8 +672,7 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
     // eslint-disable-next-line no-await-in-loop
     const videos = await listVideosByChannel(channel.id);
     for (const v of videos) {
-      if (!v.thumbnailStoragePath && !v.youtubeVideoId) continue; // never reached render/thumbnail — still in progress
-      if (determineResumePhase(v, v.outline) !== null) continue; // automation still has work (e.g. RESUME_PHASE_PUBLISH)
+      if (!v.thumbnailStoragePath && !v.youtubeVideoId) continue; // no thumbnail yet — still in progress
       results.push({
         videoId: v.id,
         channelId: channel.id,
@@ -690,9 +680,6 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
         displayTitle: v.displayTitle || v.topic || 'Untitled video',
         createdAt: v.createdAt,
         youtubeVideoId: v.youtubeVideoId || null,
-        // Why automation didn't publish it, when it didn't — { reason, at }. Shown in the dashboard
-        // so a produced-but-unpublished video always says why. Null for a normally-published video.
-        publishSkipped: v.publishSkipped || null,
         // Published, but its custom thumbnail failed to attach (see the recipes' youtube phase) —
         // the dashboard flags it so the owner knows to retry the thumbnail from ExportStep.
         thumbnailPublishFailed: v.thumbnailPublishFailed === true && !!v.youtubeVideoId,

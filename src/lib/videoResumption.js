@@ -63,14 +63,6 @@ export function determineResumePhase(project, outline) {
   // published" for a manual upload — terminal for automation, don't re-export it every cycle.
   if (project?.localExportedAt) return null;
 
-  // Automation reached the publish phase and deliberately chose NOT to publish (auto-publish off for
-  // the channel, or an anomalous mid-generation interruption held for manual review — the recipes'
-  // YouTube phase persists project.publishSkipped { reason, at } before logging it). Terminal:
-  // don't re-resume and re-log it every cycle. The dashboard surfaces publishSkipped.reason in
-  // "Recently completed" so it's never a silent disappearance. A human publishes it from
-  // Storyboard/Editor/Export, or clears publishSkipped to let automation retry.
-  if (project?.publishSkipped) return null;
-
   // Media + thumbnail done, and publish was never even started — the only thing left is a safe first
   // publish. thumbnailStoragePath proves render succeeded too (the thumbnail phase always runs
   // strictly after render). The rendered MP4 itself is never persisted, so the recipe's resume

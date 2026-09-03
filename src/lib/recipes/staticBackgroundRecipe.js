@@ -56,7 +56,11 @@ async function findResumableVideo(channelId) {
       // identical guard for the reasoning (createdByAutomation flag, with a persisted-outline
       // fallback for pre-flag videos; the manual flow never persists an outline).
       if (v.createdByAutomation !== true && !(Array.isArray(v.outline) && v.outline.length > 0)) return false;
-      return determineResumePhase(v, v.outline) !== null;
+      // RESUME_PHASE_PUBLISH (render + thumbnail done, only the YouTube upload left) is deliberately
+      // excluded — an automatic cycle never auto-publishes a resumed video (see the revert of 13a1dbd
+      // and fullPipelineRecipe.js's identical findResumableVideo).
+      const phase = determineResumePhase(v, v.outline);
+      return phase !== null && phase !== RESUME_PHASE_PUBLISH;
     }) || null
   );
 }
@@ -226,11 +230,10 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   const wasResumed = !!resumable;
   // See fullPipelineRecipe.js's identical block for the full reasoning. resumedFromNormalBatchWait
   // never fires for this content type (no Gemini Batch — everything is synchronous), but it's kept
-  // for structural parity; resumedAfterMediaComplete is what matters here — a video resumed at
-  // render / thumbnail / ready-to-publish (a render or thumbnail retry, or a fully-produced video
-  // left unpublished) must still auto-publish, only a resume while generation was mid-flight is held.
+  // for structural parity; resumedReadyToPublish still matters (a static_background video fully
+  // produced but left unpublished must be able to auto-publish on a later cycle).
   let resumedFromNormalBatchWait = false;
-  let resumedAfterMediaComplete = false;
+  let resumedReadyToPublish = false;
 
   if (resumable) {
     videoId = resumable.id;
@@ -255,8 +258,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     const rawResumePhase = determineResumePhase(project, plan.outline);
     resumePhase = rawResumePhase;
     resumedFromNormalBatchWait = Array.isArray(resumable.pendingImageBatches) && resumable.pendingImageBatches.length > 0;
-    resumedAfterMediaComplete =
-      rawResumePhase === 'render' || rawResumePhase === 'thumbnail' || rawResumePhase === RESUME_PHASE_PUBLISH;
+    resumedReadyToPublish = rawResumePhase === RESUME_PHASE_PUBLISH;
 
     if ((resumePhase === 'thumbnail' || resumePhase === RESUME_PHASE_PUBLISH || resumePhase === null) && !project.renderedVideoBlob) resumePhase = 'render';
 
@@ -647,22 +649,14 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // as fullPipelineRecipe.js's identical phase.
   let youtubeVideoId = null;
   // See fullPipelineRecipe.js's identical YouTube-phase comment for the full reasoning — only a
-  // resume while generation was still mid-flight (suggestion / scenes) blocks auto-publish; a video
-  // resumed at render / thumbnail / ready-to-publish still publishes.
-  const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedAfterMediaComplete;
-  // See fullPipelineRecipe.js — every deliberate no-publish path persists this so the skip is
-  // terminal AND explained in the dashboard's "Recently completed" list.
-  const markPublishSkipped = async (reason) => {
-    project = { ...project, publishSkipped: { reason, at: Date.now() } };
-    await persist();
-  };
+  // genuine anomalous mid-generation interruption blocks auto-publish; a video that was simply
+  // resumed and finished (or is a safe ready-to-publish resume) still publishes.
+  const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
   if (channel.automation_auto_publish === false) {
-    await markPublishSkipped('auto-publish is disabled for this channel');
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
   } else if (anomalousInterruption) {
     const message = 'video ready for manual review — resumed after an anomalous interruption mid-generation, publish is not auto-retried to avoid a possible duplicate upload';
-    await markPublishSkipped('resumed after an anomalous interruption mid-generation — publish held for manual review');
     await logStep(channelId, videoId, 'youtube', 'success', message);
     report('youtube', 'Resumed video — ready for manual review, not auto-published');
   } else {

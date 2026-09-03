@@ -346,13 +346,11 @@ let pollingBatches = false;
  * from the full automation cycle (tick/runManagedCycle) in every way that matters:
  *
  *  - Runs every BATCH_POLL_TICK_MS (60s), NOT on the user's configured cycle interval.
- *  - Touches ONLY videos that are (a) waiting on an outstanding Gemini Batch job, or (b) fully
- *    produced with render + thumbnail done but the publish never started (db.js's
- *    listIncompleteVideos → hasPendingBatches / waitingReason 'ready_to_publish'). It never starts a
+ *  - Touches ONLY videos that already have a non-empty pendingImageBatches (db.js's
+ *    listIncompleteVideos → waitingReason 'awaiting_batch' / hasPendingBatches). It never starts a
  *    new video, never fetches a suggestion, never touches budget, daily counters or the program
- *    manager — its only effect is checking batch status and carrying an already-started video the
- *    last mile: images ready → render → thumbnail → publish, or straight to publish. This is what
- *    keeps a batch video that reached "ready to publish" from waiting hours for the next full cycle.
+ *    manager — its only effect is checking batch status and letting an already-started video
+ *    continue once its images are all ready.
  *  - For each such video it calls the exact same per-video continuation
  *    AutomationMirrorStep.jsx's "Check for updates" button uses: runManagedResume(() =>
  *    recipe(channel, { targetVideoId })). The recipe re-enters the media phase, polls Google, and
@@ -390,14 +388,12 @@ async function pollPendingImageBatches({ userId }) {
     console.error('[automationScheduler] pending-batch poll: failed to list incomplete videos', err);
     return;
   }
-  // Batch-waiting videos first, then ready-to-publish ones — both are "just needs a nudge to
-  // finish", neither generates anything new.
-  const toFinish = videos.filter((v) => v.hasPendingBatches || v.waitingReason === 'ready_to_publish');
-  if (toFinish.length === 0) return;
+  const awaitingBatch = videos.filter((v) => v.hasPendingBatches);
+  if (awaitingBatch.length === 0) return;
 
   pollingBatches = true;
   try {
-    for (const item of toFinish) {
+    for (const item of awaitingBatch) {
       let channel;
       try {
         // eslint-disable-next-line no-await-in-loop
