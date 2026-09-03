@@ -661,9 +661,10 @@ export async function resetStuckVideo(id) {
 
 // Every video, across every one of this user's channels, whose YouTube listing thumbnail has been
 // created — "completed" regardless of publish status. That covers: published videos; videos
-// finished on a channel with auto-publish off; and videos finished but awaiting manual review (or a
-// later cycle's publish). The UI badge (AutomationMirrorStep.jsx) tells published ("✓ Published",
-// links to YouTube) from not ("◻ Finished — not published") using youtubeVideoId. Most-recent
+// finished on a channel with auto-publish off; and videos fully produced but never published. The
+// UI badge (AutomationMirrorStep.jsx) tells published ("✓ Published", links to YouTube) from
+// ready-to-publish ("🟢 Ready to publish", with a manual "Publish now" button — never an automatic
+// action, see the revert of 13a1dbd) from the rest ("◻ Finished — not published"). Most-recent
 // first, capped at `limit`. For the dashboard's collapsible "Recently completed" section.
 export async function listRecentCompletedVideos(userId, limit = 10) {
   const channels = await listChannels();
@@ -673,6 +674,13 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
     const videos = await listVideosByChannel(channel.id);
     for (const v of videos) {
       if (!v.thumbnailStoragePath && !v.youtubeVideoId) continue; // no thumbnail yet — still in progress
+      // Fully produced (render + thumbnail done) but never published, AND publishing it now is a
+      // provably-safe first attempt: no youtubeVideoId, and the upload was never even started
+      // (youtubeUploadStarted — its bytes may have reached Google, so it's left as a plain "not
+      // published" with no publish button, exactly as determineResumePhase treats it). local_folder
+      // exports have their own manual flow and never publish to YouTube.
+      const readyToPublish =
+        !!v.thumbnailStoragePath && !v.youtubeVideoId && !v.youtubeUploadStarted && !v.localExportedAt;
       results.push({
         videoId: v.id,
         channelId: channel.id,
@@ -680,6 +688,10 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
         displayTitle: v.displayTitle || v.topic || 'Untitled video',
         createdAt: v.createdAt,
         youtubeVideoId: v.youtubeVideoId || null,
+        readyToPublish,
+        // The "Publish now" button is only offered when the channel actually has a YouTube
+        // connection (a refresh token — what publishToYoutube needs). Otherwise the row says so.
+        youtubeConnected: !!channel.youtube_refresh_token,
         // Published, but its custom thumbnail failed to attach (see the recipes' youtube phase) —
         // the dashboard flags it so the owner knows to retry the thumbnail from ExportStep.
         thumbnailPublishFailed: v.thumbnailPublishFailed === true && !!v.youtubeVideoId,

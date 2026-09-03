@@ -200,7 +200,10 @@ function buildStaticBackgroundFromChannel(channel) {
  * (AutomationMirrorStep.jsx's "Resume now" button, bypasses findResumableVideo's channel-wide
  * search and the 7-day window, never touches the scheduler lock).
  */
-export async function runStaticBackgroundPipeline(channel, { userId, onProgress, logStep, targetVideoId } = {}) {
+// manualPublish: see fullPipelineRecipe.js — set only by the dashboard's "Publish now" button, an
+// explicit per-video click; it forces the YouTube upload past the auto-publish toggle and the
+// anomalous-interruption hold. Never set by any automatic path.
+export async function runStaticBackgroundPipeline(channel, { userId, onProgress, logStep, targetVideoId, manualPublish = false } = {}) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
   let videoId = null;
@@ -604,8 +607,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // ---- Phase: publish (local folder export) ----
   // See fullPipelineRecipe.js's identical branch: 'local_folder' mode writes the finished files to
   // the user's chosen folder and leaves the video "not published" for a manual upload + "Mark as
-  // published".
-  if (channel.automation_export_mode === 'local_folder') {
+  // published". A manual "Publish now" click skips this and goes straight to YouTube.
+  if (!manualPublish && channel.automation_export_mode === 'local_folder') {
     try {
       const srt = buildSrtFromScenes(project.scenes, true);
       const folder = await runLocalExport({
@@ -652,10 +655,10 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // genuine anomalous mid-generation interruption blocks auto-publish; a video that was simply
   // resumed and finished (or is a safe ready-to-publish resume) still publishes.
   const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
-  if (channel.automation_auto_publish === false) {
+  if (!manualPublish && channel.automation_auto_publish === false) {
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
-  } else if (anomalousInterruption) {
+  } else if (!manualPublish && anomalousInterruption) {
     const message = 'video ready for manual review — resumed after an anomalous interruption mid-generation, publish is not auto-retried to avoid a possible duplicate upload';
     await logStep(channelId, videoId, 'youtube', 'success', message);
     report('youtube', 'Resumed video — ready for manual review, not auto-published');

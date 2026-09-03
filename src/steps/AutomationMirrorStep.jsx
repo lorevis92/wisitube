@@ -12,7 +12,9 @@ import { planMediaCleanup, runMediaCleanup, ARCHIVE_AFTER_DAYS } from '../lib/me
 //   2. "Videos in progress" — every video whose listing thumbnail isn't created yet (src/lib/db.js's
 //      listIncompleteVideos), always present regardless of whether a run is live.
 //   3. "Recently completed" — the last 10 videos whose thumbnail IS created, published or not, with
-//      a per-row "✓ Published" / "◻ Finished — not published" badge. Collapsed by default.
+//      a per-row badge: "✓ Published", "🟢 Ready to publish" (+ a manual "▶ Publish now" button —
+//      never an automatic action; see the revert of 13a1dbd), or "◻ Finished — not published".
+//      Collapsed by default.
 const PHASE_LABELS = {
   starting: 'Starting run',
   suggestion: 'Choosing a topic',
@@ -178,7 +180,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
   // render → thumbnail → publish in the SAME call, exactly as an automation cycle would. So both
   // "Check for updates" (awaiting_batch) and "Resume now" (any other phase) funnel through here:
   // "check" is just "resume" for a video whose next phase happens to be media.
-  async function continueVideo(item, busyLabel) {
+  async function continueVideo(item, busyLabel, recipeOpts = {}) {
     setBusyVideoId(item.videoId);
     setBusyLabel(busyLabel);
     try {
@@ -186,7 +188,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
       if (!channel) throw new Error('Channel not found');
       const recipe = getRecipeForContentType(channel.content_type);
       if (!recipe) throw new Error(`No recipe available for content_type "${channel.content_type || '(none)'}"`);
-      const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
+      const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId, ...recipeOpts }));
       if (!result.started) {
         window.alert(`Can't work on "${item.displayTitle}" right now — ${result.reason}`);
       }
@@ -202,6 +204,12 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
 
   const checkVideoForUpdates = (item) => continueVideo(item, 'Checking…');
   const resumeVideoNow = (item) => continueVideo(item, 'Resuming…');
+  // "Publish now" on a fully-produced-but-unpublished video (Recently completed). Same recipe path
+  // as "Resume now" — targetVideoId, so it resumes at the publish step, re-renders from the saved
+  // media, restores the thumbnail and uploads. manualPublish:true forces the upload past the
+  // channel's auto-publish toggle and the anomalous-interruption hold — the human asked for it.
+  // Fires ONLY on this explicit click; nothing here adds an automatic trigger or a queue.
+  const publishVideoNow = (item) => continueVideo(item, 'Publishing…', { manualPublish: true });
 
   // "Reset & retry" — clears the stuck marker (db.js's resetStuckVideo) so this video is eligible
   // for automatic resumption again and "Resume now" stops being disabled for it.
@@ -679,9 +687,45 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                       >
                         ✓ Published
                       </a>
+                    ) : item.readyToPublish ? (
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            ...mono,
+                            fontSize: 10,
+                            fontWeight: 700,
+                            textTransform: 'uppercase',
+                            color: T.green,
+                            border: `1px solid ${T.green}`,
+                            borderRadius: 3,
+                            padding: '4px 8px',
+                          }}
+                        >
+                          🟢 Ready to publish
+                        </span>
+                        {item.youtubeConnected ? (
+                          <button
+                            onClick={() => publishVideoNow(item)}
+                            disabled={busyVideoId !== null}
+                            style={{
+                              ...btnPrimary,
+                              padding: '6px 10px',
+                              fontSize: 10,
+                              opacity: busyVideoId !== null ? 0.6 : 1,
+                            }}
+                          >
+                            ▶ Publish now
+                          </button>
+                        ) : (
+                          <span style={{ fontFamily: FONT.ui, fontSize: 11, color: T.textSecondary }}>
+                            This channel isn't connected to YouTube
+                          </span>
+                        )}
+                        {busyVideoId === item.videoId && <span style={{ ...mono, fontSize: 10, color: T.textMuted }}>{busyLabel}</span>}
+                      </div>
                     ) : (
                       <span
-                        title="The video is fully produced (render + thumbnail done) but was never published — auto-publish is off for this channel, or it's awaiting manual review after an anomalous interruption."
+                        title="The video is fully produced (render + thumbnail done) but was never published — auto-publish is off for this channel, or its upload was already attempted once and is left for manual review."
                         style={{
                           ...mono,
                           fontSize: 10,

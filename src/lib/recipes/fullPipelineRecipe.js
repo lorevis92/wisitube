@@ -286,7 +286,11 @@ function buildAutomationSettings(channel) {
 // automatic search — an explicit human choosing a specific video from the dashboard doesn't need
 // it) and, since this is a single-video action rather than a whole cycle, is never routed through
 // runManagedCycle/the currently_running lock — the caller invokes this recipe directly.
-export async function runFullPipeline(channel, { userId, onProgress, logStep, targetVideoId } = {}) {
+// manualPublish: set ONLY by AutomationMirrorStep.jsx's "Publish now" button (Recently completed) —
+// an explicit, per-video click on a fully-produced-but-unpublished video. It forces the YouTube
+// upload: the channel's auto-publish toggle and the anomalous-interruption hold are both bypassed,
+// because the human is asking for exactly this one publish. Never set by any automatic path.
+export async function runFullPipeline(channel, { userId, onProgress, logStep, targetVideoId, manualPublish = false } = {}) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
   // Declared here (rather than at their original spot further down) so report()/persist() can
@@ -964,7 +968,8 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // finished video + thumbnail + a publish-info sheet are written to the folder the user picked in
   // Automation settings, and the video is left WITHOUT youtubeVideoId — it stays "Finished — not
   // published" in the dashboard, where the owner uses "Mark as published" after uploading by hand.
-  if (channel.automation_export_mode === 'local_folder') {
+  // A manual "Publish now" click asks specifically for a YouTube upload, so it skips this.
+  if (!manualPublish && channel.automation_export_mode === 'local_folder') {
     try {
       const srt = buildSrtFromScenes(project.scenes, !!project.staticBackground);
       const folder = await runLocalExport({
@@ -1022,15 +1027,16 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // what keeps a video that actually died mid-upload out of both this branch and findResumableVideo
   // on the next cycle (determineResumePhase returns null for it).
   const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
-  if (channel.automation_auto_publish === false) {
+  if (!manualPublish && channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
     // exactly where a manually-created video would sit: reviewable and independently publishable
-    // by hand from Storyboard/Editor/Export. automation_daily_upload_count still increments in
-    // automationEngine.js after this returns — it counts videos *produced*, not videos published.
+    // by hand from Storyboard/Editor/Export, or via "Publish now" in the dashboard.
+    // automation_daily_upload_count still increments in automationEngine.js after this returns — it
+    // counts videos *produced*, not videos published.
     await logStep(channelId, videoId, 'youtube', 'success', 'video ready for manual review — auto-publish disabled');
     report('youtube', 'Auto-publish disabled — ready for manual review');
-  } else if (anomalousInterruption) {
+  } else if (!manualPublish && anomalousInterruption) {
     const message = 'video ready for manual review — resumed after an anomalous interruption mid-generation, publish is not auto-retried to avoid a possible duplicate upload';
     await logStep(channelId, videoId, 'youtube', 'success', message);
     report('youtube', 'Resumed video — ready for manual review, not auto-published');
