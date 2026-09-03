@@ -659,6 +659,19 @@ export async function resetStuckVideo(id) {
   return saveVideo({ ...video, resumeAttempts: 0, stuckError: null });
 }
 
+// "Reset upload flag" — clears project.youtubeUploadStarted on a video that has it set but never
+// actually reached YouTube (no youtubeVideoId). After the onUploadStart fix that flag is only ever
+// written the instant before real bytes go out, so a NEW occurrence genuinely means "an upload may
+// have created a video" — this exists for records left by the OLD code, which set the flag before
+// publishToYoutube was even called. Deliberately a separate, explicit action (the dashboard warns
+// about the duplicate-upload risk before calling it) — never automatic.
+export async function clearYoutubeUploadFlag(id) {
+  const video = await loadVideo(id);
+  if (!video) return null;
+  const { youtubeUploadStarted, ...rest } = video;
+  return saveVideo(rest);
+}
+
 // Every video, across every one of this user's channels, whose YouTube listing thumbnail has been
 // created — "completed" regardless of publish status. That covers: published videos; videos
 // finished on a channel with auto-publish off; and videos fully produced but never published. The
@@ -681,6 +694,12 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
       // exports have their own manual flow and never publish to YouTube.
       const readyToPublish =
         !!v.thumbnailStoragePath && !v.youtubeVideoId && !v.youtubeUploadStarted && !v.localExportedAt;
+      // Fully produced, upload flag set, but no youtubeVideoId — either a real upload whose outcome
+      // is unknown, or (for records from before the onUploadStart fix) a flag written before any
+      // real upload attempt. The dashboard offers a guarded "Reset upload flag" for exactly this
+      // state so such a video can be made publishable again after a conscious duplicate-risk check.
+      const uploadFlagStuck =
+        !!v.thumbnailStoragePath && !v.youtubeVideoId && !!v.youtubeUploadStarted && !v.localExportedAt;
       results.push({
         videoId: v.id,
         channelId: channel.id,
@@ -689,6 +708,7 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
         createdAt: v.createdAt,
         youtubeVideoId: v.youtubeVideoId || null,
         readyToPublish,
+        uploadFlagStuck,
         // The "Publish now" button is only offered when the channel actually has a YouTube
         // connection (a refresh token — what publishToYoutube needs). Otherwise the row says so.
         youtubeConnected: !!channel.youtube_refresh_token,

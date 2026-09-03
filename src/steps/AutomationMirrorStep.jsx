@@ -1,6 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, mono } from '../theme';
-import { listIncompleteVideos, listRecentCompletedVideos, loadVideo, deleteVideo, loadChannel, resetStuckVideo } from '../lib/db';
+import {
+  listIncompleteVideos,
+  listRecentCompletedVideos,
+  loadVideo,
+  deleteVideo,
+  loadChannel,
+  resetStuckVideo,
+  clearYoutubeUploadFlag,
+} from '../lib/db';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 import { runManagedResume } from '../lib/automationScheduler';
 import { planMediaCleanup, runMediaCleanup, ARCHIVE_AFTER_DAYS } from '../lib/mediaArchival';
@@ -224,6 +232,33 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
     } finally {
       setBusyVideoId(null);
       loadIncomplete();
+    }
+  }
+
+  // "Reset upload flag" — shown (Recently completed) ONLY for a video whose youtubeUploadStarted is
+  // set but that never got a youtubeVideoId. Clears the flag so the video becomes "Ready to publish"
+  // with a "Publish now" button again. Guarded by a confirm because the flag means "an upload may
+  // already have created a video on YouTube" — clearing it and re-publishing could make a duplicate.
+  async function resetUploadFlag(item) {
+    if (
+      !window.confirm(
+        `Reset the upload flag for "${item.displayTitle}"?\n\n` +
+          `Only do this if you're sure NO video was ever created on YouTube for it. If an upload did ` +
+          `reach YouTube, publishing again will create a duplicate.`
+      )
+    ) {
+      return;
+    }
+    setBusyVideoId(item.videoId);
+    setBusyLabel('Resetting flag…');
+    try {
+      await clearYoutubeUploadFlag(item.videoId);
+    } catch (err) {
+      console.error('[AutomationMirrorStep] failed to clear upload flag', item.videoId, err);
+      window.alert(`Could not reset the upload flag for "${item.displayTitle}": ${String(err.message || err)}`);
+    } finally {
+      setBusyVideoId(null);
+      loadCompleted();
     }
   }
 
@@ -724,22 +759,34 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                         {busyVideoId === item.videoId && <span style={{ ...mono, fontSize: 10, color: T.textMuted }}>{busyLabel}</span>}
                       </div>
                     ) : (
-                      <span
-                        title="The video is fully produced (render + thumbnail done) but was never published — auto-publish is off for this channel, or its upload was already attempted once and is left for manual review."
-                        style={{
-                          ...mono,
-                          fontSize: 10,
-                          fontWeight: 700,
-                          textTransform: 'uppercase',
-                          color: T.textMuted,
-                          border: `1px solid ${T.border}`,
-                          borderRadius: 3,
-                          padding: '4px 8px',
-                          flexShrink: 0,
-                        }}
-                      >
-                        ◻ Finished — not published
-                      </span>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
+                        <span
+                          title="The video is fully produced (render + thumbnail done) but was never published — auto-publish is off for this channel, or its upload was already attempted once and is left for manual review."
+                          style={{
+                            ...mono,
+                            fontSize: 10,
+                            fontWeight: 700,
+                            textTransform: 'uppercase',
+                            color: T.textMuted,
+                            border: `1px solid ${T.border}`,
+                            borderRadius: 3,
+                            padding: '4px 8px',
+                          }}
+                        >
+                          ◻ Finished — not published
+                        </span>
+                        {item.uploadFlagStuck && (
+                          <button
+                            onClick={() => resetUploadFlag(item)}
+                            disabled={busyVideoId !== null}
+                            title="This video is flagged as 'upload attempted' but has no YouTube video id. If no upload ever really reached YouTube, reset the flag to make it publishable again."
+                            style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: busyVideoId !== null ? 0.6 : 1 }}
+                          >
+                            ⚑ Reset upload flag
+                          </button>
+                        )}
+                        {busyVideoId === item.videoId && <span style={{ ...mono, fontSize: 10, color: T.textMuted }}>{busyLabel}</span>}
+                      </div>
                     )}
                   </div>
                 ))}

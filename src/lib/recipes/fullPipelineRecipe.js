@@ -1023,9 +1023,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // normal Gemini Batch "submit → wait → resume" flow, which must publish, and for a safe ready-to-
   // publish resume. Only a genuine anomalous mid-generation interruption — resumed, but NOT because
   // it was waiting on a batch job, and NOT already fully produced with the upload never started —
-  // blocks here. The youtubeUploadStarted marker persisted just before publishToYoutube below is
-  // what keeps a video that actually died mid-upload out of both this branch and findResumableVideo
-  // on the next cycle (determineResumePhase returns null for it).
+  // blocks here. The youtubeUploadStarted marker (persisted by onUploadStart in the publish branch
+  // below, the instant before the first byte PUT — see the comment there) is what keeps a video
+  // that actually died mid-upload out of both this branch and findResumableVideo on the next cycle
+  // (determineResumePhase returns null for it).
   const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
   if (!manualPublish && channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
@@ -1042,15 +1043,18 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     report('youtube', 'Resumed video — ready for manual review, not auto-published');
   } else {
     try {
-      // Persist that a publish is being ATTEMPTED before any bytes go out. If this call then dies
-      // mid-upload (a network drop after the request reached YouTube but before its response),
-      // determineResumePhase sees youtubeUploadStarted on the next cycle and returns null — the
-      // video is left for manual review instead of risking a duplicate. Set once; a successful
-      // publish supersedes it with youtubeVideoId.
-      if (!project.youtubeUploadStarted) {
-        project = { ...project, youtubeUploadStarted: true };
-        await persist();
-      }
+      // youtubeUploadStarted marks "video bytes were actually sent to YouTube, the resulting video
+      // may exist even if we never saw the response" — determineResumePhase returns null for it so
+      // the video is left for manual review instead of risking a duplicate upload. It is persisted
+      // by onUploadStart below, which uploadVideo fires EXACTLY before the first byte PUT — never
+      // before that. A failure in any pre-flight step (missing/invalid videoBlob, a dead
+      // init-upload request, no refresh token) therefore leaves the video cleanly re-publishable.
+      const markUploadStarted = async () => {
+        if (!project.youtubeUploadStarted) {
+          project = { ...project, youtubeUploadStarted: true };
+          await persist();
+        }
+      };
 
       const metadata = {
         title: plan.title,
@@ -1078,6 +1082,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
         channel,
         metadata,
+        onUploadStart: markUploadStarted,
         onProgress: (evt) => {
           if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
           if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);

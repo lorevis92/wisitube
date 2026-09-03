@@ -664,13 +664,15 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     report('youtube', 'Resumed video — ready for manual review, not auto-published');
   } else {
     try {
-      // Persist that a publish is being ATTEMPTED before any bytes go out — so a call that dies
-      // mid-upload is left for manual review next cycle (determineResumePhase returns null once
-      // youtubeUploadStarted is set) rather than risking a duplicate. See fullPipelineRecipe.js.
-      if (!project.youtubeUploadStarted) {
-        project = { ...project, youtubeUploadStarted: true };
-        await persist();
-      }
+      // youtubeUploadStarted is persisted by onUploadStart below — fired by uploadVideo the instant
+      // before the first byte PUT, never before. A pre-flight failure (bad videoBlob, dead
+      // init-upload, no token) leaves the video cleanly re-publishable. See fullPipelineRecipe.js.
+      const markUploadStarted = async () => {
+        if (!project.youtubeUploadStarted) {
+          project = { ...project, youtubeUploadStarted: true };
+          await persist();
+        }
+      };
 
       const metadata = {
         title: plan.title,
@@ -690,6 +692,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
         channel,
         metadata,
+        onUploadStart: markUploadStarted,
         onProgress: (evt) => {
           if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
           if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);

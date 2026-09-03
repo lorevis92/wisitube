@@ -73,7 +73,7 @@ async function toYoutubeThumbnailDataUri(blob) {
  * metadata: { title, description, tags, categoryId, language, privacyStatus, scheduleMode,
  * publishAt, madeForKids } — scheduleMode is 'now' | 'schedule', same as ExportStep's ytScheduleMode.
  */
-export async function uploadVideo(project, videoBlob, { channel, metadata, onProgress } = {}) {
+export async function uploadVideo(project, videoBlob, { channel, metadata, onProgress, onUploadStart } = {}) {
   console.log('[yt-upload] phase=runUpload:enter');
   onProgress?.({ kind: 'error-clear', phase: 'upload' });
   onProgress?.({ kind: 'upload-progress', percent: 0 });
@@ -144,6 +144,14 @@ export async function uploadVideo(project, videoBlob, { channel, metadata, onPro
       hasAccessToken: !!initData.accessToken,
       hasProgressCallback: true,
     });
+    // The point of no return: from here on, video bytes are actually going to YouTube and the
+    // resulting video resource may exist even if the response is lost. onUploadStart persists the
+    // "a real upload was attempted" marker EXACTLY here — never earlier, so a failure in any of the
+    // pre-flight steps above (no refresh token, missing/invalid videoBlob, a dead init-upload
+    // request) leaves the video fully re-publishable rather than falsely flagged. Awaited: the
+    // marker must be durable before the first byte leaves. If it throws (a failed save), that
+    // propagates to the catch below and the upload is abandoned — the safe direction.
+    await onUploadStart?.();
     let videoId;
     try {
       videoId = await uploadVideoToYoutube(initData.uploadUrl, videoBlob, initData.accessToken, (p) =>
@@ -335,9 +343,9 @@ export async function addToSeriesPlaylist(videoId, project, { channel, metadata,
  * metadata: same shape as uploadVideo's above, plus uploadCaptions/addToPlaylist (the two
  * checkbox toggles ExportStep exposes for the later phases).
  */
-export async function publishToYoutube(project, videoBlob, thumbnailBlob, { channel, metadata, onProgress } = {}) {
+export async function publishToYoutube(project, videoBlob, thumbnailBlob, { channel, metadata, onProgress, onUploadStart } = {}) {
   console.log('[yt-upload] phase=publishToYoutube:enter');
-  const videoId = await uploadVideo(project, videoBlob, { channel, metadata, onProgress });
+  const videoId = await uploadVideo(project, videoBlob, { channel, metadata, onProgress, onUploadStart });
   console.log('[yt-upload] phase=publishToYoutube:after-upload', { videoId });
   if (videoId) {
     // Called from the automation recipes only — a full-pipeline/static-background video ALWAYS has a
