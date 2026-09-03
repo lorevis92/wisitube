@@ -27,10 +27,11 @@ import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { withTimeout } from '../asyncTimeout';
 
-// Hang guards for render/thumbnail — see fullPipelineRecipe.js's identical constants.
+// Hang guards for render/thumbnail/publish — see fullPipelineRecipe.js's identical constants.
 const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
+const YOUTUBE_PUBLISH_TIMEOUT_MS = 25 * 60 * 1000;
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
@@ -689,15 +690,20 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       };
 
       const subErrors = [];
-      youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
-        channel,
-        metadata,
-        onUploadStart: markUploadStarted,
-        onProgress: (evt) => {
-          if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
-          if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
-        },
-      });
+      youtubeVideoId = await withTimeout(
+        () =>
+          publishToYoutube(project, videoBlob, thumbnailBlob, {
+            channel,
+            metadata,
+            onUploadStart: markUploadStarted,
+            onProgress: (evt) => {
+              if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
+              if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
+            },
+          }),
+        YOUTUBE_PUBLISH_TIMEOUT_MS,
+        'YouTube publish'
+      );
 
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 
@@ -727,9 +733,13 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         report('youtube', 'Published to YouTube');
       }
     } catch (err) {
-      if (isNetworkError(err)) {
-        const message =
-          'YouTube publish failed due to a network error — check YouTube Studio manually before retrying, to avoid a duplicate upload.';
+      // See fullPipelineRecipe.js's identical catch: a network error, a publish timeout or a
+      // stalled byte PUT can all leave the video maybe-created on YouTube — always point the owner
+      // at YouTube Studio rather than risk a duplicate on retry.
+      const uploadMayHaveLanded =
+        isNetworkError(err) || err?.name === 'TimeoutError' || /stalled|timed out/i.test(String(err?.message || ''));
+      if (uploadMayHaveLanded) {
+        const message = `YouTube publish did not complete (${String(err?.message || err)}) — check YouTube Studio manually before retrying, to avoid a duplicate upload.`;
         await logStep(channelId, videoId, 'youtube', 'error', message);
         throw new Error(message);
       }

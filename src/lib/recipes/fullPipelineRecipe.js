@@ -229,6 +229,11 @@ const DEFAULT_YOUTUBE_CATEGORY_ID = '27'; // Education
 const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
+// Backstop around the whole YouTube publish sequence (init-upload → byte PUT → thumbnail → captions
+// → playlist). youtubeUpload.js has its own 120s idle-stall guard on the byte PUT itself; this is
+// the outer catch-all for a hang anywhere else in the sequence (a stuck init-upload/metadata
+// fetch). Generous — a large MP4 on a slow line can legitimately take many minutes.
+const YOUTUBE_PUBLISH_TIMEOUT_MS = 25 * 60 * 1000;
 
 // Same mapping as ExportStep.jsx's own local constant — duplicated rather than imported since
 // ExportStep.jsx doesn't export it (small, stable, controlled-duplication pattern already used
@@ -1079,15 +1084,20 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
       // thumbnail specifically is persisted so the dashboard can flag it and the owner can retry the
       // thumbnail from ExportStep without re-uploading the video.
       const subErrors = [];
-      youtubeVideoId = await publishToYoutube(project, videoBlob, thumbnailBlob, {
-        channel,
-        metadata,
-        onUploadStart: markUploadStarted,
-        onProgress: (evt) => {
-          if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
-          if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
-        },
-      });
+      youtubeVideoId = await withTimeout(
+        () =>
+          publishToYoutube(project, videoBlob, thumbnailBlob, {
+            channel,
+            metadata,
+            onUploadStart: markUploadStarted,
+            onProgress: (evt) => {
+              if (evt.kind === 'error') subErrors.push(`${evt.phase}: ${evt.message}`);
+              if (evt.kind === 'upload-progress') report('youtube', `Uploading… ${evt.percent}%`);
+            },
+          }),
+        YOUTUBE_PUBLISH_TIMEOUT_MS,
+        'YouTube publish'
+      );
 
       if (!youtubeVideoId) throw new Error(subErrors.find((m) => m.startsWith('upload:')) || 'YouTube upload failed');
 
@@ -1119,9 +1129,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         report('youtube', 'Published to YouTube');
       }
     } catch (err) {
-      if (isNetworkError(err)) {
-        const message =
-          'YouTube publish failed due to a network error — check YouTube Studio manually before retrying, to avoid a duplicate upload.';
+      // A network error, a publish timeout, or a stalled byte PUT can all happen AFTER the upload
+      // already reached YouTube (youtubeUploadStarted is set by then) — the video may exist. Point
+      // the owner at YouTube Studio rather than letting anything retry and risk a duplicate.
+      const uploadMayHaveLanded =
+        isNetworkError(err) || err?.name === 'TimeoutError' || /stalled|timed out/i.test(String(err?.message || ''));
+      if (uploadMayHaveLanded) {
+        const message = `YouTube publish did not complete (${String(err?.message || err)}) — check YouTube Studio manually before retrying, to avoid a duplicate upload.`;
         await logStep(channelId, videoId, 'youtube', 'error', message);
         throw new Error(message);
       }
