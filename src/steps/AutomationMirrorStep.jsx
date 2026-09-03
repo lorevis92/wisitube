@@ -106,7 +106,7 @@ function formatGoogleServiceIssue(gsi) {
   return "🟡 Google's service is having a temporary hiccup — we'll keep retrying for up to an hour before resubmitting, to avoid paying twice for the same images.";
 }
 
-export default function AutomationMirrorStep({ run, userId, onResume, isMobile }) {
+export default function AutomationMirrorStep({ run, userId, onResume, isMobile, onRunProgress, onRunEnd }) {
   const [incompleteVideos, setIncompleteVideos] = useState(null); // null = still loading
   const [completedVideos, setCompletedVideos] = useState(null);
   const [completedOpen, setCompletedOpen] = useState(false);
@@ -191,12 +191,24 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
   async function continueVideo(item, busyLabel, recipeOpts = {}) {
     setBusyVideoId(item.videoId);
     setBusyLabel(busyLabel);
+    let started = false;
     try {
       const channel = await loadChannel(item.channelId);
       if (!channel) throw new Error('Channel not found');
       const recipe = getRecipeForContentType(channel.content_type);
       if (!recipe) throw new Error(`No recipe available for content_type "${channel.content_type || '(none)'}"`);
-      const result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId, ...recipeOpts }));
+      const result = await runManagedResume(() =>
+        recipe(channel, {
+          userId,
+          logStep,
+          targetVideoId: item.videoId,
+          // Feed the same live mirror a scheduled cycle feeds — so render %, upload % and
+          // "N/M images ready" advance in the dashboard while this per-video action runs.
+          onProgress: (evt) => onRunProgress?.({ channelId: item.channelId, channelName: item.channelName, ...evt }),
+          ...recipeOpts,
+        })
+      );
+      started = !!result.started;
       if (!result.started) {
         window.alert(`Can't work on "${item.displayTitle}" right now — ${result.reason}`);
       }
@@ -205,6 +217,9 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
       window.alert(`Could not continue "${item.displayTitle}": ${String(err.message || err)}`);
     } finally {
       setBusyVideoId(null);
+      // Only clear the mirror if THIS action drove it — a blocked attempt (started === false) never
+      // touched onProgress, and wiping here could erase a scheduled cycle's live state.
+      if (started) onRunEnd?.();
       loadIncomplete();
       loadCompleted();
     }
@@ -341,6 +356,20 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
   // video, this is true; before that first submission (or for every other provider) it's false and
   // the ordinary per-scene grid below renders instead.
   const isBatchMode = run?.phase === 'media' && (run?.project?.pendingImageBatches || []).length > 0;
+
+  // A "Recently completed" video that's live right now (a "Publish now"/"Resume now" started from
+  // here, or the 60s poll carrying a just-finished batch video through render → publish). It gets
+  // the same green "working" treatment "Videos in progress" rows get, is pinned to the top of the
+  // list, and the section auto-opens so the live row is never hidden behind the collapsed panel.
+  const completedLiveId =
+    run?.videoId && (completedVideos || []).some((v) => v.videoId === run.videoId) ? run.videoId : null;
+  const orderedCompleted = completedLiveId
+    ? [
+        ...(completedVideos || []).filter((v) => v.videoId === completedLiveId),
+        ...(completedVideos || []).filter((v) => v.videoId !== completedLiveId),
+      ]
+    : completedVideos;
+  const showCompleted = completedOpen || !!completedLiveId;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -664,12 +693,12 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
             cursor: 'pointer',
           }}
         >
-          <span style={label}>Recently completed (last 10)</span>
+          <span style={label}>Recently completed (last 10){completedLiveId ? ' · 1 working now' : ''}</span>
           <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
-            {completedOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+            {showCompleted ? 'CLOSE ▲' : 'SHOW ▼'}
           </span>
         </button>
-        {completedOpen && (
+        {showCompleted && (
           <div style={{ marginTop: 14 }}>
             {completedVideos === null ? (
               <div style={{ ...mono, fontSize: 12, color: T.textMuted }}>Loading…</div>
@@ -677,7 +706,9 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
               <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary }}>No completed videos yet.</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {completedVideos.map((item) => (
+                {orderedCompleted.map((item) => {
+                  const live = run && run.videoId && run.videoId === item.videoId ? run : null;
+                  return (
                   <div
                     key={item.videoId}
                     style={{
@@ -686,23 +717,43 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                       alignItems: 'center',
                       gap: 12,
                       flexWrap: 'wrap',
-                      border: `1px solid ${T.border}`,
+                      border: `1px solid ${live ? T.green : T.border}`,
                       borderRadius: 4,
                       padding: 10,
                     }}
                   >
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{item.displayTitle}</div>
-                      <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 4 }}>
-                        {item.channelName} · started {formatDateTime(item.createdAt)}
+                      <div style={{ ...mono, fontSize: 11, color: live ? T.green : T.textSecondary, marginTop: 4 }}>
+                        {item.channelName} · {live ? PHASE_LABELS[live.phase] || live.phase || 'working' : `started ${formatDateTime(item.createdAt)}`}
                       </div>
+                      {live && live.phaseDetail && (
+                        <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 2 }}>{live.phaseDetail}</div>
+                      )}
                       {item.thumbnailPublishFailed && (
                         <div style={{ ...mono, fontSize: 11, color: T.yellow, marginTop: 4 }}>
                           ⚠ Published without its custom thumbnail — open it in Export and retry the thumbnail step (no re-upload needed).
                         </div>
                       )}
                     </div>
-                    {item.youtubeVideoId ? (
+                    {live ? (
+                      <span
+                        style={{
+                          ...mono,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          color: T.green,
+                          border: `1px solid ${T.green}`,
+                          borderRadius: 3,
+                          padding: '4px 8px',
+                          flexShrink: 0,
+                          animation: 'wisiPulse 1.6s infinite',
+                        }}
+                      >
+                        ▶ Working now
+                      </span>
+                    ) : item.youtubeVideoId ? (
                       <a
                         href={`https://www.youtube.com/watch?v=${item.youtubeVideoId}`}
                         target="_blank"
@@ -789,7 +840,8 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile }
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

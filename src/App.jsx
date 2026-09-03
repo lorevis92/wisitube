@@ -918,7 +918,18 @@ export default function App() {
         )}
 
         {tab === 'automation-mirror' && (
-          <AutomationMirrorStep run={currentAutomationRun} userId={session.user?.id} onResume={handleResume} isMobile={isMobile} />
+          <AutomationMirrorStep
+            run={currentAutomationRun}
+            userId={session.user?.id}
+            onResume={handleResume}
+            isMobile={isMobile}
+            // A per-video action started from this dashboard (Publish now / Resume now / Check for
+            // updates) feeds the SAME currentAutomationRun mirror a scheduled cycle does — so its
+            // render %, upload % and "N/M images" show live, and the video gets the green "working"
+            // treatment wherever it's listed.
+            onRunProgress={(evt) => setCurrentAutomationRun((prev) => applyProgressToRun(prev, evt))}
+            onRunEnd={() => setCurrentAutomationRun(null)}
+          />
         )}
 
         {tab === 'create' && (

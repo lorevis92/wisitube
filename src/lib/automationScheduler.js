@@ -362,7 +362,7 @@ let pollingBatches = false;
  *  - Active automatically whenever "Enable unattended background mode" is on (its timer is started
  *    and stopped alongside the main one in startScheduler/stopSchedulerTimer) — no separate setting.
  */
-async function pollPendingImageBatches({ userId }) {
+async function pollPendingImageBatches({ userId, onProgress, onCycleEnd }) {
   if (pollingBatches) return;
 
   let settings;
@@ -392,6 +392,7 @@ async function pollPendingImageBatches({ userId }) {
   if (awaitingBatch.length === 0) return;
 
   pollingBatches = true;
+  let ranSomething = false;
   try {
     for (const item of awaitingBatch) {
       let channel;
@@ -410,8 +411,18 @@ async function pollPendingImageBatches({ userId }) {
       }
       let result;
       try {
+        // Same onProgress wrapper shape runAutomationCycle uses (channel-tagged), so the recipe's
+        // render %, upload % and "N/M images" flow to the dashboard's live mirror exactly as a
+        // scheduled cycle's do — the poll is otherwise the only path that finishes a batch video.
         // eslint-disable-next-line no-await-in-loop
-        result = await runManagedResume(() => recipe(channel, { userId, logStep, targetVideoId: item.videoId }));
+        result = await runManagedResume(() =>
+          recipe(channel, {
+            userId,
+            logStep,
+            targetVideoId: item.videoId,
+            onProgress: (evt) => onProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
+          })
+        );
       } catch (err) {
         // The recipe threw (e.g. a video that resolves to "stuck", or a genuine phase failure).
         // withSchedulerLock's finally already released the lock before this propagated — just move
@@ -425,9 +436,14 @@ async function pollPendingImageBatches({ userId }) {
         console.warn('[automationScheduler] pending-batch poll: lock unavailable mid-sweep, retrying next tick —', result.reason);
         break;
       }
+      ranSomething = true;
     }
   } finally {
     pollingBatches = false;
+    // Clear the live mirror once the sweep is done — the video is either finished or back to just
+    // waiting on Google, neither of which is "a run in progress". Only if this sweep actually drove
+    // the mirror (a full cycle never overlaps — see the currentlyRunning check above).
+    if (ranSomething) onCycleEnd?.();
   }
 }
 
@@ -502,7 +518,10 @@ export function startScheduler({ userId, onUpdate, onProgress, onCycleEnd }) {
   // cycle awaited inside tick() can't delay it, and vice versa. Errors are swallowed to a console
   // line: one failed poll must never tear the interval down.
   batchTimerId = setInterval(
-    () => pollPendingImageBatches({ userId }).catch((err) => console.error('[automationScheduler] pending-batch poll threw', err)),
+    () =>
+      pollPendingImageBatches({ userId, onProgress, onCycleEnd }).catch((err) =>
+        console.error('[automationScheduler] pending-batch poll threw', err)
+      ),
     BATCH_POLL_TICK_MS
   );
 }
