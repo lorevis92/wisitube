@@ -97,8 +97,21 @@ async function authUrl(req, res) {
     }
 
     // Phase 2: build the consent-screen URL. state carries the channelId through Google's
-    // redirect untouched, so the callback knows which channel to attach the result to —
-    // access_type=offline + prompt=consent forces a refresh_token even on a repeat authorization.
+    // redirect untouched, so the callback knows which channel to attach the result to.
+    //
+    // prompt='consent select_account' (space-delimited, both apply):
+    //   - consent        → forces the scope-consent screen even on a repeat authorization, which is
+    //                       what makes access_type=offline reliably return a fresh refresh_token.
+    //   - select_account → forces Google's account chooser. Two reasons: (1) a user signed into
+    //                       several Google accounts in the browser otherwise gets silently bound to
+    //                       whichever one Google last used; (2) for a Google account that manages
+    //                       multiple YouTube channels (Brand Accounts), re-showing the account
+    //                       chooser (rather than reusing a remembered session) is what prompts
+    //                       Google to also show its own native "choose a channel" screen during
+    //                       consent — after which the tokens, and channels.list?mine=true in the
+    //                       callback, resolve to the channel the user actually picked, not the
+    //                       account's primary channel. A single-channel account just gets one extra
+    //                       "pick your account" click and connects exactly as before.
     let authUrlStr;
     try {
       const params = new URLSearchParams({
@@ -107,7 +120,7 @@ async function authUrl(req, res) {
         response_type: 'code',
         scope: AUTH_SCOPES,
         access_type: 'offline',
-        prompt: 'consent',
+        prompt: 'consent select_account',
         state: channelId,
       });
       authUrlStr = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
@@ -213,7 +226,7 @@ async function callback(req, res) {
       return res.redirect(302, `${APP_URL}/?youtube_error=${encodeURIComponent('Google response missing access token')}`);
     }
     if (!refreshToken) {
-      // Should not happen — prompt=consent in the auth-url case forces a fresh refresh_token
+      // Should not happen — the 'consent' prompt in the auth-url case forces a fresh refresh_token
       // even on a repeat authorization — but surface a clear message instead of silently
       // connecting a channel that can never actually upload.
       console.error('[youtube-callback] phase=extract-tokens no refresh_token, body=', JSON.stringify(tokenData).slice(0, 300));
@@ -265,6 +278,16 @@ async function callback(req, res) {
 
     const ytChannelId = ytChannel.id || '';
     const ytName = (ytChannel.snippet && ytChannel.snippet.title) || 'YouTube channel';
+
+    // Diagnostic for the Brand Account / channel-picker work: channels.list?mine=true returns
+    // exactly the channel the OAuth grant is bound to (1 item — it is NOT a list of the account's
+    // channels), so this line tells us, per connection, WHICH channel Google actually bound after
+    // the select_account/consent flow — the primary one, or the one the user picked in Google's
+    // native chooser. Read from the Vercel function logs when verifying a multi-channel account.
+    console.log(
+      '[youtube-callback] phase=resolved-channel',
+      JSON.stringify({ wisitubeChannelId: channelId, ytChannelId, ytName, itemsReturned: (channelData.items || []).length })
+    );
 
     // Phase 4: hand everything back to the client via the redirect's query string — the only
     // place this data can be persisted, since it's read and consumed by App.jsx on mount.
