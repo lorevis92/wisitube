@@ -104,7 +104,7 @@ function extractYoutubeId(input) {
   return trimmed;
 }
 
-export default function ChannelDashboardStep({ channelId, userId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile }) {
+export default function ChannelDashboardStep({ channelId, userId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile, onRunProgress, onRunEnd }) {
   const [channel, setChannel] = useState(null);
   const [name, setName] = useState('');
   const [nameFocused, setNameFocused] = useState(false);
@@ -612,6 +612,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     if (generatingShortFor) return;
     if (!v.youtubeVideoId) return;
     setGeneratingShortFor(v.id);
+    let started = false;
     try {
       const shortId = await createShortRecord(
         {
@@ -634,8 +635,19 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
         console.error('[ChannelDashboardStep] failed to link parent → Short (Short will still generate)', v.id, err);
       }
       await refreshVideos(); // card now shows "⏳ Short generating…"
-      // Produce + publish it through the whole pipeline, under the cycle's lock so the two can't overlap.
-      const result = await runManagedResume(() => runFullPipeline(channel, { targetVideoId: shortId, userId, logStep }));
+      // Produce + publish it through the whole pipeline, under the cycle's lock so the two can't
+      // overlap. onProgress feeds the SAME live mirror a scheduled cycle / manual resume feeds — so
+      // the Automation-status page shows this Short's current phase, render % and upload %, and the
+      // Short gets the green "working" border in "Videos in progress" while it runs.
+      const result = await runManagedResume(() =>
+        runFullPipeline(channel, {
+          targetVideoId: shortId,
+          userId,
+          logStep,
+          onProgress: (evt) => onRunProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
+        })
+      );
+      started = !!(result && result.started);
       if (result && result.started === false) {
         window.alert(
           `The Short was created but its generation couldn't start right now — ${result.reason}. It'll be picked up automatically on the next automation cycle.`
@@ -648,6 +660,9 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       await refreshVideos();
     } finally {
       setGeneratingShortFor(null);
+      // Only clear the mirror if THIS action actually drove it — a blocked attempt (started false)
+      // never touched onProgress, and wiping here could erase a concurrent cycle's live state.
+      if (started) onRunEnd?.();
     }
   }
 

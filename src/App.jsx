@@ -903,6 +903,11 @@ export default function App() {
               }}
               onStartVideoFromSuggestion={startNewProjectWithTopic}
               isMobile={isMobile}
+              // "Generate Short" on a published video's card feeds the SAME currentAutomationRun
+              // mirror a scheduled cycle does — so its current phase, render % and upload % show
+              // live and the Short gets the green "working" border in "Videos in progress".
+              onRunProgress={(evt) => setCurrentAutomationRun((prev) => applyProgressToRun(prev, evt))}
+              onRunEnd={() => setCurrentAutomationRun(null)}
             />
           ) : (
             <ChannelsListStep onOpenChannel={openChannel} isMobile={isMobile} />
