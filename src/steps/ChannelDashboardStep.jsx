@@ -179,6 +179,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [ytIdInput, setYtIdInput] = useState('');
   const [ytEditBusy, setYtEditBusy] = useState(null); // videoId currently being saved, or null
   const [ytEditError, setYtEditError] = useState('');
+  // ⚙ card action menu — id of the card whose dropdown is open (null = none). The ⚙ button is now a
+  // menu (Edit YouTube status / Delete / …) rather than a single action; items come from an array
+  // so a future action is one entry, not a card restructure.
+  const [cardMenuOpenFor, setCardMenuOpenFor] = useState(null);
 
   // Escape closes the "how should this Short publish?" modal (same affordance as ImageLightbox /
   // ProgramManagerChat). No-op while nothing is generating; the modal itself also closes on the
@@ -703,6 +707,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
   async function openMoveFor(v) {
     setYtEditOpenForId(null);
+    setCardMenuOpenFor(null);
     setMoveOpenForId(v.id);
     setMoveError('');
     setMoveChannelsLoading(true);
@@ -834,6 +839,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
   function openYtEdit(v) {
     setMoveOpenForId(null);
+    setCardMenuOpenFor(null);
     setYtEditOpenForId(v.id);
     setYtIdInput('');
     setYtEditError('');
@@ -1647,19 +1653,77 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                   >
                     ⇄
                   </button>
-                  <button
-                    onClick={() => (ytEditOpenForId === v.id ? closeYtEdit() : openYtEdit(v))}
-                    title="Edit YouTube status"
-                    style={{ ...btnGhost, padding: '10px 12px', flexShrink: 0 }}
-                  >
-                    ⚙
-                  </button>
-                  <button
-                    onClick={() => handleDeleteVideo(v.id)}
-                    style={{ ...btnGhost, color: T.primary, borderColor: T.primaryBorder, padding: '10px 14px', flexShrink: 0 }}
-                  >
-                    Delete
-                  </button>
+                  {(() => {
+                    // Extensible action menu behind the ⚙ — add an entry here, nothing else changes.
+                    const cardMenuItems = [
+                      { key: 'yt-status', label: '✏️ Edit YouTube status', onSelect: () => openYtEdit(v) },
+                      { key: 'delete', label: '🗑 Delete', danger: true, onSelect: () => handleDeleteVideo(v.id) },
+                    ];
+                    const menuOpen = cardMenuOpenFor === v.id;
+                    return (
+                      <div style={{ position: 'relative', flexShrink: 0 }}>
+                        <button
+                          onClick={() => setCardMenuOpenFor((cur) => (cur === v.id ? null : v.id))}
+                          title="More actions"
+                          aria-haspopup="menu"
+                          aria-expanded={menuOpen}
+                          style={{ ...btnGhost, padding: '10px 12px' }}
+                        >
+                          ⚙
+                        </button>
+                        {menuOpen && (
+                          <>
+                            <div
+                              onClick={() => setCardMenuOpenFor(null)}
+                              style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+                            />
+                            <div
+                              role="menu"
+                              style={{
+                                position: 'absolute',
+                                top: 'calc(100% + 4px)',
+                                right: 0,
+                                zIndex: 41,
+                                minWidth: 190,
+                                background: T.bg,
+                                border: `1px solid ${T.border}`,
+                                borderRadius: 6,
+                                boxShadow: '0 6px 24px rgba(0,0,0,0.18)',
+                                padding: 4,
+                                display: 'flex',
+                                flexDirection: 'column',
+                              }}
+                            >
+                              {cardMenuItems.map((item) => (
+                                <button
+                                  key={item.key}
+                                  role="menuitem"
+                                  onClick={() => {
+                                    setCardMenuOpenFor(null);
+                                    item.onSelect();
+                                  }}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    textAlign: 'left',
+                                    padding: '8px 10px',
+                                    fontSize: 12,
+                                    fontFamily: FONT.ui,
+                                    color: item.danger ? T.primary : T.text,
+                                    cursor: 'pointer',
+                                    borderRadius: 4,
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {item.label}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Companion Short — for every published video: view/link if it has one, generate it on
