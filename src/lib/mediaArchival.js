@@ -20,7 +20,7 @@
 // A video whose media has been archived can't be opened in Storyboard/Editor/Export — App.jsx's
 // handleResume detects project.mediaArchived and shows a "go watch it on YouTube" notice instead of
 // feeding an empty scenes array into the editor.
-import { listChannels, listVideosByChannel, loadVideo, saveVideo, logAutomationStep } from './db';
+import { listChannels, listVideosByChannel, loadVideo, saveVideo, deleteVideo, logAutomationStep } from './db';
 import { listVideoMediaFiles, removeMediaFiles, ARCHIVABLE_MEDIA_KINDS } from './mediaStorage';
 
 export const ARCHIVE_AFTER_DAYS = 5;
@@ -53,6 +53,11 @@ export function buildArchivedProject(record) {
     thumbnailPublishFailed: record.thumbnailPublishFailed === true,
     createdByAutomation: record.createdByAutomation === true,
     subtitles: !!record.subtitles,
+    // companion-Short links (src/lib/shortsEngine.js) — kept so the dashboard still groups an
+    // archived Short under its parent and cascade-delete still finds it.
+    isShort: record.isShort === true,
+    parentVideoId: record.parentVideoId || null,
+    shortVideoId: record.shortVideoId || null,
     // dashboard preview
     thumbnailStoragePath: record.thumbnailStoragePath || null,
     // replaces the now-gone project.scenes for the "N scenes" line
@@ -63,6 +68,61 @@ export function buildArchivedProject(record) {
     mediaArchived: true,
     mediaArchivedAt: Date.now(),
   };
+}
+
+// A permanent delete purges EVERY media folder including 'thumbnail' (which archival deliberately
+// keeps for the dashboard preview) — the row is gone, nothing points at it any more.
+const FULL_DELETE_MEDIA_KINDS = [...ARCHIVABLE_MEDIA_KINDS, 'thumbnail'];
+
+/**
+ * Deletes a video's DB row AND all of its Supabase Storage media — the "Delete" the dashboard
+ * offers. Cascades to a companion Short (video.shortVideoId → record + its own media) so deleting a
+ * long video takes its teaser with it; a Short already live on YouTube stays live (removing it from
+ * YouTube is out of scope). Storage cleanup is best-effort — a Storage error is logged, never blocks
+ * the row deletion the user asked for.
+ *
+ * Returns the ids actually deleted (parent + short, if any), so the caller can drop them from local
+ * state without a refetch.
+ */
+export async function deleteVideoAndMedia(userId, videoId, { _cascade = false } = {}) {
+  const deleted = [];
+  const video = await loadVideo(videoId).catch(() => null);
+
+  // Cascade first: if deleting the parent later fails, the Short isn't left orphaned + invisible.
+  if (video?.shortVideoId) {
+    try {
+      const nested = await deleteVideoAndMedia(userId, video.shortVideoId, { _cascade: true });
+      deleted.push(...nested);
+    } catch (err) {
+      console.error('[deleteVideoAndMedia] failed to cascade-delete companion Short', video.shortVideoId, err);
+    }
+  }
+
+  if (userId) {
+    try {
+      const files = await listVideoMediaFiles(userId, videoId, FULL_DELETE_MEDIA_KINDS);
+      if (files.length) await removeMediaFiles(files.map((f) => f.path));
+    } catch (err) {
+      console.error('[deleteVideoAndMedia] Storage media cleanup failed; deleting the row anyway', videoId, err);
+    }
+  }
+
+  await deleteVideo(videoId);
+  deleted.push(videoId);
+
+  // A Short deleted on its own (not as part of its parent's cascade) — clear the now-dangling
+  // pointer on the parent so the dashboard stops showing "⏳ Short generating…" for a Short that's
+  // gone. Best-effort; the parent might itself be gone.
+  if (!_cascade && video?.isShort && video.parentVideoId) {
+    try {
+      const parent = await loadVideo(video.parentVideoId);
+      if (parent && parent.shortVideoId === videoId) await saveVideo({ ...parent, shortVideoId: null });
+    } catch (err) {
+      console.error('[deleteVideoAndMedia] failed to unlink deleted Short from its parent', video.parentVideoId, err);
+    }
+  }
+
+  return deleted;
 }
 
 // Every published, not-yet-archived video across all of this user's channels that's been live at

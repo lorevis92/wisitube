@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import {
   listVideosByChannel,
-  deleteVideo,
   saveVideo,
   loadVideo,
   loadChannel,
@@ -16,6 +15,7 @@ import {
   recordCost,
 } from '../lib/db';
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
+import { deleteVideoAndMedia } from '../lib/mediaArchival';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
 import { getTopicSuggestions, startTopicSuggestion, dismissTopicSuggestion } from '../lib/contentProgramManager';
 import ProgramManagerChat from '../components/ProgramManagerChat';
@@ -557,9 +557,20 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   }
 
   async function handleDeleteVideo(id) {
-    if (!window.confirm('Delete this video? This cannot be undone.')) return;
-    await deleteVideo(id);
-    setVideos((list) => list.filter((v) => v.id !== id));
+    const v = (videos || []).find((x) => x.id === id);
+    const hasShort = !!v?.shortVideoId;
+    if (
+      !window.confirm(
+        hasShort
+          ? 'Delete this video and its companion Short? Both records and all their media are removed permanently. A Short already on YouTube stays on YouTube. This cannot be undone.'
+          : 'Delete this video? This cannot be undone.'
+      )
+    )
+      return;
+    // Purges the video's (and, cascaded, its Short's) DB row + all Supabase Storage media.
+    const removed = await deleteVideoAndMedia(userId, id);
+    const removedSet = new Set(removed);
+    setVideos((list) => list.filter((x) => !removedSet.has(x.id)));
   }
 
   async function openMoveFor(v) {

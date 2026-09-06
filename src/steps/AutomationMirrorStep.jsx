@@ -4,14 +4,13 @@ import {
   listIncompleteVideos,
   listRecentCompletedVideos,
   loadVideo,
-  deleteVideo,
   loadChannel,
   resetStuckVideo,
   clearYoutubeUploadFlag,
 } from '../lib/db';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 import { runManagedResume } from '../lib/automationScheduler';
-import { planMediaCleanup, runMediaCleanup, ARCHIVE_AFTER_DAYS } from '../lib/mediaArchival';
+import { planMediaCleanup, runMediaCleanup, deleteVideoAndMedia, ARCHIVE_AFTER_DAYS } from '../lib/mediaArchival';
 
 // Permanent status dashboard for automation — no longer just a temporary mirror that appears while
 // a run is active. Three parts, in order:
@@ -292,14 +291,14 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
     }
   }
 
-  // "Delete" — same confirm text and deleteVideo call as ChannelDashboardStep.jsx's own
+  // "Delete" — same delete-with-media (+ companion-Short cascade) as ChannelDashboardStep.jsx's own
   // handleDeleteVideo.
   async function deleteVideoRow(item) {
-    if (!window.confirm('Delete this video? This cannot be undone.')) return;
+    if (!window.confirm('Delete this video? Its record and all its media are removed permanently. This cannot be undone.')) return;
     setBusyVideoId(item.videoId);
     setBusyLabel('Deleting…');
     try {
-      await deleteVideo(item.videoId);
+      await deleteVideoAndMedia(userId, item.videoId);
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to delete video', item.videoId, err);
       window.alert(`Could not delete "${item.displayTitle}": ${String(err.message || err)}`);
