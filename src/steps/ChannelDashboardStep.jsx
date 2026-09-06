@@ -16,6 +16,10 @@ import {
 } from '../lib/db';
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
 import { deleteVideoAndMedia } from '../lib/mediaArchival';
+import { createShortRecord } from '../lib/shortsEngine';
+import { runFullPipeline } from '../lib/recipes/fullPipelineRecipe';
+import { runManagedResume } from '../lib/automationScheduler';
+import { logStep } from '../lib/automationEngine';
 import { listChannelPlaylists } from '../lib/youtubePublishEngine';
 import { getTopicSuggestions, startTopicSuggestion, dismissTopicSuggestion } from '../lib/contentProgramManager';
 import ProgramManagerChat from '../components/ProgramManagerChat';
@@ -108,6 +112,9 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [notes, setNotes] = useState('');
   const [videos, setVideos] = useState(null); // null = still loading
   const [thumbUrls, setThumbUrls] = useState({});
+  // Parent video id whose companion Short is being generated right now via the manual "Generate
+  // Short" button (bridges the moment between click and the first refetch that shows the new record).
+  const [generatingShortFor, setGeneratingShortFor] = useState(null);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState('');
   const [refiningIndex, setRefiningIndex] = useState(null);
@@ -228,6 +235,20 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId]);
+
+  // While a companion Short is still being produced (its own pipeline, or a Gemini Batch job the
+  // background poll will finish), refresh the grid every 20s so the parent card flips from
+  // "⏳ Short generating…" to "🎬 View Short" without a manual reload.
+  useEffect(() => {
+    if (!Array.isArray(videos)) return undefined;
+    const stillGenerating = videos.some((v) => v.isShort === true && !v.youtubeVideoId && !v.thumbnailStoragePath);
+    if (!stillGenerating) return undefined;
+    const id = setInterval(() => {
+      refreshVideos();
+    }, 20000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videos]);
 
   async function saveName() {
     if (!channel) return;
@@ -571,6 +592,63 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     const removed = await deleteVideoAndMedia(userId, id);
     const removedSet = new Set(removed);
     setVideos((list) => list.filter((x) => !removedSet.has(x.id)));
+  }
+
+  async function refreshVideos() {
+    try {
+      const fresh = await listVideosByChannel(channelId);
+      setVideos(sortVideosForGrid(fresh));
+    } catch (err) {
+      console.error('[ChannelDashboardStep] failed to refresh videos', err);
+    }
+  }
+
+  // Manual "Generate Short" on a published video's card — runs the exact same path the automatic
+  // companion-Short hook does (createShortRecord builds the record, then runFullPipeline produces
+  // and publishes it), on THIS parent, regardless of channel.automation_generate_shorts. The final
+  // publish still respects channel.automation_auto_publish (not bypassed — the user only asked for
+  // the generation to be forced). runManagedResume takes the same scheduler lock a cycle uses.
+  async function handleGenerateShort(v) {
+    if (generatingShortFor) return;
+    if (!v.youtubeVideoId) return;
+    setGeneratingShortFor(v.id);
+    try {
+      const shortId = await createShortRecord(
+        {
+          id: v.id,
+          youtubeVideoId: v.youtubeVideoId,
+          topic: v.topic || v.displayTitle || '',
+          angle: v.angle || '',
+          subject: v.subject || null,
+          characterBible: Array.isArray(v.characterBible) ? v.characterBible : [],
+          displayTitle: v.displayTitle || v.topic || '',
+        },
+        channel,
+        { userId, logStep }
+      );
+      // Point the parent at its new Short — same link the automatic hook writes.
+      try {
+        const parentFresh = await loadVideo(v.id);
+        if (parentFresh) await saveVideo({ ...parentFresh, shortVideoId: shortId });
+      } catch (err) {
+        console.error('[ChannelDashboardStep] failed to link parent → Short (Short will still generate)', v.id, err);
+      }
+      await refreshVideos(); // card now shows "⏳ Short generating…"
+      // Produce + publish it through the whole pipeline, under the cycle's lock so the two can't overlap.
+      const result = await runManagedResume(() => runFullPipeline(channel, { targetVideoId: shortId, userId, logStep }));
+      if (result && result.started === false) {
+        window.alert(
+          `The Short was created but its generation couldn't start right now — ${result.reason}. It'll be picked up automatically on the next automation cycle.`
+        );
+      }
+      await refreshVideos();
+    } catch (err) {
+      console.error('[ChannelDashboardStep] Generate Short failed', v.id, err);
+      window.alert(`Could not generate the Short: ${String(err.message || err)}`);
+      await refreshVideos();
+    } finally {
+      setGeneratingShortFor(null);
+    }
   }
 
   async function openMoveFor(v) {
@@ -1456,10 +1534,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                   </button>
                 </div>
 
-                {/* Companion Short — only when this video spawned one (automation_generate_shorts). */}
-                {v.shortVideoId &&
+                {/* Companion Short — for every published video: view/link if it has one, generate it on
+                    demand if it doesn't (or its record was deleted). */}
+                {isPublished &&
                   (() => {
-                    const short = shortsById.get(v.shortVideoId);
+                    const short = v.shortVideoId ? shortsById.get(v.shortVideoId) : null;
+                    const busy = generatingShortFor === v.id;
                     const shortPublished = !!short?.youtubeVideoId;
                     const shortProduced = !shortPublished && !!short?.thumbnailStoragePath;
                     return (
@@ -1476,12 +1556,11 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                         >
                           Companion Short
                         </span>
-                        {short && (shortPublished || shortProduced) ? (
+                        {busy || (short && !shortPublished && !shortProduced) ? (
+                          <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>⏳ Short generating…</span>
+                        ) : short ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                            <button
-                              onClick={() => onResume(short)}
-                              style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}
-                            >
+                            <button onClick={() => onResume(short)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
                               🎬 View Short
                             </button>
                             {shortPublished ? (
@@ -1506,7 +1585,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                             )}
                           </div>
                         ) : (
-                          <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>⏳ Short generating…</span>
+                          <button
+                            onClick={() => handleGenerateShort(v)}
+                            disabled={!!generatingShortFor}
+                            style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, alignSelf: 'flex-start', opacity: generatingShortFor ? 0.6 : 1 }}
+                          >
+                            🎬 Generate Short
+                          </button>
                         )}
                       </div>
                     );
