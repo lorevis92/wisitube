@@ -585,6 +585,9 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         thumbIdx: 0,
         overlayText: concept.overlay_text || '',
         seed: Math.floor(Math.random() * 999999),
+        // static_background videos are always 16:9; a Short on such a channel is delegated to
+        // runFullPipeline, so this recipe only ever renders horizontal thumbnails. Passed for parity.
+        format: settings.format,
       });
       const thumbnailStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),

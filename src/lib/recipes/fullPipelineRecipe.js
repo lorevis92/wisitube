@@ -939,6 +939,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         thumbIdx: 0,
         overlayText: concept.overlay_text || '',
         seed: Math.floor(Math.random() * 999999),
+        // settings.format is already forced to '9:16' for an isShort video (see the resume check);
+        // generateThumbnail also falls back to project.isShort on its own.
+        format: settings.format,
       });
       const thumbnailStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),

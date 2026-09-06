@@ -75,6 +75,11 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   const [thumbBackupFailed, setThumbBackupFailed] = useState(false);
 
   const dims = settings.format === '9:16' ? { W: 720, H: 1280 } : { W: 1280, H: 720 };
+  // Thumbnail canvas — a bit larger than the render canvas (see src/lib/thumbnailEngine.js's
+  // FORMAT_SPEC): 1280x720 horizontal, 1080x1920 for a vertical Short. project.isShort also forces
+  // vertical for a Short opened here manually, even if settings.format wasn't carried through.
+  const thumbVertical = settings.format === '9:16' || project.isShort === true;
+  const thumbDims = thumbVertical ? { W: 1080, H: 1920 } : { W: 1280, H: 720 };
   const scenes = project.scenes;
   const total = scenes.reduce((a, s) => a + (s.audioDuration || 0) + s.pad, 0);
   const title = project.titles[project.selectedTitle] || project.titles[0] || 'wisitube-video';
@@ -137,7 +142,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       const blob = await downloadMediaAsBlob(project.thumbnailStoragePath);
       const img = await loadImage(URL.createObjectURL(blob));
       const ctx = thumbCanvasRef.current.getContext('2d');
-      ctx.drawImage(img, 0, 0, 1280, 720);
+      ctx.drawImage(img, 0, 0, thumbDims.W, thumbDims.H);
       setThumbReady(true);
       // Clears the pre-publish block (see publishToYoutube's THUMBNAIL_NOT_READY sentinel) once a
       // retry from that same message actually succeeds — leaves any other, unrelated ytFormError
@@ -282,6 +287,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         thumbIdx,
         overlayText: thumbText,
         seed: thumbSeed,
+        format: thumbVertical ? '9:16' : '16:9',
       });
 
       // Draw the finished Blob onto the visible preview canvas — same pattern the "restore from
@@ -289,7 +295,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       // (both of which read from thumbCanvasRef) keep working unchanged.
       const img = await loadImage(URL.createObjectURL(thumbBlob));
       const ctx = thumbCanvasRef.current.getContext('2d');
-      ctx.drawImage(img, 0, 0, 1280, 720);
+      ctx.drawImage(img, 0, 0, thumbDims.W, thumbDims.H);
       setThumbReady(true);
 
       // Back up to Supabase Storage so this survives a refresh — never blocks the generation
@@ -615,9 +621,17 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         )}
         <canvas
           ref={thumbCanvasRef}
-          width={1280}
-          height={720}
-          style={{ width: '100%', marginTop: 12, borderRadius: 4, border: `1px solid ${T.border}`, display: thumbReady || thumbBusy ? 'block' : 'none', background: T.surfaceAlt }}
+          width={thumbDims.W}
+          height={thumbDims.H}
+          style={{
+            width: '100%',
+            maxWidth: thumbVertical ? 320 : undefined,
+            marginTop: 12,
+            borderRadius: 4,
+            border: `1px solid ${T.border}`,
+            display: thumbReady || thumbBusy ? 'block' : 'none',
+            background: T.surfaceAlt,
+          }}
         />
         {thumbReady && (
           <button onClick={downloadThumb} style={{ ...btnPrimary, background: T.green, borderColor: T.green, marginTop: 10 }}>

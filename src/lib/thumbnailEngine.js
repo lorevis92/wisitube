@@ -35,10 +35,50 @@ function makeCanvas(width, height) {
 
 // JPEG, not PNG: YouTube caps thumbnails at 2 MB and rejects anything larger with an opaque
 // HTTP 400 "invalidImage". A 1280x720 photo-real image as lossless PNG routinely hits 2–5 MB;
-// the same frame as JPEG q0.9 is ~150–400 KB and the baked-in typography survives it fine.
+// the same frame as JPEG q0.9 is ~150–400 KB and the baked-in typography survives it fine. Same
+// q0.9 for the 1080x1920 vertical Short thumbnail — still ~300–600 KB, well under the cap.
 function canvasToBlob(c) {
   if (typeof c.convertToBlob === 'function') return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
   return new Promise((resolve) => c.toBlob(resolve, 'image/jpeg', 0.9));
+}
+
+// Per-format geometry. 16:9 values are chosen so every derived number (Math.round(dim * frac))
+// reproduces the previous hard-coded layout EXACTLY — horizontal output is unchanged. 9:16 is a
+// practical, light 1080x1920 canvas (well above YouTube's 640px minimum, far below a needless
+// 2160x3840), with the pollinations text overlay sitting in the lower-middle rather than jammed at
+// the very bottom, where a Short's own player chrome would cover it.
+const FORMAT_SPEC = {
+  '16:9': {
+    canvasW: 1280,
+    canvasH: 720,
+    // image the provider generates — matches the canvas, so cover-fit is 1:1 (no scaling).
+    genW: 1280,
+    genH: 720,
+    gradTopFrac: 380 / 720, // → 380
+    textBottomFrac: 56 / 720, // → 56
+    baseFontFrac: 110 / 1280, // → 110
+    minFontFrac: 48 / 1280, // → 48
+  },
+  '9:16': {
+    canvasW: 1080,
+    canvasH: 1920,
+    // 720x1280 keeps the provider call in the cheap resolution tier (same as a 9:16 scene beat) and
+    // its aspect ratio equals the canvas's, so it's a clean uniform upscale with no crop.
+    genW: 720,
+    genH: 1280,
+    gradTopFrac: 0.44, // gradient covers the bottom ~56%
+    textBottomFrac: 0.14, // text baseline ~270px up from the bottom, clear of the Short player chrome
+    baseFontFrac: 96 / 1080,
+    minFontFrac: 44 / 1080,
+  },
+};
+
+// Explicit `format` opt wins; otherwise a Short is always vertical, otherwise the video's own
+// settings.format, defaulting to horizontal.
+function resolveThumbnailFormat({ format, project, settings }) {
+  if (format === '9:16' || format === '16:9') return format;
+  if (project?.isShort) return '9:16';
+  return settings?.format === '9:16' ? '9:16' : '16:9';
 }
 
 // Same telegraphic-vs-natural-language branching StoryboardStep.jsx's prompt builder uses for
@@ -48,8 +88,9 @@ function canvasToBlob(c) {
 // Takes the effective provider (already translated from 'nanobanana-batch' to 'nanobanana' by the
 // caller — see generateThumbnail below) rather than reading settings.imageProvider itself, so
 // there's exactly one place that translation happens, not two.
-function thumbnailPrompt(concept, overlayText, settings, effectiveProvider) {
-  const flavoredPrompt = `${concept.image_prompt}, YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
+function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt) {
+  const orientation = fmt === '9:16' ? ' vertical 9:16 portrait composition,' : '';
+  const flavoredPrompt = `${concept.image_prompt},${orientation} YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
   const style = STYLES[settings.style];
   if (effectiveProvider === 'pollinations') {
     return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
@@ -57,12 +98,15 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider) {
   // Premium providers bake the overlay text directly into the generated image instead of the
   // canvas overlay pollinations gets below — an explicit typography instruction steers them
   // toward something that reads like a real YouTube thumbnail rather than a generic caption.
-  const textInstruction = `Include the exact text '${overlayText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, white or yellow fill with a black outline/drop shadow for readability, positioned in the lower third of the frame, sized large and impactful like professional YouTube thumbnails. The text must be spelled exactly as given, no alterations.`;
+  const textInstruction = `Include the exact text '${overlayText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, white or yellow fill with a black outline/drop shadow for readability, positioned in the lower ${
+    fmt === '9:16' ? 'half' : 'third'
+  } of the frame, sized large and impactful like professional YouTube thumbnails. The text must be spelled exactly as given, no alterations.`;
   return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}`, styleDescription: style.natural });
 }
 
 /**
- * Generates the final 1280x720 thumbnail Blob for one concept from project.thumbnails.
+ * Generates the final thumbnail Blob for one concept from project.thumbnails — 1280x720 for a
+ * horizontal video, 1080x1920 for a vertical Short (see resolveThumbnailFormat / the `format` opt).
  *
  * thumbIdx/overlayText/seed are accepted here (beyond the base project/settings/userId/videoId
  * shape) because the selected concept, its (possibly user-edited) overlay text, and its
@@ -73,8 +117,11 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider) {
  * future use, but this function's own body doesn't need them — see the header comment above for
  * why the Storage backup they'd be used for stays in ExportStep.jsx.
  */
-export async function generateThumbnail(project, { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed } = {}) {
+export async function generateThumbnail(project, { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed, format } = {}) {
   const concept = project.thumbnails[thumbIdx];
+  const fmt = resolveThumbnailFormat({ format, project, settings });
+  const spec = FORMAT_SPEC[fmt];
+  const { canvasW: W, canvasH: H } = spec;
   const provider = settings.imageProvider || 'pollinations';
   // A thumbnail is a single image — never worth submitting to Gemini Batch and waiting up to
   // hours for it. 'nanobanana-batch' videos still get a real premium thumbnail, just via Nano
@@ -92,10 +139,10 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   const { imageUrl, costUsd } = await withTimeout(
     (signal) =>
       generateImage(
-        thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider),
+        thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider, fmt),
         effectiveThumbnailProvider,
         [],
-        { width: 1280, height: 720, seed, quality: 'medium' },
+        { width: spec.genW, height: spec.genH, seed, quality: 'medium' },
         signal
       ),
     THUMBNAIL_GENERATE_TIMEOUT_MS,
@@ -105,31 +152,32 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
   if (costUsd > 0) await recordCost({ channelId, videoId, provider: effectiveThumbnailProvider, type: 'image', amountUsd: costUsd });
 
   const img = await withTimeout(() => loadImage(imageUrl), THUMBNAIL_DOWNLOAD_TIMEOUT_MS, 'Thumbnail image download');
-  const c = makeCanvas(1280, 720);
+  const c = makeCanvas(W, H);
   const ctx = c.getContext('2d');
-  // cover-fit
+  // cover-fit into W x H
   const ir = img.width / img.height;
-  const cr = 1280 / 720;
+  const cr = W / H;
   let dw, dh;
   if (ir > cr) {
-    dh = 720;
-    dw = 720 * ir;
+    dh = H;
+    dw = H * ir;
   } else {
-    dw = 1280;
-    dh = 1280 / ir;
+    dw = W;
+    dh = W / ir;
   }
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, 1280, 720);
-  ctx.drawImage(img, (1280 - dw) / 2, (720 - dh) / 2, dw, dh);
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
 
   if (effectiveThumbnailProvider === 'pollinations') {
     await document.fonts.ready;
-    // bottom gradient for legibility
-    const g = ctx.createLinearGradient(0, 380, 0, 720);
+    // legibility gradient over the text zone
+    const gradTop = Math.round(H * spec.gradTopFrac);
+    const g = ctx.createLinearGradient(0, gradTop, 0, H);
     g.addColorStop(0, 'rgba(0,0,0,0)');
     g.addColorStop(1, 'rgba(0,0,0,0.75)');
     ctx.fillStyle = g;
-    ctx.fillRect(0, 380, 1280, 340);
+    ctx.fillRect(0, gradTop, W, H - gradTop);
     // overlay text
     const text = (overlayText || '').toUpperCase();
     const words = text.split(/\s+/).filter(Boolean);
@@ -137,24 +185,28 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
       words.length > 2
         ? [words.slice(0, Math.ceil(words.length / 2)).join(' '), words.slice(Math.ceil(words.length / 2)).join(' ')]
         : [text];
-    let size = 110;
+    const baseSize = Math.round(W * spec.baseFontFrac);
+    const minSize = Math.round(W * spec.minFontFrac);
+    const maxTextWidth = W - 100;
+    let size = baseSize;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
     const fit = (s) => {
       ctx.font = `800 ${s}px Syne, sans-serif`;
-      return lines.every((ln) => ctx.measureText(ln).width < 1180);
+      return lines.every((ln) => ctx.measureText(ln).width < maxTextWidth);
     };
-    while (size > 48 && !fit(size)) size -= 6;
+    while (size > minSize && !fit(size)) size -= 6;
     ctx.font = `800 ${size}px Syne, sans-serif`;
     const lineH = size * 1.08;
+    const bottomMargin = Math.round(H * spec.textBottomFrac);
     lines.forEach((ln, i) => {
-      const y = 720 - 56 - (lines.length - 1 - i) * lineH;
+      const y = H - bottomMargin - (lines.length - 1 - i) * lineH;
       ctx.lineWidth = size * 0.14;
       ctx.lineJoin = 'round';
       ctx.strokeStyle = '#000000';
-      ctx.strokeText(ln, 640, y);
+      ctx.strokeText(ln, W / 2, y);
       ctx.fillStyle = i === lines.length - 1 ? '#FFD400' : '#FFFFFF';
-      ctx.fillText(ln, 640, y);
+      ctx.fillText(ln, W / 2, y);
     });
   }
   // Premium providers (nanobanana/gptimage) already baked the text into the generated image
