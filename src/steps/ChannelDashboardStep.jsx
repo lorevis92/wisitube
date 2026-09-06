@@ -168,6 +168,18 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [ytEditBusy, setYtEditBusy] = useState(null); // videoId currently being saved, or null
   const [ytEditError, setYtEditError] = useState('');
 
+  // Escape closes the "how should this Short publish?" modal (same affordance as ImageLightbox /
+  // ProgramManagerChat). No-op while nothing is generating; the modal itself also closes on the
+  // choice and on an outside click.
+  useEffect(() => {
+    if (!shortPublishChoiceFor) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setShortPublishChoiceFor(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [shortPublishChoiceFor]);
+
   // Default background/text style for content_type 'static_background' videos on this channel —
   // see StoryboardStep.jsx, which seeds a new video's own project.staticBackground/staticTextStyle
   // from these exactly once.
@@ -1610,32 +1622,6 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                               <span style={{ fontSize: 10, fontFamily: FONT.ui, color: T.textMuted }}>◻ produced, not on YouTube yet</span>
                             )}
                           </div>
-                        ) : shortPublishChoiceFor === v.id ? (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
-                            <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>
-                              How should this Short be published?
-                            </span>
-                            <button
-                              onClick={() => handleGenerateShort(v, { autoPublish: true })}
-                              disabled={!!generatingShortFor}
-                              style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, alignSelf: 'stretch' }}
-                            >
-                              Generate and publish automatically
-                            </button>
-                            <button
-                              onClick={() => handleGenerateShort(v, { autoPublish: false })}
-                              disabled={!!generatingShortFor}
-                              style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, alignSelf: 'stretch' }}
-                            >
-                              Generate only, I'll publish it manually
-                            </button>
-                            <button
-                              onClick={() => setShortPublishChoiceFor(null)}
-                              style={{ ...btnGhost, padding: '4px 8px', fontSize: 10, border: 'none', color: T.textMuted }}
-                            >
-                              Cancel
-                            </button>
-                          </div>
                         ) : (
                           <button
                             onClick={() => setShortPublishChoiceFor(v.id)}
@@ -1745,6 +1731,59 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           })}
         </div>
       ))}
+
+      {shortPublishChoiceFor &&
+        (() => {
+          const choiceVideo = (videos || []).find((x) => x.id === shortPublishChoiceFor);
+          if (!choiceVideo) return null;
+          return (
+            <div
+              onClick={() => setShortPublishChoiceFor(null)}
+              style={{
+                position: 'fixed',
+                inset: 0,
+                zIndex: 2000,
+                background: 'rgba(0,0,0,0.5)',
+                backdropFilter: 'blur(6px)',
+                WebkitBackdropFilter: 'blur(6px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 20,
+              }}
+            >
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{ ...card, width: '100%', maxWidth: 380, display: 'flex', flexDirection: 'column', gap: 14 }}
+              >
+                <div style={{ fontFamily: FONT.ui, fontSize: 15, fontWeight: 700, color: T.text }}>Generate companion Short</div>
+                <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, lineHeight: 1.5 }}>
+                  “{choiceVideo.displayTitle || choiceVideo.topic}” — how should the Short be published once it’s produced?
+                </div>
+                <button
+                  onClick={() => handleGenerateShort(choiceVideo, { autoPublish: true })}
+                  disabled={!!generatingShortFor}
+                  style={{ ...btnPrimary, padding: '10px 12px', fontSize: 12 }}
+                >
+                  Generate and publish automatically
+                </button>
+                <button
+                  onClick={() => handleGenerateShort(choiceVideo, { autoPublish: false })}
+                  disabled={!!generatingShortFor}
+                  style={{ ...btnGhost, padding: '10px 12px', fontSize: 12 }}
+                >
+                  Generate only, I&apos;ll publish it manually
+                </button>
+                <button
+                  onClick={() => setShortPublishChoiceFor(null)}
+                  style={{ ...btnGhost, padding: '8px 12px', fontSize: 11, border: 'none', color: T.textMuted }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
       {showProgramManagerChat && (
         <ProgramManagerChat
