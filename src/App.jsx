@@ -622,6 +622,15 @@ export default function App() {
       // Comparison-only subject name — same "carry it through resume or the next autosave drops it"
       // reason as the fields above.
       subject: record.subject || null,
+      // Companion-Short markers (src/lib/shortsEngine.js): isShort/parentVideoId are written once at
+      // the Short's creation, shortVideoId once onto the parent. They were never in this allow-list,
+      // so opening a Short (e.g. the "View Short" button) — or its parent — and letting the autosave
+      // fire once rewrote the whole project jsonb via plain saveVideo WITHOUT them: the Short lost
+      // isShort and resurfaced as its own grid card offering "Generate Short", and the parent's
+      // Companion-Short link broke. Exact same failure mode as promiseFulfilled/subject above.
+      isShort: record.isShort === true,
+      parentVideoId: record.parentVideoId || null,
+      shortVideoId: record.shortVideoId || null,
     });
 
     if (generationRef.current !== generation) return; // a newer resume/reset took over meanwhile

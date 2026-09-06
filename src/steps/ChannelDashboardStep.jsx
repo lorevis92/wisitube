@@ -1598,6 +1598,22 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                           <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>⏳ Short generating…</span>
                         ) : short ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                            {/* The Short's OWN thumbnail (vertical 9:16 — see thumbnailEngine.js), keyed by
+                                the Short's id in thumbUrls, never the parent's. */}
+                            {thumbUrls[short.id] && (
+                              <img
+                                src={thumbUrls[short.id]}
+                                alt=""
+                                style={{
+                                  width: 40,
+                                  aspectRatio: '9 / 16',
+                                  objectFit: 'cover',
+                                  borderRadius: 3,
+                                  border: `1px solid ${T.border}`,
+                                  flexShrink: 0,
+                                }}
+                              />
+                            )}
                             <button onClick={() => onResume(short)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
                               🎬 View Short
                             </button>
