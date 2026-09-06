@@ -334,6 +334,13 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists automation_generate_shorts boolean not null default false;
+//
+// Required one-time setup for per-channel publish-day scheduling (see automationEngine.js's
+// canRunChannelToday) — an array of JS Date.getDay() numbers (0=Sunday … 6=Saturday) the channel is
+// allowed to publish on; all seven = publish any day:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_publish_days jsonb not null default '[0,1,2,3,4,5,6]'::jsonb;
 
 function fromChannelRow(row) {
   return {
@@ -423,6 +430,9 @@ function fromChannelRow(row) {
     // Opt-in (default off): auto-generate a vertical teaser YouTube Short for every long video that
     // publishes successfully — see src/lib/shortsEngine.js and the recipes' companion-Short hook.
     automation_generate_shorts: !!row.automation_generate_shorts,
+    // Days of the week (JS Date.getDay(): 0=Sun … 6=Sat) this channel may publish on. A missing
+    // column / non-array falls back to all seven (publish any day). An empty array means "never".
+    automation_publish_days: Array.isArray(row.automation_publish_days) ? row.automation_publish_days : [0, 1, 2, 3, 4, 5, 6],
   };
 }
 
@@ -481,6 +491,9 @@ export async function saveChannel(channel) {
     automation_channel_intro: !!channel.automation_channel_intro,
     automation_export_mode: channel.automation_export_mode || 'youtube',
     automation_generate_shorts: !!channel.automation_generate_shorts,
+    automation_publish_days: Array.isArray(channel.automation_publish_days)
+      ? channel.automation_publish_days
+      : [0, 1, 2, 3, 4, 5, 6],
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

@@ -947,6 +947,45 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     />
                   </div>
 
+                  {(() => {
+                    // JS Date.getDay(): 0=Sun … 6=Sat. Shown Mon-first, stored as those numbers.
+                    const DAYS = [
+                      { n: 1, dl: 'Mon' },
+                      { n: 2, dl: 'Tue' },
+                      { n: 3, dl: 'Wed' },
+                      { n: 4, dl: 'Thu' },
+                      { n: 5, dl: 'Fri' },
+                      { n: 6, dl: 'Sat' },
+                      { n: 0, dl: 'Sun' },
+                    ];
+                    const selected = Array.isArray(c.automation_publish_days) ? c.automation_publish_days : [0, 1, 2, 3, 4, 5, 6];
+                    const toggle = (n) => {
+                      const next = selected.includes(n) ? selected.filter((d) => d !== n) : [...selected, n];
+                      updateAndSaveImmediately(c.id, { automation_publish_days: next.sort((a, b) => a - b) });
+                    };
+                    return (
+                      <div style={{ gridColumn: '1 / -1' }}>
+                        <div style={label}>Publish on these days</div>
+                        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
+                          {DAYS.map(({ n, dl }) => (
+                            <label
+                              key={n}
+                              style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}
+                            >
+                              <input type="checkbox" checked={selected.includes(n)} disabled={running} onChange={() => toggle(n)} />
+                              {dl}
+                            </label>
+                          ))}
+                        </div>
+                        {selected.length === 0 && (
+                          <div style={{ fontSize: 10, color: T.yellow, fontFamily: FONT.ui, marginTop: 6 }}>
+                            No days selected — this channel won't publish at all.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   <div>
                     <div style={label}>Daily budget ($)</div>
                     <input

@@ -111,12 +111,39 @@ export async function resetDailyCountersIfNeeded(channel) {
   return updated || channel;
 }
 
+const WEEKDAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 // { ok: boolean, reason: string | null } rather than a bare boolean — every false case needs a
 // reason the caller can log (see runAutomationCycle), so the two travel together instead of the
 // caller having to re-derive why.
 export function canRunChannelToday(channel) {
   if (channel.automation_enabled !== true) {
     return { ok: false, reason: 'automation disabled for this channel' };
+  }
+
+  // Per-channel weekday schedule (automation_publish_days: JS Date.getDay() numbers). Purely
+  // day-of-week based — no "last video" bookkeeping to drift. A missing/non-array value means all
+  // seven days (publish any day); an explicit list restricts to those days. This gates the whole
+  // channel for the cycle, so it sits BEFORE the videos_per_day / budget checks and coexists with
+  // them: on a scheduled day, videos_per_day still governs how many videos that day.
+  const publishDays = Array.isArray(channel.automation_publish_days) ? channel.automation_publish_days : null;
+  if (publishDays) {
+    const today = new Date().getDay();
+    if (!publishDays.includes(today)) {
+      const list =
+        publishDays.length === 0
+          ? 'no days'
+          : [...publishDays]
+              .filter((d) => d >= 0 && d <= 6)
+              .sort((a, b) => a - b)
+              .map((d) => WEEKDAY_SHORT[d])
+              .join('/');
+      return {
+        ok: false,
+        reason: `channel only publishes on ${list} — today (${WEEKDAY_FULL[today]}) isn't a scheduled day`,
+      };
+    }
   }
 
   const videosPerDay = Number(channel.automation_videos_per_day) || 0;
