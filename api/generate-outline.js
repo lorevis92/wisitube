@@ -186,6 +186,186 @@ const AI_DECIDES_LENGTH_INSTRUCTION = `Determine the ideal length for this video
 // shortening or lengthening the ending is far less disruptive to the narrative than reshaping the
 // hook or the middle chapters. Mutates plan.outline in place and refreshes plan.total_scenes to
 // match the (possibly adjusted) real sum.
+// ---- Stage: short-script (body.mode === 'short-script') ----
+//
+// Folded into this file (same dispatch pattern as `titles`) to stay under Vercel Hobby's 12-function
+// cap. Generates the COMPLETE script for a companion YouTube Short in one call — description, SEO
+// pack, thumbnail concepts, and 6-10 fully-written scenes (narration + 2 image_beats each, exactly
+// the api/generate-scenes.js output shape src/lib/shortsEngine.js's buildScenesFromRaw consumes).
+// The character bible is INHERITED from the just-published long video, not re-invented, so the Short
+// depicts the same people consistently. There is no web search here — everything it needs is in the
+// request.
+const SHORT_SCRIPT_DIRECTION = `You are a YouTube Shorts scriptwriter for a faceless animated channel.
+
+Write a short, self-contained 20-40 second story that creates genuine curiosity about the topic and ends with an explicit, natural call-to-action to watch the full video for the complete story. This is NOT a summary or a repeat of the full video's opening — it is a standalone teaser designed to make someone who has never heard of this topic want to know more.
+
+Craft: open on the single most surprising, specific hook in the first sentence (no throat-clearing). Build one small thread of intrigue across the middle scenes — a question, a tension, a "wait, what?" moment — without ever resolving it. The final 1-2 scenes must land a clear, spoken call-to-action ("the full story is wild — watch the whole video", "there's way more to this — full video linked", etc.), phrased naturally as narration, never as a caption or bullet.
+
+Narration: conversational, punchy, read-aloud friendly, no scene numbers, no dashes as punctuation. Each scene is 1-2 very short sentences. Vary the animations; never repeat one across consecutive scenes. Each scene's two image_beats must be visually distinct from each other (different subject, moment, or framing).`;
+
+async function generateShortScript(req, res, apiKey) {
+  try {
+    let topic, angle, parentTitle, language, style, imageProvider, characterBible, creativeOverride;
+    try {
+      const body = req.body || {};
+      topic = typeof body.topic === 'string' ? body.topic.trim() : '';
+      angle = typeof body.angle === 'string' ? body.angle.trim() : '';
+      parentTitle = typeof body.parentTitle === 'string' ? body.parentTitle.trim() : '';
+      if (!topic || topic.length > 500) return res.status(400).json({ error: 'Invalid topic' });
+      language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
+      style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'stick figures';
+      imageProvider = typeof body.imageProvider === 'string' ? body.imageProvider.trim() : 'pollinations';
+      creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+      characterBible = Array.isArray(body.characterBible)
+        ? body.characterBible
+            .filter((c) => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim())
+            .slice(0, 12)
+            .map((c) => ({
+              id: typeof c.id === 'string' && c.id.trim() ? c.id.trim() : '',
+              name: c.name.trim(),
+              baseDescription: typeof c.baseDescription === 'string' ? c.baseDescription.trim() : '',
+              variants: Array.isArray(c.variants)
+                ? c.variants
+                    .map((v) => ({
+                      label: typeof v?.label === 'string' ? v.label.trim() : '',
+                      description: typeof v?.description === 'string' ? v.description.trim() : '',
+                    }))
+                    .filter((v) => v.label)
+                : [],
+            }))
+        : [];
+    } catch (err) {
+      console.error('[generate-short-script] phase=validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    // Pollinations (Flux/Kontext) has no world knowledge and can't render legible text; Nano Banana /
+    // GPT Image recognize named people and render text — same split as api/generate-scenes.js.
+    const premiumProvider = ['nanobanana', 'nanobanana-batch', 'gptimage'].includes(imageProvider);
+    const imagePromptFieldDescription = premiumProvider
+      ? `concrete visual description in English of ONE clear vertical (9:16) image for a specific moment in this narration: one subject, one action, simple composition. Write it as a natural sentence that names any recognizable real person or character by their proper name (trust the model's own knowledge for their look). No on-screen text unless a specific number/quote in the narration genuinely needs it, in which case give the exact text in quotes and say it must be rendered verbatim.`
+      : `concrete visual description in English of ONE clear vertical (9:16) image for a specific moment in this narration: one subject, one action, simple composition. Never include text, letters, numbers or signs in the image.`;
+
+    const characterContext = characterBible.length
+      ? `
+
+These characters are ALREADY established in the full video — use the SAME ids and names, do not invent new ones. Set image_beats.character_id to the matching id (and variant_label to a matching variant, or null) for every beat a listed character appears in:
+${characterBible
+  .map(
+    (c) =>
+      `- id: "${c.id}", name: "${c.name}"${c.baseDescription ? ` — ${c.baseDescription}` : ''}${
+        c.variants.length ? `; variants: [${c.variants.map((v) => `"${v.label}"`).join(', ')}]` : ''
+      }`
+  )
+  .join('\n')}`
+      : '';
+
+    const SCHEMA = `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble. Just raw JSON.
+
+{
+  "title": "punchy Short title, max 90 chars, curiosity-driven",
+  "description": "2-3 sentence YouTube description written to tease the full video (the app appends the full-video link and #Shorts itself — do NOT add them)",
+  "tags": [8-12 short SEO tag strings],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete vertical visual description in English, one strong focal subject, exaggerated emotion, no text in image — name the real central person/character explicitly if the video has one" }],
+  "character_bible": [the SAME array you were given above, unchanged, or [] if none was given],
+  "scenes": [between 6 and 10 objects: {
+    "narration": "what the voiceover says for this scene — 1-2 very short sentences, max 150 characters, written in ${language}, no dashes as punctuation",
+    "image_beats": [exactly 2 objects: {
+      "image_prompt": "${imagePromptFieldDescription}",
+      "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
+      "reference_id": null,
+      "character_id": string | null,
+      "variant_label": string | null
+    }]
+  }]
+}
+
+Rules:
+- Between 6 and 10 scenes, no more, no less.
+- image_prompt is always in English regardless of narration language, and must render well as a vertical 9:16 frame.
+- reference_id is always null.`;
+
+    const context = `Full video this Short teases: "${parentTitle || topic}"
+Topic: "${topic}"
+Narrative angle of the full video: ${angle || '(infer from the title)'}
+Visual style: ${style}${characterContext}`;
+
+    const systemPrompt = `${context}\n\n${creativeOverride || SHORT_SCRIPT_DIRECTION}\n\n${SCHEMA}`;
+
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 5000,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: 'Write the complete Short script now. Respond with JSON only.' }],
+        }),
+      });
+    } catch (err) {
+      console.error('[generate-short-script] phase=fetch-anthropic', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not reach the Anthropic API', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    let rawText;
+    try {
+      rawText = await response.text();
+    } catch (err) {
+      console.error('[generate-short-script] phase=read-response-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the Anthropic response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+    if (!response.ok) {
+      console.error('[generate-short-script] phase=anthropic-http-error status=', response.status, 'body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic API error', detail: rawText.slice(0, 300) });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (err) {
+      console.error('[generate-short-script] phase=parse-envelope-json', err?.message, 'raw=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic returned a non-JSON response', detail: rawText.slice(0, 300) });
+    }
+
+    const rawContent = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    const clean = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = clean.indexOf('{');
+    const end = clean.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+      console.error('[generate-short-script] phase=locate-json no braces, text=', clean.slice(0, 300));
+      return res.status(502).json({ error: 'Invalid AI response' });
+    }
+
+    let plan;
+    try {
+      plan = JSON.parse(clean.slice(start, end + 1));
+    } catch (e) {
+      console.error('[generate-short-script] phase=parse-plan-json', e?.message, 'stop_reason=', data?.stop_reason, 'text=', clean.slice(0, 400));
+      return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
+    }
+
+    const scenes = Array.isArray(plan.scenes) ? plan.scenes.filter((s) => s && typeof s.narration === 'string' && s.narration.trim()) : [];
+    if (scenes.length < 4) {
+      console.error('[generate-short-script] phase=validate too few scenes:', scenes.length, 'stop_reason=', data?.stop_reason);
+      return res.status(502).json({ error: `Short script returned only ${scenes.length} usable scenes` });
+    }
+
+    return res.status(200).json({
+      title: typeof plan.title === 'string' ? plan.title.trim() : '',
+      description: typeof plan.description === 'string' ? plan.description.trim() : '',
+      tags: Array.isArray(plan.tags) ? plan.tags.filter((t) => typeof t === 'string' && t.trim()).slice(0, 15) : [],
+      thumbnail_concepts: Array.isArray(plan.thumbnail_concepts) ? plan.thumbnail_concepts.slice(0, 3) : [],
+      character_bible: Array.isArray(plan.character_bible) && plan.character_bible.length ? plan.character_bible : characterBible,
+      scenes: scenes.slice(0, 10),
+    });
+  } catch (err) {
+    console.error('[generate-short-script] phase=unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
+
 function clampToSafetyCap(plan, capMinScenes, capMaxScenes) {
   const outline = plan.outline;
   const currentTotal = outline.reduce((sum, ch) => sum + (Number(ch.scene_count) || 0), 0);
@@ -216,6 +396,9 @@ export default async function handler(req, res) {
 
   // Stage 1 (titles) is dispatched here, before any of the outline-specific body validation below.
   if (req.body?.mode === 'titles') return generateTitles(req, res, apiKey);
+  // Companion-Short script (src/lib/shortsEngine.js) — same dispatch pattern, folded in to stay
+  // under Vercel Hobby's 12-function cap.
+  if (req.body?.mode === 'short-script') return generateShortScript(req, res, apiKey);
 
   // Outer safety net: the phase-specific catches below should handle everything, but this
   // guarantees we never let an uncaught exception fall through to a platform-level 502.

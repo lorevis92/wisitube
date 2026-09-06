@@ -181,7 +181,17 @@ async function runStageC({ channel, analysis, scoredCandidates }) {
  * Returns { channel, analysis, finalSuggestions } — `channel` is the freshly-saved record when a
  * new pass ran, or the same object passed in when the cache was used as-is.
  */
+// Auto-generated companion Shorts (src/lib/shortsEngine.js — isShort:true) deliberately share their
+// parent long video's subject, so they must NOT feed any anti-repetition signal: a subject/title
+// match against a Short is expected, not a "you already covered this" warning. Stripped once, at
+// every public entry point, so every downstream helper (nonTerminalVideos, existingVideos context,
+// avoidTitles/avoidSubjects) sees a Shorts-free list.
+function withoutAutoShorts(videos) {
+  return (videos || []).filter((v) => v.isShort !== true);
+}
+
 export async function getTopicSuggestions(channel, { videos = [], forceRefresh = false, refinementText = '' } = {}) {
+  videos = withoutAutoShorts(videos);
   if (!forceRefresh && !refinementText && channel.topic_scoring_cache && isTopicCacheFresh(channel)) {
     const cache = channel.topic_scoring_cache;
     return { channel, analysis: cache.analysis || '', finalSuggestions: cache.finalSuggestions || [] };
@@ -297,7 +307,7 @@ async function removeAndBackfill(channel, suggestion, videos) {
 // staticBackgroundRecipe.js) both call this the moment a suggestion is turned into a real video, so
 // it disappears from the shared list for both surfaces immediately.
 export async function startTopicSuggestion(channel, suggestion, videos) {
-  return removeAndBackfill(channel, suggestion, videos);
+  return removeAndBackfill(channel, suggestion, withoutAutoShorts(videos));
 }
 
 // "Not interested" — same removal/backfill mechanics, plus remembering the title so it never
@@ -308,5 +318,5 @@ export async function dismissTopicSuggestion(channel, suggestion, videos) {
   // Persist the dismissal on its own, targeted, so removeAndBackfill's own targeted cache write
   // below doesn't have to carry it (and can't clobber a concurrent dismissed_suggestions change).
   const updated = await updateChannelFields(channel.id, { dismissed_suggestions });
-  return removeAndBackfill(updated || { ...channel, dismissed_suggestions }, suggestion, videos);
+  return removeAndBackfill(updated || { ...channel, dismissed_suggestions }, suggestion, withoutAutoShorts(videos));
 }

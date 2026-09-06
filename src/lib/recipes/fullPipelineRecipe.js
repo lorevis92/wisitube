@@ -32,6 +32,7 @@ import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { withTimeout } from '../asyncTimeout';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
+import { createShortRecord } from '../shortsEngine';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
@@ -394,6 +395,10 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // in. (The rendered MP4 is not persisted, so it's never among what gets rehydrated — a resume
     // always re-renders.)
     project = await rehydrateProjectMedia(resumable);
+    // A companion Short is always a 9:16 video regardless of the channel's own format setting, and
+    // the record itself is the source of truth for that (isShort persisted at creation — see
+    // shortsEngine.js), so every resume path (poll, cycle, manual) forces it the same way here.
+    if (project?.isShort) settings.format = '9:16';
     // Reached via findResumableVideo (no explicit targetVideoId) → this is an automation video by
     // definition; stamp createdByAutomation so one that predates the flag (matched via the outline
     // fallback) carries it from now on. An explicit "Resume now" on a specific video (targetVideoId)
@@ -1032,7 +1037,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // below, the instant before the first byte PUT — see the comment there) is what keeps a video
   // that actually died mid-upload out of both this branch and findResumableVideo on the next cycle
   // (determineResumePhase returns null for it).
-  const anomalousInterruption = wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
+  // A companion Short is a fully machine-generated video that only ever exists as an automation
+  // record — it is created (scenes pre-written) and immediately run through this pipeline, so a
+  // resume of it is never an "anomalous mid-generation interruption" a human needs to review; it
+  // just needs finishing and publishing like a normal batch-wait resume.
+  const anomalousInterruption =
+    !project?.isShort && wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
   if (!manualPublish && channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
@@ -1144,11 +1154,49 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     }
   }
 
+  // ---- Companion Short ----
+  // Only after a real YouTube publish (we need this video's watch URL to link back to), and only for
+  // a genuine long video (never recurse from a Short), and only once (project.shortVideoId acts as
+  // the done-marker + parent→child pointer). createShortRecord builds a separate 9:16 teaser video
+  // record with its script pre-written; this same recipe then produces it — synchronously for a
+  // sync image provider, or (batch provider) submitting its jobs and letting pollPendingImageBatches
+  // finish it, exactly like any other batch video. It never counts against the channel's daily
+  // upload quota (it runs outside runAutomationCycle's exhaustion loop) and never fails the
+  // already-published parent.
+  let shortCostUsd = 0;
+  if (channel.automation_generate_shorts === true && youtubeVideoId && !project.isShort && !project.shortVideoId) {
+    try {
+      report('short', 'Writing the companion Short…');
+      const shortId = await createShortRecord(
+        {
+          id: videoId,
+          youtubeVideoId,
+          topic: suggestion?.title || plan?.title || project.topic || '',
+          angle: plan?.angle || suggestion?.angle || '',
+          subject: project.subject || null,
+          characterBible: plan?.characterBible || project.characterBible || [],
+          displayTitle: plan?.title || suggestion?.title || project.topic || '',
+        },
+        channel,
+        { userId, logStep }
+      );
+      project = { ...project, shortVideoId: shortId };
+      await persist();
+      report('short', 'Producing the companion Short…');
+      const shortResult = await runFullPipeline(channel, { targetVideoId: shortId, userId, logStep, onProgress });
+      shortCostUsd = Number(shortResult?.costUsd) || 0;
+    } catch (err) {
+      // The parent is already live — a Short problem is logged, never thrown.
+      console.error('[fullPipelineRecipe] companion Short failed', err);
+      await logStep(channelId, videoId, 'short', 'error', `parent published OK — companion Short failed: ${String(err?.message || err)}`);
+    }
+  }
+
   // Total real spend for this video, from the cost-ledger entries recordCost wrote along the way
   // (inside mediaGenerationEngine.js/thumbnailEngine.js/batchResumption.js) — not tracked
   // incrementally here since those writes happen deep inside modules this recipe doesn't
-  // otherwise need to instrument.
-  const costUsd = await totalCostForVideo(channelId, videoId);
+  // otherwise need to instrument. Plus the companion Short's own spend, if one was produced.
+  const costUsd = (await totalCostForVideo(channelId, videoId)) + shortCostUsd;
 
   return { videoId, youtubeVideoId, costUsd };
 }

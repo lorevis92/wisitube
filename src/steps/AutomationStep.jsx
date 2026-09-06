@@ -1210,6 +1210,33 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                 </div>
 
                 <div style={{ marginTop: 12 }}>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 11,
+                      fontFamily: FONT.ui,
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      color: T.textSecondary,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!c.automation_generate_shorts}
+                      disabled={running}
+                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_generate_shorts: e.target.checked })}
+                    />
+                    Auto-generate a teaser Short
+                  </label>
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 4, lineHeight: 1.5 }}>
+                    After each long video publishes, also make a separate 20–40s vertical Short with its own script and
+                    images, designed to build curiosity and link back to the full video.
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
                   <div style={label}>Current initiative (optional)</div>
                   <ExpandableTextarea
                     value={c.automation_directive || ''}

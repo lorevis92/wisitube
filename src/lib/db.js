@@ -183,6 +183,10 @@ const VIDEO_DOWNSTREAM_FIELDS = [
   'thumbnailStoragePath',
   'stuckError',
   'mediaArchived',
+  // Companion-Short markers (src/lib/shortsEngine.js): isShort set once at creation, shortVideoId
+  // set once on the parent after it publishes — a stale media-progress writer must never blank them.
+  'isShort',
+  'shortVideoId',
 ];
 
 /**
@@ -323,6 +327,13 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists automation_export_mode text not null default 'youtube';
+//
+// Required one-time setup for the companion-Short generator (see src/lib/shortsEngine.js) — when on,
+// every successfully-published long video also gets a vertical teaser Short auto-generated as a
+// separate video that links back to it:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_generate_shorts boolean not null default false;
 
 function fromChannelRow(row) {
   return {
@@ -409,6 +420,9 @@ function fromChannelRow(row) {
     // 'youtube' (default) publishes via the API; 'local_folder' writes the finished files to a
     // user-picked local folder tree instead and leaves the video "not published" (src/lib/localExport.js).
     automation_export_mode: row.automation_export_mode || 'youtube',
+    // Opt-in (default off): auto-generate a vertical teaser YouTube Short for every long video that
+    // publishes successfully — see src/lib/shortsEngine.js and the recipes' companion-Short hook.
+    automation_generate_shorts: !!row.automation_generate_shorts,
   };
 }
 
@@ -466,6 +480,7 @@ export async function saveChannel(channel) {
     automation_auto_publish: channel.automation_auto_publish ?? true,
     automation_channel_intro: !!channel.automation_channel_intro,
     automation_export_mode: channel.automation_export_mode || 'youtube',
+    automation_generate_shorts: !!channel.automation_generate_shorts,
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

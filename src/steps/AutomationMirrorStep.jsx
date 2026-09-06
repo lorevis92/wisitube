@@ -33,6 +33,7 @@ const PHASE_LABELS = {
   render: 'Rendering video',
   thumbnail: 'Creating thumbnail',
   youtube: 'Publishing to YouTube',
+  short: 'Companion Short',
 };
 
 const LOG_PHASES = new Set(['starting', 'suggestion', 'video-record', 'outline', 'scenes']);

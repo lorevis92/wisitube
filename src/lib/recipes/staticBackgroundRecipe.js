@@ -33,6 +33,8 @@ const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 const YOUTUBE_PUBLISH_TIMEOUT_MS = 25 * 60 * 1000;
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
+import { createShortRecord } from '../shortsEngine';
+import { runFullPipeline } from './fullPipelineRecipe';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
@@ -230,6 +232,15 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   // See fullPipelineRecipe.js's identical block for the full reasoning — duplicated rather than
   // shared, same controlled-duplication convention already used between these two files.
   const resumable = targetVideoId ? await loadVideo(targetVideoId) : await findResumableVideo(channelId);
+
+  // A companion Short is a full_pipeline-shaped video (image beats, 9:16) even when its channel is
+  // static_background — this recipe can't produce it. Hand it straight to the full pipeline (which
+  // knows isShort), whether it surfaced via findResumableVideo or an explicit targetVideoId (the
+  // poll / a manual action).
+  if (resumable?.isShort) {
+    return runFullPipeline(channel, { targetVideoId: resumable.id, userId, logStep, onProgress });
+  }
+
   let resumePhase = 'suggestion';
   const wasResumed = !!resumable;
   // See fullPipelineRecipe.js's identical block for the full reasoning. resumedFromNormalBatchWait
@@ -748,6 +759,39 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     }
   }
 
-  const costUsd = await totalCostForVideo(channelId, videoId);
+  // ---- Companion Short ----
+  // See fullPipelineRecipe.js's identical hook. Even for a static_background channel the Short is a
+  // normal 9:16 full_pipeline teaser (it has visuals) — createShortRecord builds the record and
+  // runFullPipeline produces + publishes it. Never blocks/fails the already-published parent, never
+  // counts against the daily quota.
+  let shortCostUsd = 0;
+  if (channel.automation_generate_shorts === true && youtubeVideoId && !project.isShort && !project.shortVideoId) {
+    try {
+      report('short', 'Writing the companion Short…');
+      const shortId = await createShortRecord(
+        {
+          id: videoId,
+          youtubeVideoId,
+          topic: suggestion?.title || plan?.title || project.topic || '',
+          angle: plan?.angle || suggestion?.angle || '',
+          subject: project.subject || null,
+          characterBible: plan?.characterBible || project.characterBible || [],
+          displayTitle: plan?.title || suggestion?.title || project.topic || '',
+        },
+        channel,
+        { userId, logStep }
+      );
+      project = { ...project, shortVideoId: shortId };
+      await persist();
+      report('short', 'Producing the companion Short…');
+      const shortResult = await runFullPipeline(channel, { targetVideoId: shortId, userId, logStep, onProgress });
+      shortCostUsd = Number(shortResult?.costUsd) || 0;
+    } catch (err) {
+      console.error('[staticBackgroundRecipe] companion Short failed', err);
+      await logStep(channelId, videoId, 'short', 'error', `parent published OK — companion Short failed: ${String(err?.message || err)}`);
+    }
+  }
+
+  const costUsd = (await totalCostForVideo(channelId, videoId)) + shortCostUsd;
   return { videoId, youtubeVideoId, costUsd };
 }
