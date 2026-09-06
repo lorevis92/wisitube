@@ -292,11 +292,16 @@ function buildAutomationSettings(channel) {
 // automatic search — an explicit human choosing a specific video from the dashboard doesn't need
 // it) and, since this is a single-video action rather than a whole cycle, is never routed through
 // runManagedCycle/the currently_running lock — the caller invokes this recipe directly.
-// manualPublish: set ONLY by AutomationMirrorStep.jsx's "Publish now" button (Recently completed) —
-// an explicit, per-video click on a fully-produced-but-unpublished video. It forces the YouTube
-// upload: the channel's auto-publish toggle and the anomalous-interruption hold are both bypassed,
-// because the human is asking for exactly this one publish. Never set by any automatic path.
-export async function runFullPipeline(channel, { userId, onProgress, logStep, targetVideoId, manualPublish = false } = {}) {
+// manualPublish: set by AutomationMirrorStep.jsx's "Publish now" button (Recently completed) and by
+// ChannelDashboardStep's "Generate Short → Generate and publish automatically" choice — an explicit,
+// per-video human click. It forces the YouTube upload: the channel's auto-publish toggle and the
+// anomalous-interruption hold are both bypassed, because the human is asking for exactly this one
+// publish. Never set by any automatic path.
+// skipPublish: the mirror image — set ONLY by ChannelDashboardStep's "Generate Short → Generate
+// only, I'll publish it manually" choice. The video is produced in full (render + thumbnail
+// persisted) but never goes near YouTube or a local-folder export; it sits fully produced for the
+// owner to review and publish by hand from Export. manualPublish and skipPublish are never both set.
+export async function runFullPipeline(channel, { userId, onProgress, logStep, targetVideoId, manualPublish = false, skipPublish = false } = {}) {
   const channelId = channel.id;
   const settings = buildAutomationSettings(channel);
   // Declared here (rather than at their original spot further down) so report()/persist() can
@@ -982,7 +987,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // Automation settings, and the video is left WITHOUT youtubeVideoId — it stays "Finished — not
   // published" in the dashboard, where the owner uses "Mark as published" after uploading by hand.
   // A manual "Publish now" click asks specifically for a YouTube upload, so it skips this.
-  if (!manualPublish && channel.automation_export_mode === 'local_folder') {
+  if (!manualPublish && !skipPublish && channel.automation_export_mode === 'local_folder') {
     try {
       const srt = buildSrtFromScenes(project.scenes, !!project.staticBackground);
       const folder = await runLocalExport({
@@ -1046,7 +1051,13 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // just needs finishing and publishing like a normal batch-wait resume.
   const anomalousInterruption =
     !project?.isShort && wasResumed && !resumedFromNormalBatchWait && !resumedReadyToPublish;
-  if (!manualPublish && channel.automation_auto_publish === false) {
+  if (skipPublish) {
+    // The human explicitly chose "generate only, publish manually" in the Generate-Short popup.
+    // Fully produced (render + thumbnail persisted above); left exactly where auto-publish-off
+    // leaves a video — reviewable and independently publishable by hand from Export.
+    await logStep(channelId, videoId, 'youtube', 'success', 'video produced — owner chose to publish manually later');
+    report('youtube', 'Produced — ready for manual publish in Export');
+  } else if (!manualPublish && channel.automation_auto_publish === false) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
     // exactly where a manually-created video would sit: reviewable and independently publishable

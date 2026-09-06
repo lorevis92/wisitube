@@ -115,6 +115,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   // Parent video id whose companion Short is being generated right now via the manual "Generate
   // Short" button (bridges the moment between click and the first refetch that shows the new record).
   const [generatingShortFor, setGeneratingShortFor] = useState(null);
+  const [shortPublishChoiceFor, setShortPublishChoiceFor] = useState(null); // parent videoId showing the publish-mode picker
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState('');
   const [refiningIndex, setRefiningIndex] = useState(null);
@@ -605,12 +606,20 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
   // Manual "Generate Short" on a published video's card — runs the exact same path the automatic
   // companion-Short hook does (createShortRecord builds the record, then runFullPipeline produces
-  // and publishes it), on THIS parent, regardless of channel.automation_generate_shorts. The final
-  // publish still respects channel.automation_auto_publish (not bypassed — the user only asked for
-  // the generation to be forced). runManagedResume takes the same scheduler lock a cycle uses.
-  async function handleGenerateShort(v) {
+  // it), on THIS parent, regardless of channel.automation_generate_shorts. runManagedResume takes
+  // the same scheduler lock a cycle uses.
+  //
+  // autoPublish is the user's explicit choice in the popup that precedes this call:
+  //   true  → once the thumbnail is done the Short goes straight to YouTube, bypassing the channel's
+  //           automation_auto_publish toggle (manualPublish:true) — the human asked for exactly this
+  //           publish, right now.
+  //   false → the Short stops fully produced ("◻ produced, not on YouTube yet") for manual review
+  //           and publishing from Export (skipPublish:true).
+  async function handleGenerateShort(v, { autoPublish } = {}) {
     if (generatingShortFor) return;
     if (!v.youtubeVideoId) return;
+    if (typeof autoPublish !== 'boolean') return; // must come from the popup choice
+    setShortPublishChoiceFor(null);
     setGeneratingShortFor(v.id);
     let started = false;
     try {
@@ -645,6 +654,8 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           userId,
           logStep,
           onProgress: (evt) => onRunProgress?.({ channelId: channel.id, channelName: channel.name, ...evt }),
+          // The popup choice: force the YouTube publish, or stop fully produced for manual review.
+          ...(autoPublish ? { manualPublish: true } : { skipPublish: true }),
         })
       );
       started = !!(result && result.started);
@@ -1599,9 +1610,35 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                               <span style={{ fontSize: 10, fontFamily: FONT.ui, color: T.textMuted }}>◻ produced, not on YouTube yet</span>
                             )}
                           </div>
+                        ) : shortPublishChoiceFor === v.id ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+                            <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>
+                              How should this Short be published?
+                            </span>
+                            <button
+                              onClick={() => handleGenerateShort(v, { autoPublish: true })}
+                              disabled={!!generatingShortFor}
+                              style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, alignSelf: 'stretch' }}
+                            >
+                              Generate and publish automatically
+                            </button>
+                            <button
+                              onClick={() => handleGenerateShort(v, { autoPublish: false })}
+                              disabled={!!generatingShortFor}
+                              style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, alignSelf: 'stretch' }}
+                            >
+                              Generate only, I'll publish it manually
+                            </button>
+                            <button
+                              onClick={() => setShortPublishChoiceFor(null)}
+                              style={{ ...btnGhost, padding: '4px 8px', fontSize: 10, border: 'none', color: T.textMuted }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         ) : (
                           <button
-                            onClick={() => handleGenerateShort(v)}
+                            onClick={() => setShortPublishChoiceFor(v.id)}
                             disabled={!!generatingShortFor}
                             style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, alignSelf: 'flex-start', opacity: generatingShortFor ? 0.6 : 1 }}
                           >
