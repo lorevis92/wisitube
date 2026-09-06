@@ -112,9 +112,21 @@ export async function createShortRecord(parent, channel, { logStep } = {}) {
     createdAt,
     topic: parent.topic || parent.displayTitle || '',
     displayTitle: shortTitle,
-    // The recipe forces settings.format = '9:16' for any isShort video regardless of this — kept
-    // here so a manual "open in Storyboard/Export" of the Short also sees the right aspect ratio.
-    settings: { format: '9:16', imageProvider: channel.automation_image_provider || 'pollinations' },
+    // The recipe ignores this and rebuilds settings from the channel (buildAutomationSettings), but
+    // it's what App.jsx loads into `settings` state when the Short is opened manually in
+    // Storyboard/Export — so it must be COMPLETE, not just format/provider, or downstream code that
+    // reads settings.style / settings.voice / settings.language (e.g. thumbnailEngine's
+    // STYLES[settings.style]) dereferences undefined. Mirrors the channel's automation defaults.
+    settings: {
+      format: '9:16',
+      imageProvider: channel.automation_image_provider || 'pollinations',
+      style: channel.automation_style || 'facestick',
+      language: channel.automation_language || 'English',
+      voiceEngine: channel.automation_voice_engine || 'kokoro',
+      voice: channel.automation_voice || 'af_heart',
+      speechSpeed: Number(channel.automation_speech_speed) || 1.0,
+      contentType: 'full_pipeline',
+    },
     titles: [shortTitle],
     selectedTitle: 0,
     description,

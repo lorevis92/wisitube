@@ -91,7 +91,11 @@ function resolveThumbnailFormat({ format, project, settings }) {
 function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt) {
   const orientation = fmt === '9:16' ? ' vertical 9:16 portrait composition,' : '';
   const flavoredPrompt = `${concept.image_prompt},${orientation} YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
-  const style = STYLES[settings.style];
+  // settings.style can be missing entirely — e.g. an auto-generated Short's settings blob only
+  // carries format/imageProvider (see shortsEngine.js), and App.jsx replaces the whole settings
+  // object with the video record's blob on open. Fall back to the same default the recipes use
+  // (DEFAULT_STYLE = 'facestick') rather than dereferencing STYLES[undefined].
+  const style = STYLES[settings?.style] || STYLES.facestick;
   if (effectiveProvider === 'pollinations') {
     return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
   }

@@ -115,7 +115,11 @@ export function buildImagePrompt(beat, { project, settings }) {
     traits = [character?.baseDescription, variant?.description].filter(Boolean).join(', ');
   }
 
-  const style = STYLES[settings.style];
+  // settings.style can be absent — an auto-generated Short opened manually in Storyboard carries a
+  // settings blob that older Shorts built without every field (see shortsEngine.js), and App.jsx
+  // swaps the whole settings object for the record's blob on open. Same 'facestick' default the
+  // recipes use, rather than dereferencing STYLES[undefined].
+  const style = STYLES[settings?.style] || STYLES.facestick;
   const provider = settings.imageProvider || 'pollinations';
 
   if (provider === 'pollinations') {
