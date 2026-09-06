@@ -673,6 +673,16 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     return <div style={{ ...card, textAlign: 'center', color: T.textSecondary, fontFamily: FONT.ui, fontSize: 13 }}>Loading your videos…</div>;
   }
 
+  // Companion Shorts (isShort) are never their own grid card — they're surfaced inside their parent
+  // video's card via parentVideoId ↔ the parent's shortVideoId. shortsById lets a parent card read
+  // its Short's state without another query.
+  const shortsById = new Map();
+  const gridVideos = [];
+  for (const v of videos) {
+    if (v.isShort === true) shortsById.set(v.id, v);
+    else gridVideos.push(v);
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div style={card}>
@@ -1317,7 +1327,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
             cursor: 'pointer',
           }}
         >
-          <span style={label}>Videos ({videos.length})</span>
+          <span style={label}>Videos ({gridVideos.length})</span>
           <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
             {videoGridOpen ? 'CLOSE ▲' : 'SHOW ▼'}
           </span>
@@ -1327,7 +1337,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
         </button>
       </div>
 
-      {videoGridOpen && (videos.length === 0 ? (
+      {videoGridOpen && (gridVideos.length === 0 ? (
         <div style={{ ...card, textAlign: 'center', padding: 40 }}>
           <div style={{ fontFamily: FONT.ui, fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 8 }}>No videos yet</div>
           <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginBottom: 20 }}>
@@ -1339,7 +1349,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
-          {videos.map((v) => {
+          {gridVideos.map((v) => {
             const isArchived = !!v.mediaArchived;
             const sceneCount = isArchived ? v.archivedSceneCount || 0 : v.scenes?.length || 0;
             const readyCount = isArchived
@@ -1434,6 +1444,62 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                     Delete
                   </button>
                 </div>
+
+                {/* Companion Short — only when this video spawned one (automation_generate_shorts). */}
+                {v.shortVideoId &&
+                  (() => {
+                    const short = shortsById.get(v.shortVideoId);
+                    const shortPublished = !!short?.youtubeVideoId;
+                    const shortProduced = !shortPublished && !!short?.thumbnailStoragePath;
+                    return (
+                      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            fontFamily: FONT.ui,
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.04em',
+                            color: T.textMuted,
+                          }}
+                        >
+                          Companion Short
+                        </span>
+                        {short && (shortPublished || shortProduced) ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                            <button
+                              onClick={() => onResume(short)}
+                              style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}
+                            >
+                              🎬 View Short
+                            </button>
+                            {shortPublished ? (
+                              <a
+                                href={`https://youtube.com/watch?v=${short.youtubeVideoId}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  fontFamily: FONT.ui,
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.04em',
+                                  color: T.green,
+                                  textDecoration: 'none',
+                                }}
+                              >
+                                ▶ Short on YouTube
+                              </a>
+                            ) : (
+                              <span style={{ fontSize: 10, fontFamily: FONT.ui, color: T.textMuted }}>◻ produced, not on YouTube yet</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>⏳ Short generating…</span>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                 {ytEditOpenForId === v.id && (
                   <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
