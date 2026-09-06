@@ -4,6 +4,7 @@ import {
   listVideosByChannel,
   saveVideo,
   loadVideo,
+  updateVideoFields,
   loadChannel,
   listChannels,
   updateChannelFields,
@@ -160,6 +161,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [selectedMoveChannelId, setSelectedMoveChannelId] = useState('');
   const [movingId, setMovingId] = useState(null);
   const [moveError, setMoveError] = useState('');
+  // "Link as Short" — id of the parent video card whose picker is open (null = none). Lets an
+  // existing video on this channel be attached as this parent's companion Short (fix a wrong
+  // association, or link a hand-made Short). Same inline-picker pattern as "move".
+  const [linkShortForId, setLinkShortForId] = useState(null);
+  const [selectedLinkShortId, setSelectedLinkShortId] = useState('');
+  const [linkingShortId, setLinkingShortId] = useState(null);
+  const [linkShortError, setLinkShortError] = useState('');
   // "Edit YouTube status" — id of the video card whose popover is open (null = none), mutually
   // exclusive with the "move" popover above (opening one closes the other, see openYtEdit/
   // openMoveFor) so a single card never shows two overlapping inline panels at once.
@@ -739,6 +747,84 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       setMoveError('Move failed: ' + String(err.message || err));
     } finally {
       setMovingId(null);
+    }
+  }
+
+  function openLinkShortFor(v) {
+    setMoveOpenForId(null);
+    setYtEditOpenForId(null);
+    setLinkShortError('');
+    setLinkShortForId(v.id);
+    const candidates = (videos || []).filter((x) => x.id !== v.id);
+    setSelectedLinkShortId(candidates[0]?.id || '');
+  }
+
+  function closeLinkShort() {
+    setLinkShortForId(null);
+    setLinkShortError('');
+  }
+
+  const titleOf = (id) => (videos || []).find((x) => x.id === id)?.displayTitle || 'another video';
+
+  // Attach an EXISTING video on this channel as `parent`'s companion Short. Only the three link
+  // fields are touched, each via updateVideoFields (targeted, read-fresh-merge-write — never a full
+  // re-save of a stale copy): isShort/parentVideoId on the chosen video, shortVideoId on the parent,
+  // plus unlinking whatever was linked before on either side so nothing ends up double-linked or
+  // orphaned-but-hidden.
+  async function confirmLinkShort(parent) {
+    const chosen = (videos || []).find((x) => x.id === selectedLinkShortId);
+    if (!chosen || chosen.id === parent.id) return;
+
+    const alreadyShortElsewhere = chosen.parentVideoId && chosen.parentVideoId !== parent.id;
+    const parentHasDifferentShort = parent.shortVideoId && parent.shortVideoId !== chosen.id;
+
+    if (alreadyShortElsewhere) {
+      if (
+        !window.confirm(
+          `"${chosen.displayTitle || 'This video'}" is already linked as a Short of "${titleOf(chosen.parentVideoId)}" — relink it to "${parent.displayTitle || 'this video'}" instead?\n\n"${titleOf(chosen.parentVideoId)}" will no longer show a companion Short.`
+        )
+      ) {
+        return;
+      }
+    }
+    if (parentHasDifferentShort) {
+      if (
+        !window.confirm(
+          `"${parent.displayTitle || 'This video'}" already has a companion Short ("${titleOf(parent.shortVideoId)}").\n\nLinking this one will unlink the previous Short — it becomes a normal video again and reappears in the grid.`
+        )
+      ) {
+        return;
+      }
+    }
+
+    setLinkingShortId(parent.id);
+    setLinkShortError('');
+    try {
+      // Unlink the old associations first — best-effort, so a dangling id (a since-deleted video)
+      // on either side can't block the relink itself.
+      if (parentHasDifferentShort) {
+        try {
+          await updateVideoFields(parent.shortVideoId, { isShort: false, parentVideoId: null });
+        } catch (err) {
+          console.error('[ChannelDashboardStep] could not unlink previous Short', parent.shortVideoId, err);
+        }
+      }
+      if (alreadyShortElsewhere) {
+        try {
+          await updateVideoFields(chosen.parentVideoId, { shortVideoId: null });
+        } catch (err) {
+          console.error('[ChannelDashboardStep] could not clear old parent link', chosen.parentVideoId, err);
+        }
+      }
+      // Link the new one — these two must succeed.
+      await updateVideoFields(chosen.id, { isShort: true, parentVideoId: parent.id });
+      await updateVideoFields(parent.id, { shortVideoId: chosen.id });
+      await refreshVideos();
+      setLinkShortForId(null);
+    } catch (err) {
+      setLinkShortError('Link failed: ' + String(err.message || err));
+    } finally {
+      setLinkingShortId(null);
     }
   }
 
@@ -1597,9 +1683,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                         {busy || (short && !shortPublished && !shortProduced) ? (
                           <span style={{ fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}>⏳ Short generating…</span>
                         ) : short ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                             {/* The Short's OWN thumbnail (vertical 9:16 — see thumbnailEngine.js), keyed by
-                                the Short's id in thumbUrls, never the parent's. */}
+                                the Short's id in thumbUrls, never the parent's. Stays on the left; the
+                                button + its YouTube link are grouped in the column beside it. */}
                             {thumbUrls[short.id] && (
                               <img
                                 src={thumbUrls[short.id]}
@@ -1614,29 +1701,31 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                                 }}
                               />
                             )}
-                            <button onClick={() => onResume(short)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
-                              🎬 View Short
-                            </button>
-                            {shortPublished ? (
-                              <a
-                                href={`https://youtube.com/watch?v=${short.youtubeVideoId}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{
-                                  fontSize: 10,
-                                  fontWeight: 700,
-                                  fontFamily: FONT.ui,
-                                  textTransform: 'uppercase',
-                                  letterSpacing: '0.04em',
-                                  color: T.green,
-                                  textDecoration: 'none',
-                                }}
-                              >
-                                ▶ Short on YouTube
-                              </a>
-                            ) : (
-                              <span style={{ fontSize: 10, fontFamily: FONT.ui, color: T.textMuted }}>◻ produced, not on YouTube yet</span>
-                            )}
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                              <button onClick={() => onResume(short)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                                🎬 View Short
+                              </button>
+                              {shortPublished ? (
+                                <a
+                                  href={`https://youtube.com/watch?v=${short.youtubeVideoId}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    fontFamily: FONT.ui,
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.04em',
+                                    color: T.green,
+                                    textDecoration: 'none',
+                                  }}
+                                >
+                                  ▶ Short on YouTube
+                                </a>
+                              ) : (
+                                <span style={{ fontSize: 10, fontFamily: FONT.ui, color: T.textMuted }}>◻ produced, not on YouTube yet</span>
+                              )}
+                            </div>
                           </div>
                         ) : (
                           <button
@@ -1647,6 +1736,66 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                             🎬 Generate Short
                           </button>
                         )}
+
+                        {!busy && (
+                          <button
+                            onClick={() => (linkShortForId === v.id ? closeLinkShort() : openLinkShortFor(v))}
+                            disabled={!!linkingShortId}
+                            style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, alignSelf: 'flex-start', opacity: linkingShortId ? 0.6 : 1 }}
+                          >
+                            🔗 Link as Short
+                          </button>
+                        )}
+
+                        {linkShortForId === v.id &&
+                          (() => {
+                            const candidates = (videos || []).filter((x) => x.id !== v.id);
+                            return (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
+                                {candidates.length === 0 ? (
+                                  <div style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui }}>
+                                    No other video on this channel to link.
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div style={{ fontSize: 10, color: T.textMuted, fontFamily: FONT.ui, lineHeight: 1.5 }}>
+                                      Pick an existing video to attach as this video&apos;s companion Short.
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                      <select
+                                        value={selectedLinkShortId}
+                                        onChange={(e) => setSelectedLinkShortId(e.target.value)}
+                                        style={{ ...inputStyle, flex: 1, minWidth: 130, fontSize: 11, padding: '6px 8px' }}
+                                      >
+                                        {candidates.map((c) => (
+                                          <option key={c.id} value={c.id}>
+                                            {(c.displayTitle || c.topic || 'Untitled video') + (c.isShort ? ' — currently a Short' : '')}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <button
+                                        onClick={() => confirmLinkShort(v)}
+                                        disabled={linkingShortId === v.id || !selectedLinkShortId}
+                                        style={{ ...btnPrimary, padding: '6px 10px', fontSize: 10, opacity: linkingShortId === v.id ? 0.6 : 1 }}
+                                      >
+                                        {linkingShortId === v.id ? '…' : 'Link'}
+                                      </button>
+                                      <button
+                                        onClick={closeLinkShort}
+                                        disabled={linkingShortId === v.id}
+                                        style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
+                                {linkShortError && (
+                                  <div style={{ fontSize: 10, color: T.primary, fontFamily: FONT.ui }}>{linkShortError}</div>
+                                )}
+                              </div>
+                            );
+                          })()}
                       </div>
                     );
                   })()}

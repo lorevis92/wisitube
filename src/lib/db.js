@@ -131,6 +131,24 @@ export async function saveVideo(video) {
   return chainVideoWrite(video.id, () => upsertVideoRow(video));
 }
 
+/**
+ * Targeted update of a few fields on a video — the video-side equivalent of updateChannelFields.
+ * The whole project still lives in one jsonb column so this can't do a real per-column UPDATE, but
+ * it re-reads the FRESHEST row first (never a stale in-memory snapshot the caller is holding) and
+ * only overlays `patch`'s keys onto it, so a concurrent writer's other changes to the same row
+ * survive. Serialized through the same per-video write chain as every other write. Use this — not
+ * saveVideo({ ...someOldCopy, field }) — whenever you only mean to change a named field or two.
+ * Returns the merged, persisted record.
+ */
+export async function updateVideoFields(videoId, patch) {
+  if (!videoId) throw new Error('updateVideoFields: no videoId');
+  return chainVideoWrite(videoId, async () => {
+    const fresh = await loadVideo(videoId);
+    if (!fresh) throw new Error(`updateVideoFields: video ${videoId} not found`);
+    return upsertVideoRow({ ...fresh, ...patch });
+  });
+}
+
 // ---- media-progress merge (see videoWriteChains comment) ----
 const MEDIA_RANK = { ready: 3, error: 2, loading: 1, idle: 0 };
 const rank = (s) => MEDIA_RANK[s] ?? 0;
