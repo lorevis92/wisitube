@@ -25,17 +25,18 @@
 //     look orphaned) — override with --force only if the project genuinely has no videos.
 //   - The DB reads are paginated; the printed video/channel counts should match your dashboard.
 //
-// AUTH — set env vars, either:
-//   SUPABASE_URL + SUPABASE_SERVICE_KEY
+// AUTH — provide, via env vars OR --env-file=<path> (a dotenv file, e.g. from `vercel env pull`):
+//   (VITE_)SUPABASE_URL + SUPABASE_SERVICE_KEY / SUPABASE_SERVICE_ROLE_KEY
 //       (service-role key from Supabase project settings → API. Bypasses RLS, sees every user.)
-//   SUPABASE_URL + SUPABASE_ANON_KEY + SUPABASE_EMAIL + SUPABASE_PASSWORD
+//   (VITE_)SUPABASE_URL + (VITE_)SUPABASE_ANON_KEY + SUPABASE_EMAIL + SUPABASE_PASSWORD
 //       (signs in as that user; everything is then RLS-scoped to that one user — fine for a
 //        single-user project.)
+//   VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are accepted so a raw `vercel env pull` file works.
 //
 // RUN:
-//   node scripts/cleanup-orphan-storage.mjs            # dry run — prints orphans + total size
-//   node scripts/cleanup-orphan-storage.mjs --delete   # actually delete the orphan files
-//   node scripts/cleanup-orphan-storage.mjs --delete --force   # ... even if the DB shows 0 videos
+//   node scripts/cleanup-orphan-storage.mjs --env-file=.env.local            # dry run
+//   node scripts/cleanup-orphan-storage.mjs --env-file=.env.local --delete   # actually delete
+//   node scripts/cleanup-orphan-storage.mjs --delete --force                 # even if DB shows 0 videos
 
 import { createClient } from '@supabase/supabase-js';
 
@@ -48,9 +49,20 @@ const args = new Set(process.argv.slice(2));
 const DO_DELETE = args.has('--delete');
 const FORCE = args.has('--force');
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-const ANON_KEY = process.env.SUPABASE_ANON_KEY;
+// Also accept the VITE_-prefixed names, so a plain `vercel env pull` file (or the app's own .env)
+// works with no renaming. An --env-file=<path> arg loads a dotenv file first.
+const envFileArg = process.argv.find((a) => a.startsWith('--env-file='));
+if (envFileArg) {
+  const fs = await import('node:fs');
+  for (const line of fs.readFileSync(envFileArg.slice('--env-file='.length), 'utf8').split('\n')) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  }
+}
+
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
 const EMAIL = process.env.SUPABASE_EMAIL;
 const PASSWORD = process.env.SUPABASE_PASSWORD;
 
