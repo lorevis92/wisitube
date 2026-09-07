@@ -266,7 +266,7 @@ ${characterBible
   "title": "punchy Short title, max 90 chars, curiosity-driven",
   "description": "2-3 sentence YouTube description written to tease the full video (the app appends the full-video link and #Shorts itself — do NOT add them)",
   "tags": [8-12 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete vertical visual description in English, one strong focal subject, exaggerated emotion, no text in image — name the real central person/character explicitly if the video has one" }],
+  "thumbnail_concepts": [EXACTLY 3 objects, never fewer: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator, framed as a vertical 9:16 portrait: one strong focal subject filling the frame, exaggerated emotion, high contrast, no text in the image. If a real, identifiable person or a well-known named character is central to this Short, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
   "character_bible": [the SAME array you were given above, unchanged, or [] if none was given],
   "scenes": [between 6 and 10 objects: {
     "narration": "what the voiceover says for this scene — 1-2 very short sentences, max 150 characters, written in ${language}, no dashes as punctuation",
@@ -283,7 +283,8 @@ ${characterBible
 Rules:
 - Between 6 and 10 scenes, no more, no less.
 - image_prompt is always in English regardless of narration language, and must render well as a vertical 9:16 frame.
-- reference_id is always null.`;
+- reference_id is always null.
+- thumbnail_concepts is REQUIRED and MUST contain exactly 3 objects — never omit it, never leave it empty. When this Short centers on a real, identifiable person or a well-known named character (the same figures in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — the same principle as the title naming its real subject, not a generic lookalike. Only fall back to a generic figure when the Short genuinely has no single identifiable person or character at its center. No text in the image itself (the app renders the overlay_text separately).`;
 
     const context = `Full video this Short teases: "${parentTitle || topic}"
 Topic: "${topic}"
@@ -299,7 +300,10 @@ Visual style: ${style}${characterContext}`;
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
-          max_tokens: 5000,
+          // 6000 (was 5000): now that 3 full thumbnail_concepts are mandatory on top of up to 10
+          // scenes + character_bible, 5000 could truncate `scenes` (the last field) → the whole JSON
+          // fails to parse → no Short at all. A little more headroom for the same content.
+          max_tokens: 6000,
           system: systemPrompt,
           messages: [{ role: 'user', content: 'Write the complete Short script now. Respond with JSON only.' }],
         }),

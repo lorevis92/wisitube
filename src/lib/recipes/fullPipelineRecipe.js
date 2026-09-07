@@ -32,7 +32,7 @@ import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { withTimeout } from '../asyncTimeout';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
-import { createShortRecord } from '../shortsEngine';
+import { createShortRecord, synthesizeShortThumbnailConcept } from '../shortsEngine';
 import { auditScriptRepetition, describeAudit } from '../repetitionAudit';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
@@ -955,7 +955,18 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   if (shouldRunPhase(resumePhase, 'thumbnail')) {
   try {
     await withPhaseNetworkResilience('thumbnail', channelId, videoId, logStep, async () => {
-      const concept = plan.thumbnails[0];
+      let concept = plan.thumbnails[0];
+      // A Short saved with an empty `thumbnails` (script generation returned no thumbnail_concepts,
+      // before that path was hardened) would otherwise hard-throw here forever. Backfill a synthetic
+      // concept onto the record so THIS run — and any later manual open in Export — has a real one,
+      // and the Short recovers automatically instead of getting stuck in the thumbnail phase.
+      if (!concept && project.isShort) {
+        concept = synthesizeShortThumbnailConcept({ title: plan.title, topic: project.topic || suggestion?.title });
+        plan = { ...plan, thumbnails: [concept] };
+        project = { ...project, thumbnails: [concept] };
+        await persist();
+        await logStep(channelId, videoId, 'thumbnail', 'recovered', 'Short had no thumbnail concept — backfilled a synthetic one so the thumbnail could be generated');
+      }
       if (!concept) throw new Error('No thumbnail concept available from the outline');
       thumbnailBlob = await generateThumbnail(project, {
         settings,

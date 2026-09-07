@@ -122,7 +122,14 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt)
  * why the Storage backup they'd be used for stays in ExportStep.jsx.
  */
 export async function generateThumbnail(project, { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed, format } = {}) {
-  const concept = project.thumbnails[thumbIdx];
+  // Every caller is SUPPOSED to hand us a real concept (the recipe checks plan.thumbnails[0], the
+  // recipe's Short path backfills a synthetic one, ExportStep reads project.thumbnails). This is a
+  // last-ditch guard so a record that still somehow has no concept produces a plain thumbnail
+  // instead of a "Cannot read properties of undefined (reading 'image_prompt')" crash.
+  const concept = (project.thumbnails || [])[thumbIdx] || {
+    overlay_text: overlayText || '',
+    image_prompt: `${project.titles?.[project.selectedTitle] || project.topic || 'the subject'}, one strong focal subject filling the frame, exaggerated emotion, high contrast, dramatic, no text in the image`,
+  };
   const fmt = resolveThumbnailFormat({ format, project, settings });
   const spec = FORMAT_SPEC[fmt];
   const { canvasW: W, canvasH: H } = spec;

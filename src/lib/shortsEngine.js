@@ -14,6 +14,36 @@
 import { createId, saveVideo } from './db';
 import { STYLES } from './pollinations';
 
+// Last-resort thumbnail concept for a Short whose script generation returned none (Claude
+// occasionally omits thumbnail_concepts from the short-script JSON despite the schema — now an
+// emphatic rule in api/generate-outline.js, but no prompt is 100%). Not as good as a model-authored
+// concept, but it always lets the recipe's thumbnail phase RUN instead of hard-throwing
+// "No thumbnail concept available from the outline". Used both at Short-creation time (below) and,
+// for Shorts already saved with an empty `thumbnails`, on the fly in the recipe's thumbnail phase.
+export function synthesizeShortThumbnailConcept({ title = '', topic = '' } = {}) {
+  const cleaned = String(title || topic || '')
+    .replace(/#\w+/g, '') // #Shorts
+    .replace(/\b(in \d+\s*seconds?|the (full )?story|explained|part \d+)\b/gi, '')
+    .replace(/\s[—–|:-]\s.*$/, '') // drop a trailing "— subtitle" / ": subtitle"
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .trim();
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  const overlayText = (words.slice(0, 4).join(' ') || 'WATCH THIS').toUpperCase();
+  const subject = String(topic || title || 'the subject').trim();
+  return {
+    overlay_text: overlayText,
+    image_prompt: `${subject}, vertical 9:16 portrait composition, one strong focal subject filling the frame, exaggerated emotion, high contrast, dramatic lighting, eye-catching, no text in the image`,
+  };
+}
+
+// Keeps only well-formed concepts ({ overlay_text | image_prompt } present) — a model that returns
+// [{}] or [null] is treated the same as returning nothing.
+function usableThumbnailConcepts(raw) {
+  return (Array.isArray(raw) ? raw : []).filter(
+    (c) => c && typeof c === 'object' && ((typeof c.overlay_text === 'string' && c.overlay_text.trim()) || (typeof c.image_prompt === 'string' && c.image_prompt.trim()))
+  );
+}
+
 // Same transform api/generate-scenes.js's raw output gets everywhere else in this codebase
 // (fullPipelineRecipe.js / staticBackgroundRecipe.js / App.jsx each keep their own copy — a pure,
 // framework-free data transform, deliberately duplicated rather than shared). A Short is always a
@@ -104,6 +134,16 @@ export async function createShortRecord(parent, channel, { logStep } = {}) {
     (typeof data.title === 'string' && data.title.trim()) ||
     `${parent.displayTitle || parent.topic || 'The story'} — in 30 seconds #Shorts`.slice(0, 100);
 
+  // The recipe's thumbnail phase hard-throws on an empty `thumbnails`; never let a Short be created
+  // in that state. If the model gave us usable concepts, use them; otherwise a single synthetic one.
+  const modelConcepts = usableThumbnailConcepts(data.thumbnail_concepts);
+  const thumbnails = modelConcepts.length
+    ? modelConcepts
+    : [synthesizeShortThumbnailConcept({ title: shortTitle, topic: parent.topic || parent.displayTitle })];
+  if (!modelConcepts.length) {
+    console.warn('[shortsEngine] short-script returned no usable thumbnail_concepts — using a synthetic fallback for', shortTitle);
+  }
+
   const shortId = createId();
   const createdAt = Date.now();
   await saveVideo({
@@ -131,7 +171,7 @@ export async function createShortRecord(parent, channel, { logStep } = {}) {
     selectedTitle: 0,
     description,
     tags,
-    thumbnails: Array.isArray(data.thumbnail_concepts) ? data.thumbnail_concepts : [],
+    thumbnails,
     subtitles: true,
     references: [],
     characterBible,
