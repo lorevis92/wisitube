@@ -8,6 +8,7 @@ import { generateAudio, generateImage } from '../lib/sceneOrchestrator';
 import { recordCost } from '../lib/db';
 import { getMediaUrl } from '../lib/mediaStorage';
 import { TITLES_PHASE_S } from '../lib/estimator';
+import { useConfirm } from '../components/useConfirm';
 import FullScreenLoader from '../components/FullScreenLoader';
 import ExpandableTextarea from '../components/ExpandableTextarea';
 
@@ -22,6 +23,7 @@ const CONTENT_TYPES = [
 ];
 
 export default function CreateStep({ settings, setSettings, onTitles, channel, isMobile }) {
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [voiceTest, setVoiceTest] = useState('');
@@ -124,7 +126,11 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     const provider = settings.imageProvider === 'nanobanana-batch' ? 'nanobanana' : settings.imageProvider || 'pollinations';
     const dims = settings.format === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
     const cost = priceForImage(provider, { ...dims, quality: 'medium', hasReference: false });
-    if (cost > 0 && !window.confirm(`Generate this background image using ${provider} (~$${cost.toFixed(2)})?`)) return;
+    if (
+      cost > 0 &&
+      !(await confirm({ title: 'Generate background image?', body: `This uses ${provider} and costs about $${cost.toFixed(2)}.`, confirmLabel: 'Generate' }))
+    )
+      return;
     setBgBusy(true);
     setBgError('');
     try {
@@ -751,6 +757,7 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
           estimatedSeconds={TITLES_PHASE_S}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }

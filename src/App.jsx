@@ -18,6 +18,7 @@ import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/au
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
 import { auditScriptRepetition, describeAudit } from './lib/repetitionAudit';
+import { useConfirm } from './components/useConfirm';
 import { supabase } from './lib/supabase';
 import { resumePendingBatches } from './lib/batchResumption';
 import { rehydrateProjectMedia } from './lib/mediaRehydration';
@@ -83,6 +84,7 @@ export default function App() {
   // undefined = getSession() hasn't resolved yet, null = resolved and no session, object = signed
   // in. The distinct "still checking" state stops a signed-in user from flashing AuthScreen while
   // Supabase reads the session out of local storage.
+  const { notify, dialog: confirmDialog } = useConfirm();
   const [session, setSession] = useState(undefined);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
   const [tab, setTab] = useState('channels');
@@ -285,14 +287,15 @@ export default function App() {
         refreshToken: ytRefresh,
       })
         .then(() => {
-          window.alert(`Connected to YouTube channel "${ytName}".`);
+          notify({ title: 'YouTube connected', body: `Connected to YouTube channel "${ytName}".` });
         })
-        .catch((err) => window.alert(`Could not save the YouTube connection: ${String(err.message || err)}`));
+        .catch((err) => notify({ title: 'Connection not saved', body: `Could not save the YouTube connection: ${String(err.message || err)}` }));
       window.history.replaceState({}, '', window.location.pathname);
     } else if (ytError) {
-      window.alert(`YouTube connection failed: ${ytError}`);
+      notify({ title: 'YouTube connection failed', body: String(ytError) });
       window.history.replaceState({}, '', window.location.pathname);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Autosave the open video to Supabase, debounced so fast edits don't hammer the table.
@@ -1067,6 +1070,7 @@ export default function App() {
       </main>
 
       <Footer isMobile={isMobile} />
+      {confirmDialog}
     </div>
   );
 }

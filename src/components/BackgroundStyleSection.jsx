@@ -1,5 +1,6 @@
 import React, { forwardRef, useImperativeHandle, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
+import { useConfirm } from './useConfirm';
 import { generateImage } from '../lib/sceneOrchestrator';
 import { uploadMedia } from '../lib/mediaStorage';
 import { recordCost } from '../lib/db';
@@ -22,6 +23,7 @@ const BackgroundStyleSection = forwardRef(function BackgroundStyleSection(
   { project, setProject, settings, channelId, videoId, userId },
   ref
 ) {
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [bgPrompt, setBgPrompt] = useState('');
   const [bgBusy, setBgBusy] = useState(false);
   const [bgError, setBgError] = useState('');
@@ -91,14 +93,18 @@ const BackgroundStyleSection = forwardRef(function BackgroundStyleSection(
   // channel/video deletions) rather than a shared cost-confirm dialog, since a caller's own bulk
   // "Confirm & generate" flow (if it has one — see the imperative handle above) only picks up an
   // already-pending background rather than triggering a fresh one from whatever prompt is typed here.
-  function requestGenerateBackgroundImage() {
+  async function requestGenerateBackgroundImage() {
     const trimmed = bgPrompt.trim();
     if (!trimmed) {
       setBgError('Enter a description for the background image.');
       return;
     }
     const cost = priceForImage(effectiveBgProvider, { width: dims.width, height: dims.height, quality: 'medium', hasReference: false });
-    if (cost > 0 && !window.confirm(`Generate this background image using ${effectiveBgProvider} (~$${cost.toFixed(2)})?`)) return;
+    if (
+      cost > 0 &&
+      !(await confirm({ title: 'Generate background image?', body: `This uses ${effectiveBgProvider} and costs about $${cost.toFixed(2)}.`, confirmLabel: 'Generate' }))
+    )
+      return;
     generateBackgroundImage(bgPrompt);
   }
 
@@ -214,6 +220,7 @@ const BackgroundStyleSection = forwardRef(function BackgroundStyleSection(
           )}
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 });

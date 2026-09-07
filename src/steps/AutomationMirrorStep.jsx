@@ -10,6 +10,7 @@ import {
 } from '../lib/db';
 import { getRecipeForContentType, logStep } from '../lib/automationEngine';
 import { runManagedResume } from '../lib/automationScheduler';
+import { useConfirm } from '../components/useConfirm';
 import { planMediaCleanup, runMediaCleanup, deleteVideoAndMedia, ARCHIVE_AFTER_DAYS } from '../lib/mediaArchival';
 
 // Permanent status dashboard for automation — no longer just a temporary mirror that appears while
@@ -107,6 +108,7 @@ function formatGoogleServiceIssue(gsi) {
 }
 
 export default function AutomationMirrorStep({ run, userId, onResume, isMobile, onRunProgress, onRunEnd }) {
+  const { confirm, notify, dialog: confirmDialog } = useConfirm();
   const [incompleteVideos, setIncompleteVideos] = useState(null); // null = still loading
   const [completedVideos, setCompletedVideos] = useState(null);
   const [completedOpen, setCompletedOpen] = useState(false);
@@ -210,11 +212,11 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
       );
       started = !!result.started;
       if (!result.started) {
-        window.alert(`Can't work on "${item.displayTitle}" right now — ${result.reason}`);
+        await notify({ title: 'Not right now', body: `Can't work on "${item.displayTitle}" — ${result.reason}` });
       }
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to continue video', item.videoId, err);
-      window.alert(`Could not continue "${item.displayTitle}": ${String(err.message || err)}`);
+      await notify({ title: 'Something went wrong', body: `Could not continue "${item.displayTitle}": ${String(err.message || err)}` });
     } finally {
       setBusyVideoId(null);
       // Only clear the mirror if THIS action drove it — a blocked attempt (started === false) never
@@ -243,7 +245,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
       await resetStuckVideo(item.videoId);
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to reset stuck video', item.videoId, err);
-      window.alert(`Could not reset "${item.displayTitle}": ${String(err.message || err)}`);
+      await notify({ title: 'Reset failed', body: `Could not reset "${item.displayTitle}": ${String(err.message || err)}` });
     } finally {
       setBusyVideoId(null);
       loadIncomplete();
@@ -256,11 +258,12 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
   // already have created a video on YouTube" — clearing it and re-publishing could make a duplicate.
   async function resetUploadFlag(item) {
     if (
-      !window.confirm(
-        `Reset the upload flag for "${item.displayTitle}"?\n\n` +
-          `Only do this if you're sure NO video was ever created on YouTube for it. If an upload did ` +
-          `reach YouTube, publishing again will create a duplicate.`
-      )
+      !(await confirm({
+        title: 'Reset the upload flag?',
+        body: `Only do this if you're sure NO video was ever created on YouTube for "${item.displayTitle}". If an upload did reach YouTube, publishing again will create a duplicate.`,
+        confirmLabel: 'Reset flag',
+        danger: true,
+      }))
     ) {
       return;
     }
@@ -270,7 +273,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
       await clearYoutubeUploadFlag(item.videoId);
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to clear upload flag', item.videoId, err);
-      window.alert(`Could not reset the upload flag for "${item.displayTitle}": ${String(err.message || err)}`);
+      await notify({ title: 'Reset failed', body: `Could not reset the upload flag for "${item.displayTitle}": ${String(err.message || err)}` });
     } finally {
       setBusyVideoId(null);
       loadCompleted();
@@ -287,21 +290,29 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
       onResume?.(video);
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to open video', item.videoId, err);
-      window.alert(`Could not open "${item.displayTitle}": ${String(err.message || err)}`);
+      await notify({ title: 'Could not open the video', body: `"${item.displayTitle}": ${String(err.message || err)}` });
     }
   }
 
   // "Delete" — same delete-with-media (+ companion-Short cascade) as ChannelDashboardStep.jsx's own
   // handleDeleteVideo.
   async function deleteVideoRow(item) {
-    if (!window.confirm('Delete this video? Its record and all its media are removed permanently. This cannot be undone.')) return;
+    if (
+      !(await confirm({
+        title: 'Delete this video?',
+        body: 'Its record and all its media are removed permanently. This cannot be undone.',
+        confirmLabel: 'Delete',
+        danger: true,
+      }))
+    )
+      return;
     setBusyVideoId(item.videoId);
     setBusyLabel('Deleting…');
     try {
       await deleteVideoAndMedia(userId, item.videoId);
     } catch (err) {
       console.error('[AutomationMirrorStep] failed to delete video', item.videoId, err);
-      window.alert(`Could not delete "${item.displayTitle}": ${String(err.message || err)}`);
+      await notify({ title: 'Delete failed', body: `Could not delete "${item.displayTitle}": ${String(err.message || err)}` });
     } finally {
       setBusyVideoId(null);
       loadIncomplete();
@@ -325,12 +336,14 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
   async function doCleanup() {
     if (!cleanupPlan || cleanupPlan.totalVideos === 0) return;
     if (
-      !window.confirm(
-        `Archive ${cleanupPlan.totalVideos} published video(s)?\n\n` +
-          `This permanently deletes ${cleanupPlan.totalFiles} media file(s) (~${cleanupPlan.totalBytesLabel}) from Storage — ` +
-          `scene images, audio and the rendered MP4. The videos stay on YouTube; the dashboard keeps its thumbnail and title. ` +
-          `They can no longer be opened in Storyboard/Editor.`
-      )
+      !(await confirm({
+        title: `Archive ${cleanupPlan.totalVideos} published video(s)?`,
+        body:
+          `This permanently deletes ${cleanupPlan.totalFiles} media file(s) — about ${cleanupPlan.totalBytesLabel} — from Storage (scene images, audio, the rendered MP4).\n\n` +
+          `The videos stay on YouTube and the dashboard keeps their thumbnail and title, but they can no longer be opened in Storyboard/Editor. This cannot be undone.`,
+        confirmLabel: 'Archive all',
+        danger: true,
+      }))
     )
       return;
     setCleanupBusy(true);
@@ -902,6 +915,8 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
           </div>
         )}
       </div>
+
+      {confirmDialog}
     </div>
   );
 }

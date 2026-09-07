@@ -28,6 +28,7 @@ import { DEFAULT_CREATIVE_DIRECTION, SCHEMA_INSTRUCTIONS_DISPLAY } from '../lib/
 import { generateImage } from '../lib/sceneOrchestrator';
 import { priceForImage } from '../lib/imageProviders';
 import ExpandableTextarea from '../components/ExpandableTextarea';
+import { useConfirm } from '../components/useConfirm';
 
 // A channel-level default asset isn't tied to any one video, but uploadMedia (src/lib/mediaStorage.js)
 // is keyed by (userId, videoId, kind, id) — reusing it here with a stable per-channel pseudo-videoId
@@ -106,6 +107,7 @@ function extractYoutubeId(input) {
 }
 
 export default function ChannelDashboardStep({ channelId, userId, onResume, onNewVideo, onBack, onChannelChange, onStartVideoFromSuggestion, isMobile, onRunProgress, onRunEnd }) {
+  const { confirm, notify, dialog: confirmDialog } = useConfirm();
   const [channel, setChannel] = useState(null);
   const [name, setName] = useState('');
   const [nameFocused, setNameFocused] = useState(false);
@@ -529,12 +531,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       if (!res.ok) throw new Error(data.error || 'Could not start the YouTube connection');
       window.location.href = data.authUrl;
     } catch (e) {
-      window.alert(String(e.message || e));
+      notify({ title: 'YouTube connection failed', body: String(e.message || e) });
     }
   }
 
   async function handleDisconnectYoutube() {
-    if (!window.confirm('Disconnect this channel from YouTube?')) return;
+    if (!(await confirm({ title: 'Disconnect from YouTube?', body: 'This channel will stop being able to publish until you reconnect it.', confirmLabel: 'Disconnect', danger: true }))) return;
     const updated = await clearYoutubeConnection(channelId);
     setChannel(updated);
     onChannelChange?.(updated);
@@ -582,7 +584,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     }
     const provider = channel.automation_image_provider === 'nanobanana-batch' ? 'nanobanana' : channel.automation_image_provider || 'pollinations';
     const cost = priceForImage(provider, { width: 1280, height: 720, quality: 'medium', hasReference: false });
-    if (cost > 0 && !window.confirm(`Generate this default background image using ${provider} (~$${cost.toFixed(2)})?`)) return;
+    if (cost > 0 && !(await confirm({ title: 'Generate background image?', body: `This uses ${provider} and costs about $${cost.toFixed(2)}.`, confirmLabel: 'Generate' }))) return;
     setStaticBgBusy(true);
     setStaticBgError('');
     try {
@@ -604,7 +606,15 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   }
 
   async function handleDeleteChannel() {
-    if (!window.confirm(`Delete "${channel?.name || 'this channel'}"? This also deletes all ${videos?.length || 0} of its videos and cannot be undone.`)) return;
+    if (
+      !(await confirm({
+        title: `Delete "${channel?.name || 'this channel'}"?`,
+        body: `This also deletes all ${videos?.length || 0} of its videos. This cannot be undone.`,
+        confirmLabel: 'Delete channel',
+        danger: true,
+      }))
+    )
+      return;
     await deleteChannel(channelId);
     onBack();
   }
@@ -613,11 +623,14 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     const v = (videos || []).find((x) => x.id === id);
     const hasShort = !!v?.shortVideoId;
     if (
-      !window.confirm(
-        hasShort
-          ? 'Delete this video and its companion Short? Both records and all their media are removed permanently. A Short already on YouTube stays on YouTube. This cannot be undone.'
-          : 'Delete this video? This cannot be undone.'
-      )
+      !(await confirm({
+        title: hasShort ? 'Delete this video and its Short?' : 'Delete this video?',
+        body: hasShort
+          ? 'Both records and all their media are removed permanently. A Short already on YouTube stays on YouTube. This cannot be undone.'
+          : 'The record and all its media are removed permanently. This cannot be undone.',
+        confirmLabel: 'Delete',
+        danger: true,
+      }))
     )
       return;
     // Purges the video's (and, cascaded, its Short's) DB row + all Supabase Storage media.
@@ -646,22 +659,25 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     try {
       const est = await estimateVideoArchive(userId, v.id);
       if (est.fileCount === 0) {
-        window.alert(`"${title}" has no archivable scene media left — nothing to free.`);
+        await notify({ title: 'Nothing to archive', body: `"${title}" has no archivable scene media left.` });
         return;
       }
-      const shortNote = v.shortVideoId ? " — plus its companion Short's media if that's published too" : '';
-      const ok = window.confirm(
-        `Archive media for "${title}"?\n\n` +
-          `This permanently deletes ${est.fileCount} scene image/audio file(s) (${est.bytesLabel})${shortNote} from storage.\n\n` +
-          `The video stays on YouTube and in this list (its thumbnail is kept), but it can no longer be opened in the editor. This cannot be undone.`
-      );
+      const shortNote = v.shortVideoId ? " (plus its companion Short's media, if that's published too)" : '';
+      const ok = await confirm({
+        title: `Archive media for "${title}"?`,
+        body:
+          `This permanently deletes ${est.fileCount} scene image/audio file(s) — about ${est.bytesLabel}${shortNote} — from storage.\n\n` +
+          `The video stays on YouTube and in this list (its thumbnail is kept), but it can no longer be opened in the editor. This cannot be undone.`,
+        confirmLabel: 'Archive media',
+        danger: true,
+      });
       if (!ok) return;
       const res = await archiveVideoNow(userId, v.id);
       await refreshVideos();
-      window.alert(`Archived "${title}" — freed ${res.freedBytesLabel}.`);
+      await notify({ title: 'Media archived', body: `"${title}" — freed ${res.freedBytesLabel}.` });
     } catch (err) {
       console.error('[ChannelDashboardStep] archive failed', v.id, err);
-      window.alert(`Could not archive "${title}": ${String(err.message || err)}`);
+      await notify({ title: 'Archive failed', body: `Could not archive "${title}": ${String(err.message || err)}` });
     } finally {
       setArchivingId(null);
     }
@@ -725,14 +741,15 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       );
       started = !!(result && result.started);
       if (result && result.started === false) {
-        window.alert(
-          `The Short was created but its generation couldn't start right now — ${result.reason}. It'll be picked up automatically on the next automation cycle.`
-        );
+        await notify({
+          title: 'Short created — generation queued',
+          body: `It couldn't start right now (${result.reason}), so it'll be picked up automatically on the next automation cycle.`,
+        });
       }
       await refreshVideos();
     } catch (err) {
       console.error('[ChannelDashboardStep] Generate Short failed', v.id, err);
-      window.alert(`Could not generate the Short: ${String(err.message || err)}`);
+      await notify({ title: 'Could not generate the Short', body: String(err.message || err) });
       await refreshVideos();
     } finally {
       setGeneratingShortFor(null);
@@ -776,9 +793,11 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     const fromName = channel?.name || 'this channel';
     const toName = target.name || 'Untitled channel';
     const title = v.displayTitle || 'Untitled video';
-    const ok = window.confirm(
-      `Move "${title}" from "${fromName}" to "${toName}"?\n\nIt will disappear from ${fromName}'s dashboard and appear under ${toName} instead.`
-    );
+    const ok = await confirm({
+      title: `Move "${title}"?`,
+      body: `From "${fromName}" to "${toName}". It will disappear from ${fromName}'s dashboard and appear under ${toName} instead.`,
+      confirmLabel: 'Move',
+    });
     if (!ok) return;
     setMovingId(v.id);
     setMoveError('');
@@ -844,18 +863,22 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
     if (
       alreadyShortElsewhere &&
-      !window.confirm(
-        `"${chosen.displayTitle || 'This video'}" is already linked as a Short of "${titleOf(chosen.parentVideoId)}" — relink it to "${parent.displayTitle || 'this video'}" instead?\n\n"${titleOf(chosen.parentVideoId)}" will no longer show a companion Short.`
-      )
+      !(await confirm({
+        title: 'Relink this Short?',
+        body: `"${chosen.displayTitle || 'This video'}" is already linked as a Short of "${titleOf(chosen.parentVideoId)}". Relink it to "${parent.displayTitle || 'this video'}" instead? "${titleOf(chosen.parentVideoId)}" will no longer show a companion Short.`,
+        confirmLabel: 'Relink',
+      }))
     ) {
       setLinkingShortId(null);
       return;
     }
     if (
       parentHasDifferentShort &&
-      !window.confirm(
-        `"${parent.displayTitle || 'This video'}" already has a companion Short ("${titleOf(parent.shortVideoId)}").\n\nLinking this one will unlink the previous Short — it becomes a normal video again and reappears in the grid.`
-      )
+      !(await confirm({
+        title: 'Replace the current Short?',
+        body: `"${parent.displayTitle || 'This video'}" already has a companion Short ("${titleOf(parent.shortVideoId)}"). Linking this one will unlink the previous Short — it becomes a normal video again and reappears in the grid.`,
+        confirmLabel: 'Replace',
+      }))
     ) {
       setLinkingShortId(null);
       return;
@@ -897,9 +920,11 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   async function unlinkShort(parentSnapshot, short) {
     if (!short?.id) return;
     if (
-      !window.confirm(
-        `This will unlink "${short.displayTitle || short.topic || 'the Short'}" — it becomes a normal video again and reappears in the grid separately.`
-      )
+      !(await confirm({
+        title: 'Unlink this Short?',
+        body: `"${short.displayTitle || short.topic || 'The Short'}" becomes a normal video again and reappears in the grid separately.`,
+        confirmLabel: 'Unlink',
+      }))
     ) {
       return;
     }
@@ -953,9 +978,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   }
 
   async function markAsNotPublished(v) {
-    const ok = window.confirm(
-      'Mark this video as NOT published on YouTube?\n\nThis re-enables a full upload for this video — only do this if it was actually removed from YouTube, otherwise using it by mistake could result in a duplicate upload.'
-    );
+    const ok = await confirm({
+      title: 'Mark as NOT published?',
+      body: 'This re-enables a full upload for this video. Only do this if it was actually removed from YouTube — otherwise you risk a duplicate upload.',
+      confirmLabel: 'Mark as not published',
+      danger: true,
+    });
     if (!ok) return;
     setYtEditBusy(v.id);
     setYtEditError('');
@@ -2154,6 +2182,8 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           onClose={() => setShowProgramManagerChat(false)}
         />
       )}
+
+      {confirmDialog}
     </div>
   );
 }

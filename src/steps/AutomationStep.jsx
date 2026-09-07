@@ -8,6 +8,7 @@ import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
 import { STYLES } from '../lib/pollinations';
 import ExpandableTextarea from '../components/ExpandableTextarea';
+import { useConfirm } from '../components/useConfirm';
 import {
   isLocalExportSupported,
   getStoredLocalExportDirectory,
@@ -131,6 +132,7 @@ function statusColor(status) {
 }
 
 export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedulerEnabledChange }) {
+  const { confirm, notify, dialog: confirmDialog } = useConfirm();
   const [channels, setChannels] = useState(null); // null = still loading
   // Per-channel collapse state, keyed by channel id — closed (falsy/missing) by default so a page
   // with several channels doesn't turn into a wall of near-identical fields (see the header
@@ -213,7 +215,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       setExportDirName(handle.name || 'chosen folder');
       setExportDirStatus(await ensureLocalExportPermission(handle, { withPrompt: true }));
     } catch (err) {
-      if (err?.name !== 'AbortError') window.alert(String(err?.message || err));
+      if (err?.name !== 'AbortError') await notify({ title: 'Could not set the export folder', body: String(err?.message || err) });
     } finally {
       setExportDirBusy(false);
     }
@@ -296,16 +298,19 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   // resets currently_running directly, bypassing runManagedCycle entirely, since the whole point is
   // that no in-memory runManagedCycle call may be left anywhere to release it normally.
   async function forceUnlockScheduler() {
-    const ok = window.confirm(
-      'Force-unlock the scheduler?\n\nOnly do this if you are certain no cycle is genuinely running right now (in this tab, another tab, or another device) — forcing the lock open while one actually is risks two cycles running concurrently.'
-    );
+    const ok = await confirm({
+      title: 'Force-unlock the scheduler?',
+      body: 'Only do this if you are certain no cycle is genuinely running right now (in this tab, another tab, or another device). Forcing the lock open while one is running risks two cycles at once.',
+      confirmLabel: 'Force unlock',
+      danger: true,
+    });
     if (!ok) return;
     try {
       const updated = await forceUnlock();
       setSchedulerSettings(updated);
       setSchedulerCycleRunning(updated.currentlyRunning);
     } catch (err) {
-      window.alert(`Force unlock failed: ${String(err.message || err)}`);
+      await notify({ title: 'Force unlock failed', body: String(err.message || err) });
     }
   }
 
@@ -359,11 +364,12 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         // exist yet because a DB migration wasn't run) would otherwise leave the UI showing a value
         // that never actually persisted, and the automation cycle silently using the old one.
         console.error('[AutomationStep] failed to save channel automation settings', channelId, err);
-        window.alert(
-          `Could not save this setting (${Object.keys(patch).join(', ')}): ${String(err?.message || err)}\n\n` +
-            'The change on screen has NOT been saved. If this mentions a missing column, the required one-time ' +
-            'Supabase migration has not been run yet.'
-        );
+        notify({
+          title: 'Setting not saved',
+          body:
+            `Could not save "${Object.keys(patch).join(', ')}": ${String(err?.message || err)}\n\n` +
+            'The change on screen has NOT been saved. If this mentions a missing column, the required one-time Supabase migration has not been run yet.',
+        });
         // Resync from the DB so the UI stops showing the un-saved value.
         loadChannels();
       });
@@ -419,7 +425,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         });
         console.warn('[run-cycle-debug] runManagedCycle() returned', result);
         didStart = result.started;
-        if (!result.started) window.alert(`Could not start a real cycle right now: ${result.reason}`);
+        if (!result.started) await notify({ title: 'Could not start a cycle', body: result.reason });
         // The 15s poll effect above only merges currentlyRunning/currentRunStartedAt, not
         // lastRunStartedAt — without this, "Next check" would keep showing a countdown computed
         // from the PREVIOUS run's lastRunStartedAt right after this one just wrote a new one
@@ -454,7 +460,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
     runCycle(true);
   }
 
-  function runRealCycle() {
+  async function runRealCycle() {
     const enabled = (channels || []).filter((c) => c.automation_enabled);
     const localFolderChannels = enabled.filter((c) => c.automation_export_mode === 'local_folder');
     const youtubeChannels = enabled.filter((c) => c.automation_export_mode !== 'local_folder');
@@ -469,9 +475,9 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         'those videos are written to your chosen folder, not uploaded. Make sure you\'ve granted folder ' +
         'access this session ("Choose export folder") first';
     }
-    msg += '. Continue?';
+    msg += '.';
 
-    const ok = window.confirm(msg);
+    const ok = await confirm({ title: 'Run a real automation cycle?', body: msg, confirmLabel: 'Run cycle' });
     if (!ok) return;
     runCycle(false);
   }
@@ -1599,6 +1605,8 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
           </>
         )}
       </div>
+
+      {confirmDialog}
     </div>
   );
 }
