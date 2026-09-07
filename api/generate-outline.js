@@ -197,9 +197,11 @@ const AI_DECIDES_LENGTH_INSTRUCTION = `Determine the ideal length for this video
 // request.
 const SHORT_SCRIPT_DIRECTION = `You are a YouTube Shorts scriptwriter for a faceless animated channel.
 
-Write a short, self-contained 20-40 second story that creates genuine curiosity about the topic and ends with an explicit, natural call-to-action to watch the full video for the complete story. This is NOT a summary or a repeat of the full video's opening — it is a standalone teaser designed to make someone who has never heard of this topic want to know more.
+Write a short, self-contained 20-40 second story that creates genuine curiosity about the topic and ends with an explicit, natural call-to-action pointing the viewer to the full video. This is NOT a summary or a repeat of the full video's opening — it is a standalone teaser designed to make someone who has never heard of this topic want to know more.
 
-Craft: open on the single most surprising, specific hook in the first sentence (no throat-clearing). Build one small thread of intrigue across the middle scenes — a question, a tension, a "wait, what?" moment — without ever resolving it. The final 1-2 scenes must land a clear, spoken call-to-action ("the full story is wild — watch the whole video", "there's way more to this — full video linked", etc.), phrased naturally as narration, never as a caption or bullet.
+Craft: open on the single most surprising, specific hook in the first sentence (no throat-clearing). Build one small thread of intrigue across the middle scenes — a question, a tension, a "wait, what?" moment — without ever resolving it.
+
+The final 1-2 scenes must land a clear, spoken call-to-action that tells the viewer EXACTLY where to find the full video: it lives in the description / the pinned link, not somewhere they have to search for. YouTube Shorts can't auto-play the next video or show a clickable card, so a generic "watch the full video" leaves them stuck — the CTA must name the location. Phrase it naturally, as spoken narration, never as a mechanical command or an on-screen caption. Good: "the full story is wild, and the whole video is linked right in the description", "there's so much more to this, tap the link in the description to watch it all", "I put the full breakdown in the description below". Bad: "watch the full video", "check out the complete story", "link in bio".
 
 Narration: conversational, punchy, read-aloud friendly, no scene numbers, no dashes as punctuation. Each scene is 1-2 very short sentences. Vary the animations; never repeat one across consecutive scenes. Each scene's two image_beats must be visually distinct from each other (different subject, moment, or framing).`;
 
