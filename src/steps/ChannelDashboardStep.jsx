@@ -1880,7 +1880,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                                   disabled={!!linkingShortId}
                                   style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: linkingShortId ? 0.6 : 1 }}
                                 >
-                                  🔗 Link as Short
+                                  🔗 Choose an existing video as Short
                                 </button>
                               )}
                               {short && !generating && (
