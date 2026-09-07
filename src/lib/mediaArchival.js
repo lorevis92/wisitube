@@ -191,6 +191,68 @@ export async function planMediaCleanup(userId) {
 }
 
 /**
+ * "Archive now" for ONE explicitly chosen video — the same per-video media cleanup runMediaCleanup
+ * applies, but with NO age threshold (the daily hook waits ARCHIVE_AFTER_DAYS; this doesn't).
+ *
+ * estimateVideoArchive: dry-run size — what removeMediaFiles would delete for this video.
+ */
+export async function estimateVideoArchive(userId, videoId) {
+  if (!userId) throw new Error('estimateVideoArchive: userId is required (storage paths are per-user)');
+  const files = await listVideoMediaFiles(userId, videoId, ARCHIVABLE_MEDIA_KINDS);
+  const bytes = files.reduce((a, f) => a + f.size, 0);
+  return { fileCount: files.length, bytes, bytesLabel: fmtBytes(bytes) };
+}
+
+/**
+ * Deletes this video's heavy scene media from Storage and swaps its project jsonb for the light
+ * archived stub — identical to what runMediaCleanup does per video, just on demand. A published,
+ * not-yet-archived companion Short (video.shortVideoId) is archived in the same call; an unpublished
+ * one is left alone (its media is still needed to finish it). Irreversible.
+ *
+ * Returns { alreadyArchived, fileCount, freedBytes, freedBytesLabel }.
+ */
+export async function archiveVideoNow(userId, videoId) {
+  if (!userId) throw new Error('archiveVideoNow: userId is required (storage paths are per-user)');
+  const fresh = await loadVideo(videoId);
+  if (!fresh) throw new Error('video no longer exists');
+  if (!fresh.youtubeVideoId) throw new Error('only a published video can have its media archived');
+  if (fresh.mediaArchived) return { alreadyArchived: true, fileCount: 0, freedBytes: 0, freedBytesLabel: '0 B' };
+
+  const files = await listVideoMediaFiles(userId, videoId, ARCHIVABLE_MEDIA_KINDS);
+  const bytes = files.reduce((a, f) => a + f.size, 0);
+  await removeMediaFiles(files.map((f) => f.path));
+
+  await saveVideo({
+    id: fresh.id,
+    channelId: fresh.channelId,
+    createdAt: fresh.createdAt,
+    topic: fresh.topic,
+    settings: fresh.settings,
+    displayTitle: fresh.displayTitle,
+    promisedFollowUp: fresh.promisedFollowUp,
+    promiseFulfilled: fresh.promiseFulfilled,
+    ...buildArchivedProject(fresh),
+  });
+
+  // Take the companion Short's heavy media with it — but only if that Short is itself published and
+  // not already archived; a still-producing teaser needs its media kept. Best-effort.
+  let freedBytes = bytes;
+  if (fresh.shortVideoId) {
+    try {
+      const short = await loadVideo(fresh.shortVideoId);
+      if (short?.youtubeVideoId && !short.mediaArchived) {
+        const s = await archiveVideoNow(userId, fresh.shortVideoId);
+        freedBytes += s.freedBytes || 0;
+      }
+    } catch (err) {
+      console.error('[archiveVideoNow] failed to archive companion Short', fresh.shortVideoId, err);
+    }
+  }
+
+  return { alreadyArchived: false, fileCount: files.length, freedBytes, freedBytesLabel: fmtBytes(freedBytes) };
+}
+
+/**
  * The real thing. For each eligible video: delete its heavy media from Storage, then replace its
  * project jsonb with buildArchivedProject() and mark mediaArchived: true. Per-video failures are
  * isolated (logged, counted, skipped) so one bad video never blocks the rest.

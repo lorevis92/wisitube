@@ -16,7 +16,7 @@ import {
   recordCost,
 } from '../lib/db';
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
-import { deleteVideoAndMedia } from '../lib/mediaArchival';
+import { deleteVideoAndMedia, estimateVideoArchive, archiveVideoNow } from '../lib/mediaArchival';
 import { createShortRecord } from '../lib/shortsEngine';
 import { runFullPipeline } from '../lib/recipes/fullPipelineRecipe';
 import { runManagedResume } from '../lib/automationScheduler';
@@ -184,6 +184,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   // menu (Edit YouTube status / Delete / …) rather than a single action; items come from an array
   // so a future action is one entry, not a card restructure.
   const [cardMenuOpenFor, setCardMenuOpenFor] = useState(null);
+  const [archivingId, setArchivingId] = useState(null); // videoId being archived on demand
 
   // Escape closes the "how should this Short publish?" modal (same affordance as ImageLightbox /
   // ProgramManagerChat). No-op while nothing is generating; the modal itself also closes on the
@@ -631,6 +632,38 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       setVideos(sortVideosForGrid(fresh));
     } catch (err) {
       console.error('[ChannelDashboardStep] failed to refresh videos', err);
+    }
+  }
+
+  // "🗄 Archive media now" (⚙ menu) — the post-publish media cleanup the daily hook runs after
+  // ARCHIVE_AFTER_DAYS, on demand for this one video: shows the size that would be freed, then on
+  // explicit confirm deletes its scene image/audio from Storage and swaps its project for the light
+  // archived stub (thumbnail kept, still on YouTube, can't be reopened in the editor). Irreversible.
+  async function handleArchiveVideo(v) {
+    if (archivingId) return;
+    const title = v.displayTitle || v.topic || 'this video';
+    setArchivingId(v.id);
+    try {
+      const est = await estimateVideoArchive(userId, v.id);
+      if (est.fileCount === 0) {
+        window.alert(`"${title}" has no archivable scene media left — nothing to free.`);
+        return;
+      }
+      const shortNote = v.shortVideoId ? " — plus its companion Short's media if that's published too" : '';
+      const ok = window.confirm(
+        `Archive media for "${title}"?\n\n` +
+          `This permanently deletes ${est.fileCount} scene image/audio file(s) (${est.bytesLabel})${shortNote} from storage.\n\n` +
+          `The video stays on YouTube and in this list (its thumbnail is kept), but it can no longer be opened in the editor. This cannot be undone.`
+      );
+      if (!ok) return;
+      const res = await archiveVideoNow(userId, v.id);
+      await refreshVideos();
+      window.alert(`Archived "${title}" — freed ${res.freedBytesLabel}.`);
+    } catch (err) {
+      console.error('[ChannelDashboardStep] archive failed', v.id, err);
+      window.alert(`Could not archive "${title}": ${String(err.message || err)}`);
+    } finally {
+      setArchivingId(null);
     }
   }
 
@@ -1703,6 +1736,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                     // Extensible action menu behind the ⚙ — add an entry here, nothing else changes.
                     const cardMenuItems = [
                       { key: 'yt-status', label: '✏️ Edit YouTube status', onSelect: () => openYtEdit(v) },
+                      // "Archive now": the same post-publish media cleanup the daily hook does after
+                      // ARCHIVE_AFTER_DAYS, on demand for this one video. Only for a published video
+                      // whose media isn't already gone.
+                      ...(isPublished && !isArchived
+                        ? [{ key: 'archive', label: archivingId === v.id ? '🗄 Archiving…' : '🗄 Archive media now', onSelect: () => handleArchiveVideo(v) }]
+                        : []),
                       { key: 'delete', label: '🗑 Delete', danger: true, onSelect: () => handleDeleteVideo(v.id) },
                     ];
                     const menuOpen = cardMenuOpenFor === v.id;
