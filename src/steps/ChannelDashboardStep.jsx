@@ -168,6 +168,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [selectedLinkShortId, setSelectedLinkShortId] = useState('');
   const [linkingShortId, setLinkingShortId] = useState(null);
   const [linkShortError, setLinkShortError] = useState('');
+  const [unlinkingShortId, setUnlinkingShortId] = useState(null); // parent videoId whose Short is being unlinked
   // "Companion Short" card section — id of the video card whose section is expanded (null = all
   // collapsed). Collapsed by default; collapsed state shows only a one-line status. One at a time,
   // same as the move / YouTube-status / link pickers.
@@ -853,6 +854,32 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       setLinkShortError('Link failed: ' + String(err.message || err));
     } finally {
       setLinkingShortId(null);
+    }
+  }
+
+  // Fully detach a video from its Short role — the reverse of "Generate/Link as Short". Two targeted
+  // writes (never a full re-save of a stale copy): drop isShort/parentVideoId on the ex-Short so it
+  // reappears in the grid on its own (the grid filter only excludes isShort === true), and clear
+  // shortVideoId on the parent so its Companion-Short section goes back to "Generate / Link".
+  async function unlinkShort(parentSnapshot, short) {
+    if (!short?.id) return;
+    if (
+      !window.confirm(
+        `This will unlink "${short.displayTitle || short.topic || 'the Short'}" — it becomes a normal video again and reappears in the grid separately.`
+      )
+    ) {
+      return;
+    }
+    setUnlinkingShortId(parentSnapshot.id);
+    setLinkShortError('');
+    try {
+      await updateVideoFields(short.id, { isShort: false, parentVideoId: null });
+      await updateVideoFields(parentSnapshot.id, { shortVideoId: null });
+      await refreshVideos();
+    } catch (err) {
+      setLinkShortError('Unlink failed: ' + String(err.message || err));
+    } finally {
+      setUnlinkingShortId(null);
     }
   }
 
@@ -1854,6 +1881,22 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                                   style={{ ...btnGhost, padding: '6px 10px', fontSize: 10, opacity: linkingShortId ? 0.6 : 1 }}
                                 >
                                   🔗 Link as Short
+                                </button>
+                              )}
+                              {short && !generating && (
+                                <button
+                                  onClick={() => unlinkShort(v, short)}
+                                  disabled={!!unlinkingShortId}
+                                  style={{
+                                    ...btnGhost,
+                                    padding: '6px 10px',
+                                    fontSize: 10,
+                                    color: T.primary,
+                                    borderColor: T.primaryBorder,
+                                    opacity: unlinkingShortId ? 0.6 : 1,
+                                  }}
+                                >
+                                  {unlinkingShortId === v.id ? '…' : '✕ Unlink Short'}
                                 </button>
                               )}
                             </div>
