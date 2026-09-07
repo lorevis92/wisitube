@@ -4,6 +4,7 @@ import { loadImage, decodeAudio } from '../lib/pollinations';
 import { playTimeline } from '../lib/engine';
 import { WebCodecsUnsupportedError } from '../lib/exporter';
 import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
+import { updateVideoFields } from '../lib/db';
 import { generateThumbnail } from '../lib/thumbnailEngine';
 import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
 import { renderVideoForExport } from '../lib/videoRenderEngine';
@@ -53,6 +54,15 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   // start before the "Render video" button had actually been replaced — two overlapping render
   // loops racing to update the same `pct` state, causing the progress bar to jump backward.
   const renderingRef = useRef(false);
+  // A YouTube publish (publishToYoutube / retryPhase) is a fired-and-not-awaited promise chain: it
+  // keeps running — and keeps calling handleYtProgress — even after the user navigates to another
+  // video and this ExportStep unmounts. handleYtProgress used to write youtubeVideoId through App's
+  // setProject, which by then points at the OTHER video, stamping this upload's id onto the wrong
+  // record (and later a "Retry thumbnail" there would push a thumbnail to the wrong YouTube video).
+  // mountedRef gates every App-level setProject in this file; the durable writes go straight to this
+  // instance's own `videoId` via updateVideoFields, which can't hit the wrong row.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const [rendering, setRendering] = useState(false);
   const [pct, setPct] = useState(0);
   const [videoUrl, setVideoUrl] = useState('');
@@ -178,10 +188,11 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       if (!ref.file || ref.storagePath) return;
       try {
         const storagePath = await uploadMedia(userId, videoId, 'reference', ref.id, ref.file);
-        setProject((p) => ({
-          ...p,
-          references: (p.references || []).map((r) => (r.id === ref.id ? { ...r, storagePath } : r)),
-        }));
+        if (mountedRef.current)
+          setProject((p) => ({
+            ...p,
+            references: (p.references || []).map((r) => (r.id === ref.id ? { ...r, storagePath } : r)),
+          }));
       } catch (err) {
         console.error('[mediaStorage] failed to back up reference photo', ref.id, err);
       }
@@ -303,14 +314,17 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       setThumbReady(true);
 
       // Back up to Supabase Storage so this survives a refresh — never blocks the generation
-      // itself, the canvas above is already usable this session regardless.
+      // itself, the canvas above is already usable this session regardless. The path is keyed by
+      // this video's own `videoId`; persist it straight to that row (updateVideoFields) so a
+      // navigation mid-backup can't land it on another project via setProject.
       try {
         const storagePath = await uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbBlob);
-        setProject((p) => ({ ...p, thumbnailStoragePath: storagePath }));
-        setThumbBackupFailed(false);
+        await updateVideoFields(videoId, { thumbnailStoragePath: storagePath });
+        if (mountedRef.current) setProject((p) => ({ ...p, thumbnailStoragePath: storagePath }));
+        if (mountedRef.current) setThumbBackupFailed(false);
       } catch (err) {
         console.error('[mediaStorage] failed to back up thumbnail', err);
-        setThumbBackupFailed(true);
+        if (mountedRef.current) setThumbBackupFailed(true);
       }
     } catch (e) {
       setError('Thumbnail failed: ' + String(e.message || e));
@@ -335,15 +349,25 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   // events into the same setYtErrors/setYtUploadPct/setYtVideoId calls this file always made.
 
   function handleYtProgress(evt) {
-    if (evt.kind === 'upload-progress') setYtUploadPct(evt.percent);
-    else if (evt.kind === 'video-id') {
-      setYtVideoId(evt.videoId);
-      // Rides on the project record itself (same pattern as renderedVideoBlob/thumbnailStoragePath
-      // above) so App.jsx's existing debounced autosave persists it — without this, a manual
-      // upload would be just as forgettable on refresh as the automation path used to be.
-      setProject((p) => ({ ...p, youtubeVideoId: evt.videoId, youtubePublishedAt: p.youtubePublishedAt || Date.now() }));
-    } else if (evt.kind === 'error') setYtErrors((prev) => ({ ...prev, [evt.phase]: evt.message }));
-    else if (evt.kind === 'error-clear') setYtErrors((e) => ({ ...e, [evt.phase]: null }));
+    if (evt.kind === 'upload-progress') {
+      if (mountedRef.current) setYtUploadPct(evt.percent);
+    } else if (evt.kind === 'video-id') {
+      // Durable write: straight to THIS video's row (videoId is this instance's prop, captured for
+      // its whole lifetime), never through App's setProject which follows navigation.
+      updateVideoFields(videoId, { youtubeVideoId: evt.videoId, youtubePublishedAt: Date.now() }).catch((err) =>
+        console.error('[ExportStep] failed to persist youtubeVideoId', videoId, err)
+      );
+      // Live UI only while still mounted on this same video — otherwise setProject would stamp this
+      // id onto whatever project the user has since opened.
+      if (mountedRef.current) {
+        setYtVideoId(evt.videoId);
+        setProject((p) => ({ ...p, youtubeVideoId: evt.videoId, youtubePublishedAt: p.youtubePublishedAt || Date.now() }));
+      }
+    } else if (evt.kind === 'error') {
+      if (mountedRef.current) setYtErrors((prev) => ({ ...prev, [evt.phase]: evt.message }));
+    } else if (evt.kind === 'error-clear') {
+      if (mountedRef.current) setYtErrors((e) => ({ ...e, [evt.phase]: null }));
+    }
   }
 
   function buildYtMetadata() {
@@ -372,7 +396,11 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     return uploadVideo(project, videoBlob, { channel, metadata: buildYtMetadata(), onProgress: handleYtProgress });
   }
 
-  async function runThumbnail(videoId) {
+  // `ytVideoId` here is the *YouTube* video id to attach the thumbnail to (named to match
+  // youtubePublishEngine's setThumbnail param) — deliberately NOT this component's `videoId` prop
+  // (the WisiTube record id). Callers must pass the id that belongs to THIS open video: a fresh
+  // upload's return value, or project.youtubeVideoId — never a stale React value.
+  async function runThumbnail(ytVideoId) {
     // no custom thumbnail made — YouTube's auto-picked one applies; skip the toBlob() call entirely.
     // JPEG q0.9, not PNG: a 1280x720 photo-real frame as PNG can exceed YouTube's 2 MB thumbnail
     // limit and come back HTTP 400 "invalidImage" (youtubePublishEngine.js re-encodes as a safety
@@ -387,15 +415,18 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     // null blob and no storagePath, and setThumbnail would treat it as a silent "no thumbnail
     // wanted" no-op.
     const thumbnailExpected = Array.isArray(project.thumbnails) && project.thumbnails.length > 0;
-    const ok = await setThumbnail(videoId, thumbBlob, {
+    const ok = await setThumbnail(ytVideoId, thumbBlob, {
       channel,
       onProgress: handleYtProgress,
       expectedThumbnailPath: project.thumbnailStoragePath,
       thumbnailExpected,
     });
     // Clear the "published without its thumbnail" marker (set by the automation recipes, surfaced in
-    // the dashboard) once a retry from here actually attaches one. Autosave persists it.
-    if (ok && project.thumbnailPublishFailed) setProject((p) => ({ ...p, thumbnailPublishFailed: false }));
+    // the dashboard) once a retry from here actually attaches one — targeted to this video's row.
+    if (ok && project.thumbnailPublishFailed) {
+      updateVideoFields(videoId, { thumbnailPublishFailed: false }).catch(() => {});
+      if (mountedRef.current) setProject((p) => ({ ...p, thumbnailPublishFailed: false }));
+    }
     return ok;
   }
 
@@ -442,8 +473,9 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       });
       setLocalExportDone(folder);
       // Same terminal marker the recipe sets — keeps an automation cycle from re-exporting this
-      // video, and it's harmless for a hand-made one. Autosave persists it.
-      setProject((p) => ({ ...p, localExportedAt: p.localExportedAt || Date.now() }));
+      // video. Targeted to this video's row so a navigation mid-export can't land it elsewhere.
+      updateVideoFields(videoId, { localExportedAt: Date.now() }).catch(() => {});
+      if (mountedRef.current) setProject((p) => ({ ...p, localExportedAt: p.localExportedAt || Date.now() }));
     } catch (err) {
       if (err?.name !== 'AbortError') setLocalExportError(String(err?.message || err));
     } finally {
@@ -484,15 +516,15 @@ export default function ExportStep({ project, setProject, settings, channel, cha
       return;
     }
     setYtBusy(true);
-    console.log('[yt-upload] phase=publishToYoutube:enter', { existingVideoId: ytVideoId });
+    console.log('[yt-upload] phase=publishToYoutube:enter', { existingVideoId: project.youtubeVideoId || ytVideoId });
     try {
-      let videoId = ytVideoId;
-      if (!videoId) videoId = await runUpload();
-      console.log('[yt-upload] phase=publishToYoutube:after-upload', { videoId });
-      if (videoId) {
-        await runThumbnail(videoId);
-        await runCaptions(videoId);
-        await runPlaylist(videoId);
+      let ytId = project.youtubeVideoId || ytVideoId;
+      if (!ytId) ytId = await runUpload();
+      console.log('[yt-upload] phase=publishToYoutube:after-upload', { ytId });
+      if (ytId) {
+        await runThumbnail(ytId);
+        await runCaptions(ytId);
+        await runPlaylist(ytId);
       }
       console.log('[yt-upload] phase=publishToYoutube:exit');
     } catch (err) {
@@ -517,22 +549,26 @@ export default function ExportStep({ project, setProject, settings, channel, cha
     // Whether this phase actually had something to do — a captions/playlist retry with the toggle
     // off returns true as a no-op, and "✓ updated" would be a lie in that case.
     let didWork = true;
+    // The already-published video's id: the persisted value on THIS open record is the source of
+    // truth (project prop, always this video). ytVideoId state is only the same-session-just-
+    // uploaded fallback. Never the other way round — a stale ytVideoId could target another video.
+    const publishedVideoId = project.youtubeVideoId || ytVideoId;
     try {
       if (phase === 'upload') {
-        const videoId = await runUpload();
-        ok = !!videoId;
-        if (videoId) {
-          await runThumbnail(videoId);
-          await runCaptions(videoId);
-          await runPlaylist(videoId);
+        const ytId = await runUpload();
+        ok = !!ytId;
+        if (ytId) {
+          await runThumbnail(ytId);
+          await runCaptions(ytId);
+          await runPlaylist(ytId);
         }
       } else if (phase === 'thumbnail') {
-        ok = await runThumbnail(ytVideoId);
+        ok = await runThumbnail(publishedVideoId);
       } else if (phase === 'captions') {
-        ok = await runCaptions(ytVideoId);
+        ok = await runCaptions(publishedVideoId);
         didWork = ytUploadCaptions;
       } else if (phase === 'playlist') {
-        ok = await runPlaylist(ytVideoId);
+        ok = await runPlaylist(publishedVideoId);
         didWork = ytAddToPlaylist && !!project.series;
       }
       // run* return false ONLY after already emitting a kind:'error' through handleYtProgress, so a
