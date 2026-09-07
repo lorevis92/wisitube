@@ -201,9 +201,13 @@ const VIDEO_DOWNSTREAM_FIELDS = [
   'thumbnailStoragePath',
   'stuckError',
   'mediaArchived',
-  // Companion-Short markers (src/lib/shortsEngine.js): isShort set once at creation, shortVideoId
-  // set once on the parent after it publishes — a stale media-progress writer must never blank them.
+  // Companion-Short relational markers (src/lib/shortsEngine.js): isShort + parentVideoId are set
+  // once at the Short's creation, shortVideoId once on the parent — all three are managed only by
+  // the dedicated targeted writers (createShortRecord, the recipes' companion hook, "Link as Short",
+  // the delete cascade), so a media-progress or editor-autosave writer with a stale snapshot must
+  // never blank them. Two records had this trio swapped before these were fully protected.
   'isShort',
+  'parentVideoId',
   'shortVideoId',
 ];
 

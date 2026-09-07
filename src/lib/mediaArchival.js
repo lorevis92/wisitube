@@ -20,7 +20,7 @@
 // A video whose media has been archived can't be opened in Storyboard/Editor/Export — App.jsx's
 // handleResume detects project.mediaArchived and shows a "go watch it on YouTube" notice instead of
 // feeding an empty scenes array into the editor.
-import { listChannels, listVideosByChannel, loadVideo, saveVideo, deleteVideo, logAutomationStep } from './db';
+import { listChannels, listVideosByChannel, loadVideo, saveVideo, updateVideoFields, deleteVideo, logAutomationStep } from './db';
 import { listVideoMediaFiles, removeMediaFiles, ARCHIVABLE_MEDIA_KINDS } from './mediaStorage';
 
 export const ARCHIVE_AFTER_DAYS = 5;
@@ -116,7 +116,10 @@ export async function deleteVideoAndMedia(userId, videoId, { _cascade = false } 
   if (!_cascade && video?.isShort && video.parentVideoId) {
     try {
       const parent = await loadVideo(video.parentVideoId);
-      if (parent && parent.shortVideoId === videoId) await saveVideo({ ...parent, shortVideoId: null });
+      // Targeted single-field write on the parent's own id — never a full saveVideo of the loaded
+      // copy (that re-persists a whole stale project and was one route to swapped isShort/
+      // parentVideoId/shortVideoId records).
+      if (parent && parent.shortVideoId === videoId) await updateVideoFields(video.parentVideoId, { shortVideoId: null });
     } catch (err) {
       console.error('[deleteVideoAndMedia] failed to unlink deleted Short from its parent', video.parentVideoId, err);
     }

@@ -15,7 +15,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
+import { createId, saveVideo, loadVideo, updateVideoFields, listVideosByChannel, getCostsByChannel } from '../db';
 import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -803,8 +803,10 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         channel,
         { userId, logStep }
       );
+      // Targeted parent→Short pointer write — see fullPipelineRecipe.js's identical hook for why
+      // this is updateVideoFields on the parent's own id, not a full persist().
+      await updateVideoFields(videoId, { shortVideoId: shortId });
       project = { ...project, shortVideoId: shortId };
-      await persist();
       report('short', 'Producing the companion Short…');
       const shortResult = await runFullPipeline(channel, { targetVideoId: shortId, userId, logStep, onProgress });
       shortCostUsd = Number(shortResult?.costUsd) || 0;

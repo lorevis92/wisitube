@@ -423,12 +423,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     onStartVideoFromSuggestion?.(s.title, s.series || null);
     // This suggestion is api/program-manager.js's answer to a pending promise from an earlier
     // video's closing CTA — mark that ORIGINAL video as fulfilled now, so it stops showing up in
-    // future pendingPromises lists. Fire-and-forget: loads the record fresh (not from local
-    // `videos` state, which may be stale) rather than blocking the rest of this click's flow on it.
+    // future pendingPromises lists. Fire-and-forget, TARGETED to that video's own id: a full
+    // saveVideo of a loaded copy from a background promise like this is exactly the shape that
+    // corrupted other videos' records when it landed late.
     if (s.fulfills_promise_video_id) {
-      loadVideo(s.fulfills_promise_video_id)
-        .then((v) => (v ? saveVideo({ ...v, promiseFulfilled: true }) : null))
-        .catch((err) => console.error('[ChannelDashboardStep] failed to mark promise as fulfilled', err));
+      updateVideoFields(s.fulfills_promise_video_id, { promiseFulfilled: true }).catch((err) =>
+        console.error('[ChannelDashboardStep] failed to mark promise as fulfilled', err)
+      );
     }
     let latestChannel;
     setChannel((prev) => {
@@ -664,10 +665,12 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
         channel,
         { userId, logStep }
       );
-      // Point the parent at its new Short — same link the automatic hook writes.
+      // Point the parent at its new Short — a TARGETED write on the parent's own id (v.id, captured
+      // when this card rendered), never a full re-save of a loaded copy: this runs while the user is
+      // free to navigate away and open another video, and a full saveVideo of a stale object here
+      // was one way the isShort/parentVideoId/shortVideoId of two videos got swapped.
       try {
-        const parentFresh = await loadVideo(v.id);
-        if (parentFresh) await saveVideo({ ...parentFresh, shortVideoId: shortId });
+        await updateVideoFields(v.id, { shortVideoId: shortId });
       } catch (err) {
         console.error('[ChannelDashboardStep] failed to link parent → Short (Short will still generate)', v.id, err);
       }
@@ -780,34 +783,50 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   // re-save of a stale copy): isShort/parentVideoId on the chosen video, shortVideoId on the parent,
   // plus unlinking whatever was linked before on either side so nothing ends up double-linked or
   // orphaned-but-hidden.
-  async function confirmLinkShort(parent) {
-    const chosen = (videos || []).find((x) => x.id === selectedLinkShortId);
-    if (!chosen || chosen.id === parent.id) return;
+  async function confirmLinkShort(parentSnapshot) {
+    if (!selectedLinkShortId || selectedLinkShortId === parentSnapshot.id) return;
+
+    // Re-read BOTH rows fresh before deciding anything — the grid snapshot's parentVideoId /
+    // shortVideoId can be stale (another relink, a cascade delete), and a cleanup aimed at a stale
+    // old-link id could wrongly un-short a video that is now legitimately someone else's Short.
+    let parent, chosen;
+    setLinkingShortId(parentSnapshot.id);
+    setLinkShortError('');
+    try {
+      [parent, chosen] = await Promise.all([loadVideo(parentSnapshot.id), loadVideo(selectedLinkShortId)]);
+    } catch (err) {
+      setLinkShortError('Could not load the videos: ' + String(err.message || err));
+      setLinkingShortId(null);
+      return;
+    }
+    if (!parent || !chosen || chosen.id === parent.id) {
+      setLinkShortError('One of the videos no longer exists.');
+      setLinkingShortId(null);
+      return;
+    }
 
     const alreadyShortElsewhere = chosen.parentVideoId && chosen.parentVideoId !== parent.id;
     const parentHasDifferentShort = parent.shortVideoId && parent.shortVideoId !== chosen.id;
 
-    if (alreadyShortElsewhere) {
-      if (
-        !window.confirm(
-          `"${chosen.displayTitle || 'This video'}" is already linked as a Short of "${titleOf(chosen.parentVideoId)}" — relink it to "${parent.displayTitle || 'this video'}" instead?\n\n"${titleOf(chosen.parentVideoId)}" will no longer show a companion Short.`
-        )
-      ) {
-        return;
-      }
+    if (
+      alreadyShortElsewhere &&
+      !window.confirm(
+        `"${chosen.displayTitle || 'This video'}" is already linked as a Short of "${titleOf(chosen.parentVideoId)}" — relink it to "${parent.displayTitle || 'this video'}" instead?\n\n"${titleOf(chosen.parentVideoId)}" will no longer show a companion Short.`
+      )
+    ) {
+      setLinkingShortId(null);
+      return;
     }
-    if (parentHasDifferentShort) {
-      if (
-        !window.confirm(
-          `"${parent.displayTitle || 'This video'}" already has a companion Short ("${titleOf(parent.shortVideoId)}").\n\nLinking this one will unlink the previous Short — it becomes a normal video again and reappears in the grid.`
-        )
-      ) {
-        return;
-      }
+    if (
+      parentHasDifferentShort &&
+      !window.confirm(
+        `"${parent.displayTitle || 'This video'}" already has a companion Short ("${titleOf(parent.shortVideoId)}").\n\nLinking this one will unlink the previous Short — it becomes a normal video again and reappears in the grid.`
+      )
+    ) {
+      setLinkingShortId(null);
+      return;
     }
 
-    setLinkingShortId(parent.id);
-    setLinkShortError('');
     try {
       // Unlink the old associations first — best-effort, so a dangling id (a since-deleted video)
       // on either side can't block the relink itself.

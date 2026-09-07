@@ -470,6 +470,13 @@ export default function App() {
     const newCreatedAt = Date.now();
     setProjectId(newProjectId);
     setCreatedAt(newCreatedAt);
+    // Clear the previously-open video's `project` in the SAME batch as switching projectId to the
+    // new id. The "Create" nav tab can reach here with an old video still in `project` (unlike
+    // "+ New video", which goes through startNewProjectWithTopic and already nulls it), and until
+    // runSceneGeneration sets the new one, `project` (old video) + `projectId` (new id) are
+    // mismatched — the autosave would then write the OLD video's whole record, relational
+    // isShort/parentVideoId/shortVideoId included, into the NEW id's row.
+    setProject(null);
     // Captured once, here, at video-creation time — currentChannelId is safe to read directly in
     // this same synchronous call (it isn't being changed by this function), but the state setter
     // below won't be visible to this same invocation's own closures until the next render, so

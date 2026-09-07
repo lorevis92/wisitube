@@ -17,7 +17,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, persistVideoMediaProgress, loadVideo, listVideosByChannel, getCostsByChannel } from '../db';
+import { createId, saveVideo, persistVideoMediaProgress, loadVideo, updateVideoFields, listVideosByChannel, getCostsByChannel } from '../db';
 import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -1215,8 +1215,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         channel,
         { userId, logStep }
       );
+      // Targeted write on the parent's own id for the parent→Short pointer — not a full persist()
+      // of the whole project. A plain full save of shortVideoId here could be clobbered by (or
+      // clobber) a concurrent editor autosave if the user has this same video open, which is one way
+      // isShort/parentVideoId/shortVideoId got swapped between records.
+      await updateVideoFields(videoId, { shortVideoId: shortId });
       project = { ...project, shortVideoId: shortId };
-      await persist();
       report('short', 'Producing the companion Short…');
       const shortResult = await runFullPipeline(channel, { targetVideoId: shortId, userId, logStep, onProgress });
       shortCostUsd = Number(shortResult?.costUsd) || 0;
