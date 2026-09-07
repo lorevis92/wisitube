@@ -17,6 +17,7 @@ import { createId, saveVideo, persistVideoMediaProgress, saveYoutubeConnection, 
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
 import { generateAllScenes } from './lib/sceneOrchestrator';
+import { auditScriptRepetition, describeAudit } from './lib/repetitionAudit';
 import { supabase } from './lib/supabase';
 import { resumePendingBatches } from './lib/batchResumption';
 import { rehydrateProjectMedia } from './lib/mediaRehydration';
@@ -168,6 +169,9 @@ export default function App() {
   const [titleOptions, setTitleOptions] = useState(null);
   const [pendingPlan, setPendingPlan] = useState(null);
   const [sceneProgress, setSceneProgress] = useState({ current: 0, total: 0 });
+  // True only during the final anti-repetition editorial pass (after all scenes are written, before
+  // Storyboard) — swaps the "Writing your scenes…" loader copy so the extra wait is explained.
+  const [finalizingScript, setFinalizingScript] = useState(false);
   const [generationError, setGenerationError] = useState('');
 
   // Bumped every time the open video is switched (new/resume/reset) so a debounced save
@@ -408,6 +412,23 @@ export default function App() {
         persistPartial(plan, soFar, id, createdAtVal, channelIdVal);
       });
       if (generationRef.current !== generation) return;
+
+      // One-shot anti-repetition editorial pass — same helper the automation recipes run at their
+      // scene→media boundary, here between "all scenes written" and "Storyboard lets you generate
+      // media". Never throws / never blocks: a failed or over-aggressive audit keeps the script.
+      const built = buildScenesFromRaw(scenes, settings.contentType === 'static_background');
+      let auditedScenes = built;
+      setFinalizingScript(true);
+      try {
+        const audit = await auditScriptRepetition(built, { title: plan.title, language: settings.language });
+        auditedScenes = audit.scenes;
+        console.log(`[runSceneGeneration] ${describeAudit(audit)}`);
+      } catch (err) {
+        console.error('[runSceneGeneration] repetition audit failed — script kept as-is', err);
+      } finally {
+        setFinalizingScript(false);
+      }
+      if (generationRef.current !== generation) return;
       setProject({
         titles: [plan.title],
         selectedTitle: 0,
@@ -417,7 +438,7 @@ export default function App() {
         subtitles: true,
         references: plan.references,
         characterBible: plan.characterBible,
-        scenes: buildScenesFromRaw(scenes, settings.contentType === 'static_background'),
+        scenes: auditedScenes,
         series: settings.series || null,
         // Bare proper name of the subject (from the chosen title — api/generate-outline.js's titles
         // mode). Comparison-only, never displayed: the Content Program Manager uses it as the
@@ -987,9 +1008,13 @@ export default function App() {
             </div>
           ) : (
             <FullScreenLoader
-              title="Writing your scenes…"
-              subtitle="Claude is turning the outline into narration and image prompts, chapter by chapter"
-              progress={sceneProgress}
+              title={finalizingScript ? 'Tightening the script…' : 'Writing your scenes…'}
+              subtitle={
+                finalizingScript
+                  ? 'A final editorial pass removing anything the script already said'
+                  : 'Claude is turning the outline into narration and image prompts, chapter by chapter'
+              }
+              progress={finalizingScript ? undefined : sceneProgress}
             />
           ))}
 

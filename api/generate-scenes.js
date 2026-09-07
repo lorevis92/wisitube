@@ -59,6 +59,195 @@ function dumpUnparsableSceneResponse(tag, { anthropicData, rawText, cleanText, c
   }
 }
 
+// ---- mode: 'repetition-audit' ----
+// One-shot editorial pass over a FULLY-written script, run once (client side: src/lib/repetitionAudit.js)
+// after every scene exists and before any media is generated. Folded in here as a mode dispatch
+// rather than its own file to stay under Vercel Hobby's function cap (same reason as
+// generate-outline.js's 'titles' / 'short-script' modes). The exact system prompt is fixed by
+// product spec — do not paraphrase it.
+const REPETITION_AUDIT_SYSTEM = `You are the senior editor performing the final repetition audit of a YouTube script.
+Review the complete script paragraph by paragraph.
+Identify:
+- facts stated more than once;
+- conclusions repeated in different words;
+- redundant summaries;
+- sections with overlapping purposes;
+- repeated rhetorical questions, metaphors, transitions, or distinctive phrases;
+- paragraphs that add no new information;
+- callbacks that repeat rather than deepen an earlier point.
+
+For each scene, decide one of three actions:
+- "keep": scene is fine as-is, optionally with minor edited narration text
+- "delete": scene is fully redundant, remove entirely
+- "merge": scene overlaps with another scene — combine into one, specify which scene id absorbs it and provide the new combined narration
+
+Editing rules:
+- Preserve the strongest and clearest version of each idea.
+- When a later passage genuinely deepens an earlier idea, introduce it as an intentional callback and make the new layer explicit (e.g. signal "let's go deeper into X" rather than silently repeating it).
+- Replace empty repetition with specific facts, mechanisms, consequences, examples, or analysis only when supported by the existing script — never invent new facts.
+- Preserve narrative voice and factual meaning.
+- Prefer a shorter, stronger final script over one padded to reach any particular length.
+
+Every surviving scene must contribute something the audience did not already know, or change how they understand something they already know.
+
+Return a JSON array, one entry per original scene id, each with: {"id": ..., "action": "keep"|"delete"|"merge", "narration": "..." (if keep/merge), "mergeInto": id (if merge)}.`;
+
+function dumpUnparsableAuditResponse(tag, { anthropicData, text, sceneCount, parseError }) {
+  try {
+    const src = typeof text === 'string' ? text : '';
+    console.error(
+      `[repetition-audit] DIAGNOSTIC ${tag} — sceneCount=${sceneCount} ` +
+        `stop_reason=${anthropicData?.stop_reason} output_tokens=${anthropicData?.usage?.output_tokens} ` +
+        `input_tokens=${anthropicData?.usage?.input_tokens} len=${src.length} ` +
+        `parseError=${parseError ? String(parseError.message || parseError) : 'n/a'}`
+    );
+    const CHUNK = 3000;
+    const total = Math.ceil(src.length / CHUNK) || 1;
+    for (let i = 0; i < total; i++) {
+      console.error(`[repetition-audit] DIAGNOSTIC ${tag} rawtext part ${i + 1}/${total}:\n` + src.slice(i * CHUNK, (i + 1) * CHUNK));
+    }
+  } catch (e) {
+    console.error('[repetition-audit] DIAGNOSTIC dump itself failed', e?.message);
+  }
+}
+
+async function repetitionAudit(req, res, apiKey) {
+  try {
+    let scenes, title, language;
+    try {
+      const body = req.body || {};
+      scenes = Array.isArray(body.scenes)
+        ? body.scenes
+            .filter(
+              (s) =>
+                s &&
+                typeof s === 'object' &&
+                (typeof s.sceneId === 'number' || typeof s.sceneId === 'string') &&
+                typeof s.narration === 'string'
+            )
+            .map((s) => ({ sceneId: s.sceneId, narration: s.narration.trim() }))
+        : [];
+      if (scenes.length < 2) return res.status(400).json({ error: 'Need at least 2 scenes to audit' });
+      title = typeof body.title === 'string' ? body.title.trim() : '';
+      language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
+    } catch (err) {
+      console.error('[repetition-audit] phase=validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    const sceneCount = scenes.length;
+    // Same margin logic as the generate-scenes max_tokens fix (a 16-scene chunk needed 8000 ≈
+    // 500/scene). Here the model emits one small entry per scene — id + action, plus (for keep/merge)
+    // a narration up to ~200 chars — so ~350/scene over a 2000 base is generous, capped so a
+    // pathologically long script can't blow past the model's own output ceiling.
+    const maxTokens = Math.min(24000, 2000 + sceneCount * 350);
+
+    const scriptBlock = scenes.map((s) => `[scene id ${s.sceneId}]\n${s.narration}`).join('\n\n');
+    const idList = scenes.map((s) => s.sceneId).join(', ');
+    const systemPrompt = `${REPETITION_AUDIT_SYSTEM}
+
+The script below has ${sceneCount} scenes with these ids, in order: ${idList}.
+Your JSON array MUST contain EXACTLY one entry per id above (${sceneCount} entries), using those exact ids. Raw JSON array only — no markdown, no backticks, no preamble.`;
+
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: [
+            {
+              role: 'user',
+              content: `Video title: "${title}"
+Narration language: ${language}
+
+Complete assembled script, scene by scene:
+
+${scriptBlock}
+
+Perform the repetition audit and return the JSON array now.`,
+            },
+          ],
+        }),
+      });
+    } catch (err) {
+      console.error('[repetition-audit] phase=fetch-anthropic', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not reach the Anthropic API', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    let rawText;
+    try {
+      rawText = await response.text();
+    } catch (err) {
+      console.error('[repetition-audit] phase=read-response-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the Anthropic response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+    if (!response.ok) {
+      console.error('[repetition-audit] phase=anthropic-http-error status=', response.status, 'body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic API error', detail: rawText.slice(0, 300) });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (err) {
+      console.error('[repetition-audit] phase=parse-envelope-json', err?.message, 'raw body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic returned a non-JSON response', detail: rawText.slice(0, 300) });
+    }
+
+    const modelText = (data.content || [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+
+    if (data?.stop_reason && data.stop_reason !== 'end_turn') {
+      console.warn(
+        `[repetition-audit] DIAGNOSTIC stop_reason=${data.stop_reason} output_tokens=${data?.usage?.output_tokens} ` +
+          `sceneCount=${sceneCount} maxTokens=${maxTokens} — response may be truncated`
+      );
+    }
+
+    const clean = modelText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = clean.indexOf('[');
+    const end = clean.lastIndexOf(']');
+    if (start === -1 || end === -1) {
+      dumpUnparsableAuditResponse('locate-json', { anthropicData: data, text: clean || modelText, sceneCount });
+      return res.status(502).json({ error: 'Invalid AI response' });
+    }
+
+    let actions;
+    try {
+      actions = JSON.parse(clean.slice(start, end + 1));
+    } catch (e) {
+      dumpUnparsableAuditResponse('parse-json', { anthropicData: data, text: clean, sceneCount, parseError: e });
+      return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
+    }
+
+    if (!Array.isArray(actions) || actions.length === 0) {
+      dumpUnparsableAuditResponse('validate-not-array', { anthropicData: data, text: clean, sceneCount });
+      return res.status(502).json({ error: 'AI response was not a JSON array' });
+    }
+
+    // Keep only well-formed entries; the client tolerates missing ids (treats them as "keep").
+    const cleaned = actions
+      .filter((a) => a && typeof a === 'object' && (typeof a.id === 'number' || typeof a.id === 'string'))
+      .map((a) => ({
+        id: a.id,
+        action: ['keep', 'delete', 'merge'].includes(a.action) ? a.action : 'keep',
+        narration: typeof a.narration === 'string' ? a.narration : undefined,
+        mergeInto: typeof a.mergeInto === 'number' || typeof a.mergeInto === 'string' ? a.mergeInto : undefined,
+      }));
+
+    return res.status(200).json({ actions: cleaned });
+  } catch (err) {
+    console.error('[repetition-audit] phase=unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -72,6 +261,9 @@ export default async function handler(req, res) {
     console.error('[generate-scenes] phase=config missing ANTHROPIC_API_KEY env var');
     return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
   }
+
+  // Final anti-repetition editorial pass — dispatched before any scene-chunk body validation below.
+  if (req.body?.mode === 'repetition-audit') return repetitionAudit(req, res, apiKey);
 
   // Outer safety net: the phase-specific catches below should handle everything, but this
   // guarantees we never let an uncaught exception fall through to a platform-level 502.

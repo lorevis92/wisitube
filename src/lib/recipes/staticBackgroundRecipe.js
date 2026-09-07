@@ -26,6 +26,7 @@ import { publishToYoutube } from '../youtubePublishEngine';
 import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { withTimeout } from '../asyncTimeout';
+import { auditScriptRepetition, describeAudit } from '../repetitionAudit';
 
 // Hang guards for render/thumbnail/publish — see fullPipelineRecipe.js's identical constants.
 const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
@@ -505,6 +506,24 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   } catch (err) {
     await logStep(channelId, videoId, 'scenes', 'error', String(err?.message || err));
     throw err;
+  }
+
+  // ---- Repetition audit (one-shot, right after the last scene, before any media) ----
+  // Same editorial keep/delete/merge pass fullPipelineRecipe.js runs — even more useful here, where
+  // the whole video is narration and a restated point has nowhere to hide. Never throws; a failed
+  // or over-aggressive audit leaves the script untouched. Merges here only combine narration (this
+  // content type has no image beats). Gated by repetitionAuditDone against a double run on resume.
+  if (!project.repetitionAuditDone) {
+    const audit = await auditScriptRepetition(project.scenes, { title: plan.title, language: settings.language });
+    const message = describeAudit(audit);
+    if (!audit.skipped && audit.summary && (audit.summary.removed || audit.summary.mergedPairs)) {
+      project = { ...project, scenes: audit.scenes, totalScenes: audit.scenes.length, repetitionAuditDone: true };
+    } else {
+      project = { ...project, repetitionAuditDone: true };
+    }
+    await persist();
+    await logStep(channelId, videoId, 'scenes', 'success', message);
+    report('scenes', message);
   }
   }
 

@@ -33,6 +33,7 @@ import { runLocalExport, exportDateString, localExportPreflight } from '../local
 import { withTimeout } from '../asyncTimeout';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { createShortRecord } from '../shortsEngine';
+import { auditScriptRepetition, describeAudit } from '../repetitionAudit';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
@@ -709,6 +710,26 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     } catch (err) {
       await logStep(channelId, videoId, 'scenes', 'error', String(err?.message || err));
       throw err;
+    }
+
+    // ---- Repetition audit (one-shot, right after the last scene, before any media) ----
+    // A senior-editor pass over the whole assembled script: keep / delete / merge per scene, so
+    // duplicated facts, restated conclusions and overlapping sections are cut BEFORE a single image
+    // or voice line is paid for. Deliberately OUTSIDE the scenes try/catch above and driven by a
+    // helper that never throws — a failed or over-aggressive audit leaves the script exactly as
+    // written and the pipeline moves on. Gated by repetitionAuditDone so a later resume can't run
+    // it twice.
+    if (!project.repetitionAuditDone) {
+      const audit = await auditScriptRepetition(project.scenes, { title: plan.title, language: settings.language });
+      const message = describeAudit(audit);
+      if (!audit.skipped && audit.summary && (audit.summary.removed || audit.summary.mergedPairs)) {
+        project = { ...project, scenes: audit.scenes, totalScenes: audit.scenes.length, repetitionAuditDone: true };
+      } else {
+        project = { ...project, repetitionAuditDone: true };
+      }
+      await persist();
+      await logStep(channelId, videoId, 'scenes', 'success', message);
+      report('scenes', message);
     }
   }
 
