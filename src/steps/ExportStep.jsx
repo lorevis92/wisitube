@@ -106,6 +106,10 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   // not just after a fresh upload in this one.
   const [ytVideoId, setYtVideoId] = useState(project.youtubeVideoId || '');
   const [ytErrors, setYtErrors] = useState({}); // { upload, thumbnail, captions, playlist }
+  // Per-phase "it just worked" markers, so a retry that succeeds says so instead of silently
+  // flipping the button label back — { thumbnail, captions, playlist, upload }. Cleared at the start
+  // of the next attempt for that phase.
+  const [ytPhaseOk, setYtPhaseOk] = useState({});
   const [ytFormError, setYtFormError] = useState('');
 
   // Local-folder export instead of a YouTube upload — driven by the channel's automation_export_mode
@@ -457,6 +461,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
 
   async function publishToYoutube() {
     setYtFormError('');
+    setYtPhaseOk({});
     if (!videoUrl) {
       setYtFormError('Render the video before publishing to YouTube.');
       return;
@@ -490,28 +495,53 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         await runPlaylist(videoId);
       }
       console.log('[yt-upload] phase=publishToYoutube:exit');
+    } catch (err) {
+      // The run* helpers surface their own per-phase failures through handleYtProgress; this catch
+      // is the backstop for anything that throws OUTSIDE them (a null canvas, an unexpected engine
+      // error) so a failed publish never ends as a silent unhandled rejection.
+      console.error('[ExportStep] publishToYoutube failed', err);
+      setYtFormError(`Publish failed: ${String(err?.message || err)}`);
     } finally {
       setYtBusy(false);
     }
   }
 
+  // A single per-phase retry from the "already published" panel (or the per-phase error rows). Every
+  // click now ends with visible feedback: a green "✓ …" on success, a red error row on failure
+  // (either the run* helper's own onProgress error, or this catch for anything thrown outside them).
   async function retryPhase(phase) {
     setYtBusy(true);
+    setYtErrors((e) => ({ ...e, [phase]: null }));
+    setYtPhaseOk((o) => ({ ...o, [phase]: false }));
+    let ok = false;
+    // Whether this phase actually had something to do — a captions/playlist retry with the toggle
+    // off returns true as a no-op, and "✓ updated" would be a lie in that case.
+    let didWork = true;
     try {
       if (phase === 'upload') {
         const videoId = await runUpload();
+        ok = !!videoId;
         if (videoId) {
           await runThumbnail(videoId);
           await runCaptions(videoId);
           await runPlaylist(videoId);
         }
       } else if (phase === 'thumbnail') {
-        await runThumbnail(ytVideoId);
+        ok = await runThumbnail(ytVideoId);
       } else if (phase === 'captions') {
-        await runCaptions(ytVideoId);
+        ok = await runCaptions(ytVideoId);
+        didWork = ytUploadCaptions;
       } else if (phase === 'playlist') {
-        await runPlaylist(ytVideoId);
+        ok = await runPlaylist(ytVideoId);
+        didWork = ytAddToPlaylist && !!project.series;
       }
+      // run* return false ONLY after already emitting a kind:'error' through handleYtProgress, so a
+      // false here means the error row is about to render — nothing more to add. A true means it
+      // actually went through.
+      if (ok) setYtPhaseOk((o) => ({ ...o, [phase]: didWork ? 'done' : 'skip' }));
+    } catch (err) {
+      console.error('[ExportStep] retryPhase failed', phase, err);
+      setYtErrors((e) => ({ ...e, [phase]: String(err?.message || err) }));
     } finally {
       setYtBusy(false);
     }
@@ -828,19 +858,36 @@ export default function ExportStep({ project, setProject, settings, channel, cha
                   </button>
                 ))}
               </div>
-              {['thumbnail', 'captions', 'playlist'].map(
-                (key) =>
-                  ytErrors[key] && (
+              {['thumbnail', 'captions', 'playlist'].map((key) => {
+                const phaseLabel = key === 'playlist' ? 'Series playlist' : key.charAt(0).toUpperCase() + key.slice(1);
+                if (ytErrors[key]) {
+                  return (
                     <div
                       key={key}
                       style={{ marginTop: 10, padding: 10, border: `1px solid ${T.primaryBorder}`, background: T.primaryLight, borderRadius: 4 }}
                     >
                       <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
-                        <strong>{key} failed:</strong> {ytErrors[key]}
+                        <strong>{phaseLabel} failed:</strong> {ytErrors[key]}
                       </div>
                     </div>
-                  )
-              )}
+                  );
+                }
+                if (ytPhaseOk[key] === 'done') {
+                  return (
+                    <div key={key} style={{ marginTop: 10, fontSize: 12, color: T.green, fontFamily: FONT.ui }}>
+                      ✓ {phaseLabel} updated — YouTube can take a few minutes to show the change.
+                    </div>
+                  );
+                }
+                if (ytPhaseOk[key] === 'skip') {
+                  return (
+                    <div key={key} style={{ marginTop: 10, fontSize: 12, color: T.textMuted, fontFamily: FONT.ui }}>
+                      Nothing to do for {phaseLabel.toLowerCase()} — that option is off for this video.
+                    </div>
+                  );
+                }
+                return null;
+              })}
             </div>
           ) : localExportMode ? (
             <>
@@ -906,32 +953,35 @@ export default function ExportStep({ project, setProject, settings, channel, cha
                 { key: 'thumbnail', label: 'Thumbnail' },
                 { key: 'captions', label: 'Captions' },
                 { key: 'playlist', label: 'Series playlist' },
-              ].map(
-                ({ key, label: phaseLabel }) =>
-                  ytErrors[key] && (
-                    <div
-                      key={key}
-                      style={{
-                        marginTop: 10,
-                        padding: 10,
-                        border: `1px solid ${T.primaryBorder}`,
-                        background: T.primaryLight,
-                        borderRadius: 4,
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: 10,
-                        flexWrap: 'wrap',
-                      }}
-                    >
-                      <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
-                        <strong>{phaseLabel} failed:</strong> {ytErrors[key]}
-                      </div>
-                      <button onClick={() => retryPhase(key)} disabled={ytBusy} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
-                        Retry {phaseLabel.toLowerCase()}
-                      </button>
+              ].map(({ key, label: phaseLabel }) =>
+                ytErrors[key] ? (
+                  <div
+                    key={key}
+                    style={{
+                      marginTop: 10,
+                      padding: 10,
+                      border: `1px solid ${T.primaryBorder}`,
+                      background: T.primaryLight,
+                      borderRadius: 4,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 10,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div style={{ fontSize: 12, color: T.primary, fontFamily: FONT.ui }}>
+                      <strong>{phaseLabel} failed:</strong> {ytErrors[key]}
                     </div>
-                  )
+                    <button onClick={() => retryPhase(key)} disabled={ytBusy} style={{ ...btnGhost, padding: '6px 12px', fontSize: 11 }}>
+                      Retry {phaseLabel.toLowerCase()}
+                    </button>
+                  </div>
+                ) : ytPhaseOk[key] === 'done' && key !== 'upload' ? (
+                  <div key={key} style={{ marginTop: 10, fontSize: 12, color: T.green, fontFamily: FONT.ui }}>
+                    ✓ {phaseLabel} updated — YouTube can take a few minutes to show the change.
+                  </div>
+                ) : null
               )}
 
               {ytVideoId && !ytErrors.upload && (
