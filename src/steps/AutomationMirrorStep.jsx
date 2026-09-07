@@ -41,7 +41,11 @@ const LOG_PHASES = new Set(['starting', 'suggestion', 'video-record', 'outline',
 // Exported so App.jsx's Navbar idle-video-count badge polls listIncompleteVideos at the exact same
 // cadence this page's own dashboard lists ("Videos in progress" / "Recently completed") do — one
 // shared constant, never two numbers that could quietly drift apart.
-export const INCOMPLETE_POLL_MS = 30000;
+// 2 min. The incomplete/completed counts change on the order of minutes (a batch job resolving, a
+// cycle advancing a phase) — a 30s poll was pulling the video table 4x more often than anything on
+// screen actually moves. Both pollers that use this also skip entirely while their tab is hidden
+// and refresh immediately on becoming visible again, so a re-focused tab is never stale.
+export const INCOMPLETE_POLL_MS = 120000;
 
 // Same status-dot logic as StoryboardStep.jsx's own statusDot, minus the title tooltip (there's no
 // error text worth surfacing here since this view has no retry button to act on it anyway).
@@ -153,6 +157,9 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
   // machine sleeps), so the interval alone isn't enough to keep a re-focused tab current.
   useEffect(() => {
     const refresh = () => {
+      // Don't hit the network while nobody's looking — the visibilitychange listener below fires an
+      // immediate refresh the moment the tab is shown again.
+      if (document.visibilityState === 'hidden') return;
       loadIncomplete();
       loadCompleted();
     };

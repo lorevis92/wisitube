@@ -242,6 +242,8 @@ export default function App() {
     }
     let cancelled = false;
     async function poll() {
+      // Skip while the tab is backgrounded — the visibilitychange listener refreshes on return.
+      if (document.visibilityState === 'hidden') return;
       try {
         const items = await listIncompleteVideos(session.user.id);
         if (!cancelled) setIdleVideoCount(items.filter((v) => v.waitingReason === 'idle').length);
@@ -251,9 +253,14 @@ export default function App() {
     }
     poll();
     const id = setInterval(poll, INCOMPLETE_POLL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') poll();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [session?.user?.id]);
 

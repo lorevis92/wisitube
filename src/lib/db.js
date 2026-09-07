@@ -256,6 +256,28 @@ export async function listVideosByChannel(channelId) {
   return (data || []).map(fromVideoRow);
 }
 
+// listVideosByChannel with a WHERE narrowing pushed to Postgres via jsonb-path filters, so the
+// (often large) `project` blob of videos that are provably not of interest to the caller never
+// crosses the network. Used only by the ~30-120s polling paths (listIncompleteVideos /
+// listRecentCompletedVideos), which otherwise pulled the entire video table every tick just to keep
+// a handful of rows. `applyFilter(query) => query` adds the .is()/.or() clauses; the JS-side filter
+// in each caller is kept unchanged as the authority — this only ever removes rows those callers
+// would have skipped anyway. Every field it filters on (thumbnailStoragePath, youtubeVideoId,
+// youtubeUploadStarted, localExportedAt) is only ever absent / JSON null / a real value in practice
+// (never an empty string), so `project->>key is null` is exactly `!video[key]`.
+async function listVideosByChannelWhere(channelId, applyFilter) {
+  const base = supabase.from('wisitube_videos').select('*').eq('channel_id', channelId).order('updated_at', { ascending: false });
+  const { data, error } = await applyFilter(base);
+  if (error) {
+    // The jsonb-path filter is a pure traffic optimisation — never let a PostgREST quirk with the
+    // `project->>key` syntax break a poll. Fall back to the (heavier) unfiltered read; the caller's
+    // own JS filter still produces the correct list.
+    console.error('[db] listVideosByChannelWhere filter failed, falling back to full read', error);
+    return listVideosByChannel(channelId);
+  }
+  return (data || []).map(fromVideoRow);
+}
+
 // Videos on this channel whose closing CTA promised a specific future topic that hasn't been
 // addressed by a later video yet — fed to api/program-manager.js as pendingPromises (see
 // ChannelDashboardStep.jsx/fullPipelineRecipe.js/staticBackgroundRecipe.js, every call site of that
@@ -655,7 +677,16 @@ export async function listIncompleteVideos(userId) {
   const results = [];
   for (const channel of channels) {
     // eslint-disable-next-line no-await-in-loop
-    const videos = await listVideosByChannel(channel.id);
+    const videos = await listVideosByChannelWhere(channel.id, (q) =>
+      // Everything determineResumePhase treats as terminal-for-automation and every "has a
+      // thumbnail" case, excluded server-side so their `project` never transfers. The JS filters
+      // below stay the authority; this can only drop rows they'd skip too.
+      q
+        .is('project->>thumbnailStoragePath', null)
+        .is('project->>youtubeVideoId', null)
+        .is('project->>youtubeUploadStarted', null)
+        .is('project->>localExportedAt', null)
+    );
     for (const v of videos) {
       // Thumbnail created (or already published, which implies it) → "completed", shown in
       // listRecentCompletedVideos instead — see that function's own comment.
@@ -733,8 +764,22 @@ export async function listRecentCompletedVideos(userId, limit = 10) {
   const channels = await listChannels();
   const results = [];
   for (const channel of channels) {
+    // "completed" = has a thumbnail OR is published. Two narrowed queries (each the exact
+    // .not(col,'is',null) form already used by listPendingPromises), merged by id — bulletproof and
+    // avoids pulling every in-progress video's `project` on the ~120s poll. The JS filter below is
+    // still the authority.
     // eslint-disable-next-line no-await-in-loop
-    const videos = await listVideosByChannel(channel.id);
+    const [byThumb, byPublished] = await Promise.all([
+      listVideosByChannelWhere(channel.id, (q) => q.not('project->>thumbnailStoragePath', 'is', null)),
+      listVideosByChannelWhere(channel.id, (q) => q.not('project->>youtubeVideoId', 'is', null)),
+    ]);
+    const seen = new Set();
+    const videos = [];
+    for (const v of [...byThumb, ...byPublished]) {
+      if (seen.has(v.id)) continue;
+      seen.add(v.id);
+      videos.push(v);
+    }
     for (const v of videos) {
       if (!v.thumbnailStoragePath && !v.youtubeVideoId) continue; // no thumbnail yet — still in progress
       // Fully produced (render + thumbnail done) but never published, AND publishing it now is a
