@@ -385,6 +385,13 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists automation_publish_days jsonb not null default '[0,1,2,3,4,5,6]'::jsonb;
+//
+// Required one-time setup for channel-level recurring characters (see src/lib/channelCharacters.js) —
+// an array of { id, name, description, photoStoragePath } auto-injected into every new video's
+// character bible on this channel so a recurring figure keeps the same id/name/look across videos:
+//
+//   alter table wisitube_channels
+//     add column if not exists channel_characters jsonb not null default '[]'::jsonb;
 
 function fromChannelRow(row) {
   return {
@@ -477,6 +484,20 @@ function fromChannelRow(row) {
     // Days of the week (JS Date.getDay(): 0=Sun … 6=Sat) this channel may publish on. A missing
     // column / non-array falls back to all seven (publish any day). An empty array means "never".
     automation_publish_days: Array.isArray(row.automation_publish_days) ? row.automation_publish_days : [0, 1, 2, 3, 4, 5, 6],
+    // Recurring characters defined once at the channel level (ChannelDashboardStep.jsx) and merged
+    // into every new video's character bible by src/lib/channelCharacters.js — each is
+    // { id, name, description, photoStoragePath }. photoStoragePath (optional) points at a
+    // channel-defaults Storage path, reused via the reference-photo mechanism at scene time.
+    channel_characters: Array.isArray(row.channel_characters)
+      ? row.channel_characters
+          .filter((c) => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim())
+          .map((c) => ({
+            id: typeof c.id === 'string' && c.id.trim() ? c.id.trim() : '',
+            name: c.name.trim(),
+            description: typeof c.description === 'string' ? c.description : '',
+            photoStoragePath: typeof c.photoStoragePath === 'string' && c.photoStoragePath ? c.photoStoragePath : null,
+          }))
+      : [],
   };
 }
 
@@ -538,6 +559,7 @@ export async function saveChannel(channel) {
     automation_publish_days: Array.isArray(channel.automation_publish_days)
       ? channel.automation_publish_days
       : [0, 1, 2, 3, 4, 5, 6],
+    channel_characters: Array.isArray(channel.channel_characters) ? channel.channel_characters : [],
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());
   return fromChannelRow(data);

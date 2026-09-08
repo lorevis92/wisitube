@@ -34,6 +34,7 @@ import { withTimeout } from '../asyncTimeout';
 import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
 import { createShortRecord, synthesizeShortThumbnailConcept } from '../shortsEngine';
 import { auditScriptRepetition, describeAudit } from '../repetitionAudit';
+import { mergeChannelCharacters, channelCharactersForPrompt, channelCharacterReferenceStubs } from '../channelCharacters';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
 import { STYLES } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
@@ -590,7 +591,8 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             imageProvider: settings.imageProvider,
             characterHints: [],
             generalNotes: '',
-            references: [],
+            references: channelCharacterReferenceStubs(channel),
+            channelCharacters: channelCharactersForPrompt(channel),
             creativeOverride: channel.prompt_overrides?.outline || null,
             channelIntroEnabled: channel.automation_channel_intro === true,
             niche: channel.niche || '',
@@ -599,12 +601,23 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         const outlineData = await res.json();
         if (!res.ok) throw new Error(outlineData.error || 'Outline generation failed');
 
-        const characterBible = (outlineData.character_bible || []).map((c) => ({
+        let characterBible = (outlineData.character_bible || []).map((c) => ({
           id: c.id || crypto.randomUUID(),
           name: c.name || '',
           baseDescription: c.base_description || '',
           variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
         }));
+
+        // Same channel-recurring-characters merge the manual flow does (App.jsx handleOutlineReady) —
+        // channel characters into the bible, their reference photos into `references`.
+        let references = [];
+        try {
+          const merged = await mergeChannelCharacters(channel, characterBible, []);
+          characterBible = merged.characterBible;
+          references = merged.references;
+        } catch (err) {
+          console.error('[fullPipelineRecipe] channel character merge failed', err);
+        }
 
         plan = {
           title: suggestion.title,
@@ -613,7 +626,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           tags: outlineData.tags || [],
           thumbnails: outlineData.thumbnail_concepts || [],
           characterBible,
-          references: [],
+          references,
           outline: outlineData.outline || [],
           totalScenes: outlineData.total_scenes || 0,
         };
@@ -662,7 +675,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           format: settings.format,
           imageProvider: settings.imageProvider,
           characterBible: plan.characterBible,
-          references: [],
+          references: (plan.references || []).map((r) => ({ id: r.id, label: r.label })),
           creativeOverride: channel.prompt_overrides?.scenes || null,
           channelIntroEnabled: channel.automation_channel_intro === true,
           niche: channel.niche || '',

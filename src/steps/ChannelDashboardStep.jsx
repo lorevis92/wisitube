@@ -188,6 +188,15 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [cardMenuOpenFor, setCardMenuOpenFor] = useState(null);
   const [archivingId, setArchivingId] = useState(null); // videoId being archived on demand
 
+  // Channel recurring characters (see src/lib/channelCharacters.js) — edited here, persisted to
+  // channel.channel_characters. `chars` is the local working copy (seeded on load); text edits are
+  // local until blur, add/remove/photo persist immediately, same as niche/notes above.
+  const [channelCharsOpen, setChannelCharsOpen] = useState(false);
+  const [chars, setChars] = useState([]);
+  const [charPhotoUrls, setCharPhotoUrls] = useState({});
+  const [charBusyId, setCharBusyId] = useState(null);
+  const [charError, setCharError] = useState('');
+
   // Escape closes the "how should this Short publish?" modal (same affordance as ImageLightbox /
   // ProgramManagerChat). No-op while nothing is generating; the modal itself also closes on the
   // choice and on an outside click.
@@ -228,6 +237,26 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     };
   }, [channel?.automation_static_bg_image_path]);
 
+  // Short-lived signed URLs to preview each channel character's reference photo.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const urls = {};
+      for (const c of chars || []) {
+        if (!c?.photoStoragePath) continue;
+        try {
+          urls[c.id] = await getMediaUrl(c.photoStoragePath);
+        } catch (err) {
+          console.error('[ChannelDashboardStep] could not sign channel character photo', err);
+        }
+      }
+      if (!cancelled) setCharPhotoUrls(urls);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chars]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -237,6 +266,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       setName(ch?.name || '');
       setNiche(ch?.niche || '');
       setNotes(ch?.editorialNotes || '');
+      setChars(Array.isArray(ch?.channel_characters) ? ch.channel_characters : []);
       // App.jsx holds the single source of truth for "the currently open channel" — every load and
       // every local mutation below reports here, so components that never do their own fetch (like
       // ExportStep) can't end up looking at a stale copy of e.g. the YouTube connection state.
@@ -554,6 +584,64 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       onChannelChange?.(updated);
     } catch (err) {
       console.error('[ChannelDashboardStep] failed to save static background defaults', err);
+    }
+  }
+
+  // ---- Channel recurring characters ----
+  async function persistChars(next) {
+    setChars(next);
+    setCharError('');
+    try {
+      const updated = await updateChannelFields(channelId, { channel_characters: next });
+      if (updated) {
+        setChannel(updated);
+        onChannelChange?.(updated);
+      }
+    } catch (err) {
+      setCharError('Save failed: ' + String(err.message || err));
+    }
+  }
+
+  function addChar() {
+    if (!channelCharsOpen) setChannelCharsOpen(true);
+    persistChars([
+      ...(chars || []),
+      { id: `chc_${Math.random().toString(36).slice(2, 10)}`, name: '', description: '', photoStoragePath: null },
+    ]);
+  }
+
+  function updateCharLocal(id, patch) {
+    setChars((cs) => (cs || []).map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  }
+
+  function commitChars() {
+    persistChars(chars || []);
+  }
+
+  async function removeChar(id) {
+    if (
+      !(await confirm({
+        title: 'Remove this character?',
+        body: 'Videos already generated keep it. New videos on this channel will no longer include it automatically.',
+        confirmLabel: 'Remove',
+        danger: true,
+      }))
+    )
+      return;
+    persistChars((chars || []).filter((c) => c.id !== id));
+  }
+
+  async function uploadCharPhoto(id, file) {
+    if (!file) return;
+    setCharBusyId(id);
+    setCharError('');
+    try {
+      const path = await uploadMedia(userId, channelDefaultsPseudoVideoId(channelId), 'channel-character', id, file);
+      await persistChars((chars || []).map((c) => (c.id === id ? { ...c, photoStoragePath: path } : c)));
+    } catch (err) {
+      setCharError('Photo upload failed: ' + String(err.message || err));
+    } finally {
+      setCharBusyId(null);
     }
   }
 
@@ -1206,6 +1294,132 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                 )}
               </div>
             )}
+
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 16, paddingTop: 16 }}>
+              <button
+                onClick={() => setChannelCharsOpen((v) => !v)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  width: '100%',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={label}>Channel characters{(chars || []).length ? ` (${(chars || []).length})` : ''}</span>
+                <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+                  {channelCharsOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+                </span>
+              </button>
+
+              {channelCharsOpen && (
+                <>
+                  <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.5 }}>
+                    Recurring characters added automatically to the character bible of every new video on this channel — same id,
+                    name and look each time. Individual videos can still introduce their own extra characters.
+                  </div>
+
+                  {(chars || []).map((c) => (
+                    <div
+                      key={c.id}
+                      style={{
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 4,
+                        padding: 10,
+                        marginTop: 10,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                        {charPhotoUrls[c.id] ? (
+                          <img
+                            src={charPhotoUrls[c.id]}
+                            alt={c.name || 'character'}
+                            style={{ width: 54, height: 54, objectFit: 'cover', borderRadius: 4, border: `1px solid ${T.border}`, flexShrink: 0 }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: 54,
+                              height: 54,
+                              borderRadius: 4,
+                              border: `1px dashed ${T.border}`,
+                              flexShrink: 0,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: 9,
+                              color: T.textMuted,
+                              fontFamily: FONT.ui,
+                            }}
+                          >
+                            no photo
+                          </div>
+                        )}
+                        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          <input
+                            value={c.name || ''}
+                            onChange={(e) => updateCharLocal(c.id, { name: e.target.value })}
+                            onBlur={commitChars}
+                            placeholder="Character name"
+                            style={inputStyle}
+                          />
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <label
+                              style={{ ...btnGhost, cursor: 'pointer', padding: '4px 10px', fontSize: 11, display: 'inline-flex', alignItems: 'center' }}
+                            >
+                              {charBusyId === c.id ? 'Uploading…' : charPhotoUrls[c.id] ? 'Replace photo' : '+ Reference photo'}
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0];
+                                  e.target.value = '';
+                                  uploadCharPhoto(c.id, f);
+                                }}
+                                style={{ display: 'none' }}
+                              />
+                            </label>
+                            {c.photoStoragePath && (
+                              <button
+                                onClick={() => persistChars((chars || []).map((x) => (x.id === c.id ? { ...x, photoStoragePath: null } : x)))}
+                                style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
+                              >
+                                ✕ Remove photo
+                              </button>
+                            )}
+                            <button
+                              onClick={() => removeChar(c.id)}
+                              style={{ ...btnGhost, padding: '4px 10px', fontSize: 11, color: T.primary, borderColor: T.primaryBorder, marginLeft: 'auto' }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <ExpandableTextarea
+                        value={c.description || ''}
+                        onChange={(e) => updateCharLocal(c.id, { description: e.target.value })}
+                        onBlur={commitChars}
+                        placeholder="Physical description — hair, build, clothing, defining features. Always used for Pollinations; for premium image models the name alone is often enough."
+                        rows={2}
+                        style={{ ...inputStyle, resize: 'vertical' }}
+                      />
+                    </div>
+                  ))}
+
+                  <button onClick={addChar} style={{ ...btnGhost, marginTop: 10, padding: '6px 12px', fontSize: 11 }}>
+                    + Add character
+                  </button>
+                  {charError && <div style={{ marginTop: 8, fontSize: 11, color: T.primary, fontFamily: FONT.ui }}>{charError}</div>}
+                </>
+              )}
+            </div>
           </>
         )}
       </div>

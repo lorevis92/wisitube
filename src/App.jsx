@@ -23,6 +23,7 @@ import { supabase } from './lib/supabase';
 import { resumePendingBatches } from './lib/batchResumption';
 import { rehydrateProjectMedia } from './lib/mediaRehydration';
 import { uploadMedia } from './lib/mediaStorage';
+import { mergeChannelCharacters } from './lib/channelCharacters';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -504,12 +505,24 @@ export default function App() {
         .map(async (r) => ({ id: r.id, label: r.label, file: new Blob([await r.file.arrayBuffer()], { type: r.file.type }) }))
     );
 
-    const characterBible = (outlineData.character_bible || []).map((c) => ({
+    let characterBible = (outlineData.character_bible || []).map((c) => ({
       id: c.id || crypto.randomUUID(),
       name: c.name || '',
       baseDescription: c.base_description || '',
       variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
     }));
+
+    // Fold in the channel's recurring characters (name/description into the bible, any reference
+    // photo into `references` via the same mechanism as manual uploads). Best-effort — a channel
+    // with none, or an unreachable photo, just falls through unchanged.
+    let mergedReferences = references;
+    try {
+      const merged = await mergeChannelCharacters(currentChannel, characterBible, references);
+      characterBible = merged.characterBible;
+      mergedReferences = merged.references;
+    } catch (err) {
+      console.error('[handleOutlineReady] channel character merge failed', err);
+    }
 
     // CreateStep.jsx's background/thumbnail controls only ever produce settings-scoped, in-memory
     // data (no videoId existed yet while the user was configuring them there) — resolve them into
@@ -555,7 +568,7 @@ export default function App() {
       tags: outlineData.tags || [],
       thumbnails: outlineData.thumbnail_concepts || [],
       characterBible,
-      references,
+      references: mergedReferences,
       outline: outlineData.outline || [],
       totalScenes: outlineData.total_scenes || 0,
       staticBackground,

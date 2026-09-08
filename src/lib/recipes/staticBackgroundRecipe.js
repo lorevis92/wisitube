@@ -27,6 +27,7 @@ import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { withTimeout } from '../asyncTimeout';
 import { auditScriptRepetition, describeAudit } from '../repetitionAudit';
+import { mergeChannelCharacters, channelCharactersForPrompt, channelCharacterReferenceStubs } from '../channelCharacters';
 
 // Hang guards for render/thumbnail/publish — see fullPipelineRecipe.js's identical constants.
 const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
@@ -388,7 +389,8 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           imageProvider: settings.imageProvider,
           characterHints: [],
           generalNotes: '',
-          references: [],
+          references: channelCharacterReferenceStubs(channel),
+          channelCharacters: channelCharactersForPrompt(channel),
           creativeOverride: channel.prompt_overrides?.outline || null,
           channelIntroEnabled: channel.automation_channel_intro === true,
           niche: channel.niche || '',
@@ -397,12 +399,22 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       const outlineData = await res.json();
       if (!res.ok) throw new Error(outlineData.error || 'Outline generation failed');
 
-      const characterBible = (outlineData.character_bible || []).map((c) => ({
+      let characterBible = (outlineData.character_bible || []).map((c) => ({
         id: c.id || crypto.randomUUID(),
         name: c.name || '',
         baseDescription: c.base_description || '',
         variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
       }));
+
+      // Same channel-recurring-characters merge as the full pipeline / manual flow.
+      let references = [];
+      try {
+        const merged = await mergeChannelCharacters(channel, characterBible, []);
+        characterBible = merged.characterBible;
+        references = merged.references;
+      } catch (err) {
+        console.error('[staticBackgroundRecipe] channel character merge failed', err);
+      }
 
       plan = {
         title: suggestion.title,
@@ -411,7 +423,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         tags: outlineData.tags || [],
         thumbnails: outlineData.thumbnail_concepts || [],
         characterBible,
-        references: [],
+        references,
         outline: outlineData.outline || [],
         totalScenes: outlineData.total_scenes || 0,
       };

@@ -4,6 +4,7 @@ import { STYLES } from '../lib/pollinations';
 import { estimateTotalSeconds, estimateScenesChunkSeconds } from '../lib/estimator';
 import { isModelWarm } from '../lib/tts';
 import FullScreenLoader from '../components/FullScreenLoader';
+import { channelCharactersForPrompt, channelCharacterReferenceStubs } from '../lib/channelCharacters';
 
 export default function TitleSelectStep({ titleOptions, settings, onOutlineReady, onBack, channel }) {
   const [loading, setLoading] = useState(false);
@@ -13,7 +14,12 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
     setError('');
     setLoading(true);
     try {
-      const references = (settings.references || []).filter((r) => r.label.trim()).map((r) => ({ id: r.id, label: r.label }));
+      const references = [
+        ...(settings.references || []).filter((r) => r.label.trim()).map((r) => ({ id: r.id, label: r.label })),
+        // Channel recurring characters that carry a reference photo — same reference mechanism as
+        // the manually-uploaded ones above (merged into project.references in App.jsx after this).
+        ...channelCharacterReferenceStubs(channel),
+      ];
       const characterHints = (settings.characterHints || [])
         .filter((c) => c && (c.name?.trim() || c.details?.trim()))
         .map((c) => ({ name: (c.name || '').trim(), details: (c.details || '').trim() }));
@@ -37,6 +43,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           characterHints,
           generalNotes: (settings.generalNotes || '').trim(),
           references,
+          channelCharacters: channelCharactersForPrompt(channel),
           creativeOverride: channel?.prompt_overrides?.outline || null,
           // Per-video override (CreateStep.jsx's "Include channel intro at video start" checkbox,
           // seeded from the channel default) falls back to the channel default itself when unset.

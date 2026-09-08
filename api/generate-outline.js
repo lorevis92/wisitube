@@ -411,7 +411,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
-    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground, channelIntroEnabled, niche;
+    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground, channelIntroEnabled, niche, channelCharacters;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -481,6 +481,20 @@ export default async function handler(req, res) {
 
       creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
 
+      // Channel-level recurring characters (see src/lib/channelCharacters.js) — { id, name,
+      // description, hasPhoto }. Injected into the character-bible instructions below so a figure
+      // the channel keeps covering keeps the exact same id/name/look across every video.
+      channelCharacters = Array.isArray(body.channelCharacters)
+        ? body.channelCharacters
+            .filter((c) => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim() && typeof c.id === 'string' && c.id.trim())
+            .map((c) => ({
+              id: c.id.trim(),
+              name: c.name.trim(),
+              description: typeof c.description === 'string' ? c.description.trim() : '',
+              hasPhoto: c.hasPhoto === true,
+            }))
+        : [];
+
       // Channel self-introduction (ChannelDashboardStep.jsx's "Include channel intro at video
       // start" toggle, per-video overridable from CreateStep.jsx) — only meaningful together with
       // a non-empty niche description, since that's what the welcome is built from.
@@ -515,6 +529,23 @@ The image model has strong built-in world knowledge and will recognize well-know
 These reference photos will be available when illustrating individual scenes later, each with a label describing who/what it depicts:
 ${refs.map((r) => `- label: "${r.label}"`).join('\n')}
 Keep the character_bible consistent with these — if a reference photo's label describes a character, that character's name and variants in character_bible should align with it.`
+      : '';
+
+    // Recurring characters the channel has defined once and reuses across many videos — must keep
+    // the exact same id + name every time so their rendered look stays consistent. Provider-aware
+    // depth mirrors providerAwareCharacterNote above. Skipped for static_background (no per-scene
+    // images, so no character rendering to keep consistent).
+    const channelCharacterContext = channelCharacters.length && !isStaticBackground
+      ? `
+
+RECURRING CHANNEL CHARACTERS — these characters already exist on this channel and recur across many of its videos. Whenever one of them genuinely appears in THIS video's story, you MUST include it in character_bible using the EXACT id and name given here — never invent a new id, never rename it — so its look stays identical from video to video:
+${channelCharacters.map((c) => `- id: "${c.id}", name: "${c.name}"${c.description ? ` — ${c.description}` : ''}${c.hasPhoto ? ' [reference photo available]' : ''}`).join('\n')}
+${
+  imageProvider !== 'pollinations'
+    ? 'For any of the above the image model already recognizes by name, keep base_description minimal or empty; use variants only for story-specific era/costume choices.'
+    : "Copy each description given above into that character's base_description in full — the image model has no built-in knowledge of them and needs the physical description every time."
+}
+Characters this video needs that are NOT in the list above are still fine — give them their own fresh ids that don't collide with these.`
       : '';
 
     // Length guidance — a fixed target (lengthMinutes), the fully content-driven instruction, or
@@ -584,7 +615,7 @@ Rules:
 - ${totalScenesRule}
 - thumbnail_concepts: when this video centers on a real, identifiable person or a well-known named character (the same figures you are listing in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — exactly the same principle as the title naming its real subject, not a generic lookalike description. Only fall back to a generic figure when the video genuinely has no single identifiable person or character at its center.
 - Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).
-- Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}`;
+- Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}${channelCharacterContext}`;
 
     const defaultCreativeDirection = isStaticBackground ? DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND : DEFAULT_CREATIVE_DIRECTION;
     const systemPrompt = `${context}\n\n${creativeOverride || defaultCreativeDirection}\n\n${SCHEMA_INSTRUCTIONS}`;
