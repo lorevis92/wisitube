@@ -54,10 +54,20 @@ const FORMAT_SPEC = {
     // image the provider generates — matches the canvas, so cover-fit is 1:1 (no scaling).
     genW: 1280,
     genH: 720,
-    gradTopFrac: 380 / 720, // → 380
-    textBottomFrac: 56 / 720, // → 56
     baseFontFrac: 110 / 1280, // → 110
     minFontFrac: 48 / 1280, // → 48
+    // The pollinations text overlay used to sit jammed against the bottom edge — right where
+    // YouTube ALWAYS paints the video-duration badge (bottom-right corner) and, on some mobile
+    // layouts, a progress bar along the whole bottom edge. 'safe-center' keeps the whole text block
+    // inside the real safe zone: horizontally centred, vertically centred a touch low, clamped so
+    // nothing crosses ~15% from the top or ~22% from the bottom (extra clearance at the bottom for
+    // the badge + progress bar). The darkening scrim is a soft band behind the text only, not the
+    // whole lower half, so the image's subject stays visible.
+    textLayout: 'safe-center',
+    centerYFrac: 0.55,
+    maxTextWidthFrac: 0.8, // 1280 * 0.8 ≈ 1024 → ~10% margin each side
+    safeTopFrac: 0.15,
+    safeBottomFrac: 0.22,
   },
   '9:16': {
     canvasW: 1080,
@@ -66,6 +76,9 @@ const FORMAT_SPEC = {
     // its aspect ratio equals the canvas's, so it's a clean uniform upscale with no crop.
     genW: 720,
     genH: 1280,
+    // A Short's own thumbnail is only ever seen in the studio/feed, not under Shorts player chrome —
+    // the lower-middle placement (well above the very bottom) already clears everything. Unchanged.
+    textLayout: 'bottom',
     gradTopFrac: 0.44, // gradient covers the bottom ~56%
     textBottomFrac: 0.14, // text baseline ~270px up from the bottom, clear of the Short player chrome
     baseFontFrac: 96 / 1080,
@@ -182,14 +195,7 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
 
   if (effectiveThumbnailProvider === 'pollinations') {
     await document.fonts.ready;
-    // legibility gradient over the text zone
-    const gradTop = Math.round(H * spec.gradTopFrac);
-    const g = ctx.createLinearGradient(0, gradTop, 0, H);
-    g.addColorStop(0, 'rgba(0,0,0,0)');
-    g.addColorStop(1, 'rgba(0,0,0,0.75)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, gradTop, W, H - gradTop);
-    // overlay text
+
     const text = (overlayText || '').toUpperCase();
     const words = text.split(/\s+/).filter(Boolean);
     const lines =
@@ -198,7 +204,7 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
         : [text];
     const baseSize = Math.round(W * spec.baseFontFrac);
     const minSize = Math.round(W * spec.minFontFrac);
-    const maxTextWidth = W - 100;
+    const maxTextWidth = spec.maxTextWidthFrac ? Math.round(W * spec.maxTextWidthFrac) : W - 100;
     let size = baseSize;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
@@ -209,9 +215,51 @@ export async function generateThumbnail(project, { settings, channelId, userId, 
     while (size > minSize && !fit(size)) size -= 6;
     ctx.font = `800 ${size}px Syne, sans-serif`;
     const lineH = size * 1.08;
-    const bottomMargin = Math.round(H * spec.textBottomFrac);
+
+    // Per-line baseline Y.
+    let baselines;
+    if (spec.textLayout === 'safe-center') {
+      // Approximate cap height / descent for the alphabetic baseline, so the *visual* block can be
+      // clamped into the safe band rather than the baselines themselves.
+      const ascent = size * 0.72;
+      const descent = size * 0.2;
+      const safeTop = Math.round(H * spec.safeTopFrac);
+      const safeBottom = Math.round(H - H * spec.safeBottomFrac);
+      // b0 that puts the block's visual centre at centerYFrac.
+      let b0 = Math.round(H * spec.centerYFrac) - ((lines.length - 1) * lineH) / 2 + (ascent - descent) / 2;
+      // Clamp so the visual top/bottom stay inside [safeTop, safeBottom].
+      b0 = Math.max(safeTop + ascent, Math.min(safeBottom - descent - (lines.length - 1) * lineH, b0));
+      baselines = lines.map((_, i) => Math.round(b0 + i * lineH));
+    } else {
+      // 9:16: bottom-anchored, unchanged.
+      const bottomMargin = Math.round(H * spec.textBottomFrac);
+      baselines = lines.map((_, i) => H - bottomMargin - (lines.length - 1 - i) * lineH);
+    }
+
+    // Legibility scrim.
+    if (spec.textLayout === 'safe-center') {
+      // A soft dark band behind the text only — top and bottom of the image stay clear.
+      const bandTop = Math.min(...baselines) - size * 0.9;
+      const bandBottom = Math.max(...baselines) + size * 0.35;
+      const feather = Math.round(H * 0.11);
+      const g = ctx.createLinearGradient(0, bandTop - feather, 0, bandBottom + feather);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(0.3, 'rgba(0,0,0,0.6)');
+      g.addColorStop(0.7, 'rgba(0,0,0,0.6)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, bandTop - feather, W, bandBottom + feather - (bandTop - feather));
+    } else {
+      const gradTop = Math.round(H * spec.gradTopFrac);
+      const g = ctx.createLinearGradient(0, gradTop, 0, H);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(1, 'rgba(0,0,0,0.75)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, gradTop, W, H - gradTop);
+    }
+
     lines.forEach((ln, i) => {
-      const y = H - bottomMargin - (lines.length - 1 - i) * lineH;
+      const y = baselines[i];
       ctx.lineWidth = size * 0.14;
       ctx.lineJoin = 'round';
       ctx.strokeStyle = '#000000';
