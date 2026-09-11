@@ -29,6 +29,7 @@ import { generateImage } from '../lib/sceneOrchestrator';
 import { priceForImage } from '../lib/imageProviders';
 import ExpandableTextarea from '../components/ExpandableTextarea';
 import { useConfirm } from '../components/useConfirm';
+import InfoHint from '../components/InfoHint';
 
 // A channel-level default asset isn't tied to any one video, but uploadMedia (src/lib/mediaStorage.js)
 // is keyed by (userId, videoId, kind, id) — reusing it here with a stable per-channel pseudo-videoId
@@ -48,10 +49,26 @@ const CONTENT_TYPES = [
 ];
 
 const PROMPT_STAGES = [
-  { key: 'titles', stageLabel: 'Titles & Angles' },
-  { key: 'outline', stageLabel: 'Outline & Structure' },
-  { key: 'scenes', stageLabel: 'Scene Writing' },
-  { key: 'programManager', stageLabel: 'Content Program Manager' },
+  {
+    key: 'titles',
+    stageLabel: 'Titles & Angles',
+    hint: 'Influences how the 5 title options are written — tone, hook style, whether names are emphasized. Does not affect the outline, scenes, or thumbnail concepts.',
+  },
+  {
+    key: 'outline',
+    stageLabel: 'Outline & Structure',
+    hint: 'Influences chapter structure, scene count reasoning, character bible depth, and thumbnail concepts. Does not touch the actual narration wording — that\'s the Scenes stage.',
+  },
+  {
+    key: 'scenes',
+    stageLabel: 'Scene Writing',
+    hint: 'Influences how narration is actually written scene by scene — sentence style, pacing, image prompt detail. This shapes the spoken/on-screen text and (for full_pipeline) the visual descriptions.',
+  },
+  {
+    key: 'programManager',
+    stageLabel: 'Content Program Manager',
+    hint: 'Influences what topics get suggested and why — priority reasoning, tone of explanations, how aggressively it avoids repeats. Never affects how a video is written once chosen.',
+  },
 ];
 
 // Full, absolute date+time — same convention as AutomationMirrorStep.jsx's "Videos in progress" /
@@ -1165,7 +1182,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
         {channelInfoOpen && (
           <>
             <div style={{ marginTop: 16 }}>
-              <div style={label}>Niche</div>
+              <div style={label}>
+                Niche
+                <InfoHint text="Used only by the Content Program Manager to decide what to suggest next. Does NOT affect how scripts are written, unless 'Channel intro' is enabled below." />
+              </div>
               <ExpandableTextarea
                 value={niche}
                 onChange={(e) => setNiche(e.target.value)}
@@ -1176,7 +1196,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
               />
             </div>
             <div style={{ marginTop: 16 }}>
-              <div style={label}>Editorial notes</div>
+              <div style={label}>
+                Editorial notes
+                <InfoHint text="Same as Niche — only guides the Content Program Manager's suggestions, unless 'Channel intro' is enabled." />
+              </div>
               <ExpandableTextarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
@@ -1296,24 +1319,27 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
             )}
 
             <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 16, paddingTop: 16 }}>
-              <button
-                onClick={() => setChannelCharsOpen((v) => !v)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: 0,
-                  width: '100%',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  cursor: 'pointer',
-                }}
-              >
-                <span style={label}>Channel characters{(chars || []).length ? ` (${(chars || []).length})` : ''}</span>
-                <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
-                  {channelCharsOpen ? 'CLOSE ▲' : 'SHOW ▼'}
-                </span>
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button
+                  onClick={() => setChannelCharsOpen((v) => !v)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    flex: 1,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span style={label}>Channel characters{(chars || []).length ? ` (${(chars || []).length})` : ''}</span>
+                  <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+                    {channelCharsOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+                  </span>
+                </button>
+                <InfoHint text="Automatically added to every new video's character bible for visual/narrative consistency. Doesn't limit or replace characters specific to a single video's topic." />
+              </div>
 
               {channelCharsOpen && (
                 <>
@@ -1426,7 +1452,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
 
       {channel?.content_type === 'static_background' && (
         <div style={card}>
-          <div style={label}>Default video settings — Static Background</div>
+          <div style={label}>
+            Default video settings — Static Background
+            <InfoHint text="Default background and caption styling for every new static_background video on this channel — can still be changed per video in Create or Storyboard." />
+          </div>
           <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
             Applied to every new video on this channel until changed for that specific video (see Storyboard).
           </div>
@@ -1540,7 +1569,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
               Edit the creative direction each AI generation step follows for this channel — tone, editorial priorities, how to write titles, outlines and scenes. The technical output format each step must return is fixed and shown read-only below its editor.
             </div>
 
-            {PROMPT_STAGES.map(({ key, stageLabel }) => {
+            {PROMPT_STAGES.map(({ key, stageLabel, hint }) => {
               // Never blank: an absent/empty override falls back to the stage's default text as a
               // real, immediately-editable value — not a placeholder — so the field always shows
               // exactly what a generation would use right now.
@@ -1551,7 +1580,10 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
               return (
                 <div key={key} style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                    <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{stageLabel}</div>
+                    <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text, display: 'flex', alignItems: 'center' }}>
+                      {stageLabel}
+                      <InfoHint text={hint} />
+                    </div>
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button onClick={() => toggleHistory(key)} style={{ ...btnGhost, padding: '5px 10px', fontSize: 9 }}>
                         🕐 History

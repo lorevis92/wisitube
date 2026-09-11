@@ -1102,7 +1102,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // leaves a video — reviewable and independently publishable by hand from Export.
     await logStep(channelId, videoId, 'youtube', 'success', 'video produced — owner chose to publish manually later');
     report('youtube', 'Produced — ready for manual publish in Export');
-  } else if (!manualPublish && channel.automation_auto_publish === false) {
+  } else if (
+    !manualPublish &&
+    // A companion Short has its own independent auto-publish toggle (automation_shorts_auto_publish)
+    // — it does NOT fall back to automation_auto_publish, which only ever governs the main video.
+    (project?.isShort ? channel.automation_shorts_auto_publish === false : channel.automation_auto_publish === false)
+  ) {
     // Auto-publish is off for this channel — the video is already fully produced (render +
     // thumbnail are done and persisted above), it just never goes near YouTube's API. Leaves it
     // exactly where a manually-created video would sit: reviewable and independently publishable

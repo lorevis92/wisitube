@@ -386,6 +386,15 @@ export async function deleteVideo(id) {
 //   alter table wisitube_channels
 //     add column if not exists automation_publish_days jsonb not null default '[0,1,2,3,4,5,6]'::jsonb;
 //
+// Required one-time setup for the Short's own independent auto-publish toggle — previously the
+// companion Short always followed automation_auto_publish (the MAIN video's setting); this lets a
+// channel produce the Short but hold it for manual review (or vice versa) regardless of what the
+// main video does. Defaults to true (opt-out, matching automation_auto_publish's own default) so an
+// existing channel's behavior is unchanged until the owner touches this specific toggle:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_shorts_auto_publish boolean not null default true;
+//
 // Required one-time setup for channel-level recurring characters (see src/lib/channelCharacters.js) —
 // an array of { id, name, description, photoStoragePath } auto-injected into every new video's
 // character bible on this channel so a recurring figure keeps the same id/name/look across videos:
@@ -481,6 +490,9 @@ function fromChannelRow(row) {
     // Opt-in (default off): auto-generate a vertical teaser YouTube Short for every long video that
     // publishes successfully — see src/lib/shortsEngine.js and the recipes' companion-Short hook.
     automation_generate_shorts: !!row.automation_generate_shorts,
+    // Independent from automation_auto_publish (which only ever governs the main video) — see the
+    // migration comment above. Defaults to true, same opt-out shape as automation_auto_publish.
+    automation_shorts_auto_publish: row.automation_shorts_auto_publish ?? true,
     // Days of the week (JS Date.getDay(): 0=Sun … 6=Sat) this channel may publish on. A missing
     // column / non-array falls back to all seven (publish any day). An empty array means "never".
     automation_publish_days: Array.isArray(row.automation_publish_days) ? row.automation_publish_days : [0, 1, 2, 3, 4, 5, 6],
@@ -556,6 +568,7 @@ export async function saveChannel(channel) {
     automation_channel_intro: !!channel.automation_channel_intro,
     automation_export_mode: channel.automation_export_mode || 'youtube',
     automation_generate_shorts: !!channel.automation_generate_shorts,
+    automation_shorts_auto_publish: channel.automation_shorts_auto_publish ?? true,
     automation_publish_days: Array.isArray(channel.automation_publish_days)
       ? channel.automation_publish_days
       : [0, 1, 2, 3, 4, 5, 6],

@@ -9,6 +9,7 @@ import { KOKORO_VOICES } from '../lib/tts';
 import { STYLES } from '../lib/pollinations';
 import ExpandableTextarea from '../components/ExpandableTextarea';
 import { useConfirm } from '../components/useConfirm';
+import InfoHint from '../components/InfoHint';
 import {
   isLocalExportSupported,
   getStoredLocalExportDirectory,
@@ -820,7 +821,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                 <>
                 <div style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 12, marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <div>
-                    <div style={label}>Publishing</div>
+                    <div style={label}>
+                      Publishing
+                      <InfoHint text="Where a finished video ends up — uploaded directly to YouTube, or saved to a folder on your computer for manual upload." />
+                    </div>
                     <select
                       value={c.automation_export_mode || 'youtube'}
                       disabled={running}
@@ -868,27 +872,30 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       )}
                     </div>
                   ) : (
-                    <label
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        fontSize: 11,
-                        fontFamily: FONT.ui,
-                        fontWeight: 700,
-                        textTransform: 'uppercase',
-                        color: T.textSecondary,
-                      }}
-                      title="When off, produced videos are rendered and saved but never uploaded to YouTube — review and publish them by hand from Storyboard/Editor/Export."
-                    >
-                      <input
-                        type="checkbox"
-                        checked={c.automation_auto_publish !== false}
-                        disabled={running}
-                        onChange={(e) => updateAndSaveImmediately(c.id, { automation_auto_publish: e.target.checked })}
-                      />
-                      Auto-publish to YouTube
-                    </label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <label
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          fontSize: 11,
+                          fontFamily: FONT.ui,
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          color: T.textSecondary,
+                        }}
+                        title="When off, produced videos are rendered and saved but never uploaded to YouTube — review and publish them by hand from Storyboard/Editor/Export."
+                      >
+                        <input
+                          type="checkbox"
+                          checked={c.automation_auto_publish !== false}
+                          disabled={running}
+                          onChange={(e) => updateAndSaveImmediately(c.id, { automation_auto_publish: e.target.checked })}
+                        />
+                        Auto-publish to YouTube
+                      </label>
+                      <InfoHint text="If on, a finished video uploads automatically. If off, it stops at 'ready to publish' for your manual review." />
+                    </div>
                   )}
                 </div>
 
@@ -941,7 +948,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                   </div>
 
                   <div>
-                    <div style={label}>Videos / day</div>
+                    <div style={label}>
+                      Videos / day
+                      <InfoHint text="Daily cap for this channel — automation stops producing new videos here once reached, resets at midnight." />
+                    </div>
                     <input
                       type="number"
                       min="0"
@@ -971,7 +981,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     };
                     return (
                       <div style={{ gridColumn: '1 / -1' }}>
-                        <div style={label}>Publish on these days</div>
+                        <div style={label}>
+                          Publish on these days
+                          <InfoHint text="Days of the week automation is allowed to work on this channel at all — on any other day, the channel is skipped entirely for the cycle." />
+                        </div>
                         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
                           {DAYS.map(({ n, dl }) => (
                             <label
@@ -993,7 +1006,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                   })()}
 
                   <div>
-                    <div style={label}>Daily budget ($)</div>
+                    <div style={label}>
+                      Daily budget ($)
+                      <InfoHint text="Hard stop for paid generation — automation won't start a new paid step for this channel once this is exceeded that day." />
+                    </div>
                     <input
                       type="number"
                       min="0"
@@ -1165,7 +1181,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
                   <div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                      <div style={label}>Speech speed</div>
+                      <div style={label}>
+                        Speech speed
+                        <InfoHint text="How fast the narration is read aloud — 1.0 is normal pace." />
+                      </div>
                       <span style={{ ...mono, fontSize: 11, color: T.text, fontWeight: 700 }}>
                         {(Number(c.automation_speech_speed) || 1.0).toFixed(2)}x
                       </span>
@@ -1255,34 +1274,65 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                 </div>
 
                 <div style={{ marginTop: 12 }}>
-                  <label
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 11,
-                      fontFamily: FONT.ui,
-                      fontWeight: 700,
-                      textTransform: 'uppercase',
-                      color: T.textSecondary,
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={!!c.automation_generate_shorts}
-                      disabled={running}
-                      onChange={(e) => updateAndSaveImmediately(c.id, { automation_generate_shorts: e.target.checked })}
-                    />
-                    Auto-generate a teaser Short
-                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <label
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        fontFamily: FONT.ui,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        color: T.textSecondary,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!c.automation_generate_shorts}
+                        disabled={running}
+                        onChange={(e) => updateAndSaveImmediately(c.id, { automation_generate_shorts: e.target.checked })}
+                      />
+                      Auto-generate a teaser Short
+                    </label>
+                    <InfoHint text="If on, a separate Short (new script, new images) is automatically produced right after the main video publishes." />
+                  </div>
                   <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 4, lineHeight: 1.5 }}>
                     After each long video publishes, also make a separate 20–40s vertical Short with its own script and
                     images, designed to build curiosity and link back to the full video.
                   </div>
+                  {!!c.automation_generate_shorts && (
+                    <div style={{ marginTop: 8, marginLeft: 20, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <label
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          fontSize: 11,
+                          fontFamily: FONT.ui,
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          color: T.textSecondary,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={c.automation_shorts_auto_publish !== false}
+                          disabled={running}
+                          onChange={(e) => updateAndSaveImmediately(c.id, { automation_shorts_auto_publish: e.target.checked })}
+                        />
+                        Auto-publish the Short
+                      </label>
+                      <InfoHint text="Controls only the Short's publication — independent from the main video's auto-publish setting." />
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ marginTop: 12 }}>
-                  <div style={label}>Current initiative (optional)</div>
+                  <div style={label}>
+                    Current initiative (optional)
+                    <InfoHint text="Highest-priority instruction for the Content Program Manager when choosing the next topic. Does not affect narration style." />
+                  </div>
                   <ExpandableTextarea
                     value={c.automation_directive || ''}
                     disabled={running}
