@@ -13,6 +13,7 @@
 import { buildImagePrompt } from './mediaGenerationEngine';
 import { runWithConcurrency } from './sceneOrchestrator';
 import { isCreditExhaustedMessage } from './providerErrors';
+import { withTimeout } from './asyncTimeout';
 
 // Scenes per submitted batch job, not beats — matches pendingImageBatches' own `chunkSceneIds`
 // field (scene-level, not beat-level). Each scene contributes up to 2 items (its 2 image beats),
@@ -36,6 +37,12 @@ const SUBMIT_STAGGER_MAX_MS = 1000;
 // but gated on looking like a rate limit specifically (see isRateLimitError below), not any error:
 // a real application error (bad prompt, invalid argument) won't resolve itself by retrying.
 const SUBMIT_RETRY_DELAYS_MS = [5000, 15000];
+// api/gemini-batch.js's maxDuration is 60s — same margin convention as batchResumption.js's own
+// STATUS_TIMEOUT_MS/RESULTS_TIMEOUT_MS. Without this, a stalled submit request had no bound at all:
+// it's the one fetch in the whole batch mechanism that wasn't wrapped in withTimeout, which is what
+// let "🔄 Check for updates" (StoryboardStep.jsx — its recovery-submit path calls this) hang on
+// "Checking…" forever with no success/error ever shown, instead of settling either way.
+const SUBMIT_TIMEOUT_MS = 55000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const staggerDelay = () => SUBMIT_STAGGER_MIN_MS + Math.random() * (SUBMIT_STAGGER_MAX_MS - SUBMIT_STAGGER_MIN_MS);
@@ -121,19 +128,26 @@ function chunkScenesNeedingImages(scenes, chunkSize) {
 // error carries `.status` (Gemini's own HTTP status when api/gemini-batch.js passed one through) so
 // callers can recognize a rate limit (429) specifically, not just "something failed".
 export async function submitImageBatchChunk(items, resolution) {
-  const res = await fetch('/api/gemini-batch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'submit', items, resolution }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    const err = new Error(data.detail || data.error || 'Batch submit failed');
-    err.status = data.status || res.status;
-    throw err;
-  }
-  if (!data.jobId) throw new Error('Batch submit did not return a jobId');
-  return data.jobId;
+  return withTimeout(
+    async (signal) => {
+      const res = await fetch('/api/gemini-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'submit', items, resolution }),
+        signal,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const err = new Error(data.detail || data.error || 'Batch submit failed');
+        err.status = data.status || res.status;
+        throw err;
+      }
+      if (!data.jobId) throw new Error('Batch submit did not return a jobId');
+      return data.jobId;
+    },
+    SUBMIT_TIMEOUT_MS,
+    'Batch chunk submit'
+  );
 }
 
 // Retries a chunk submission when the failure looks like a rate limit — 2 retries, 5s then 15s —

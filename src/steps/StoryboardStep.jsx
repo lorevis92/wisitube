@@ -29,6 +29,11 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   const [lightbox, setLightbox] = useState(null);
   const [costConfirm, setCostConfirm] = useState(null); // { imageCount, imageTotal, charCount, voiceTotal, total } | null
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  // Visible outcome of the last "Check for updates" click — null while nothing's been clicked yet
+  // this session, otherwise 'ok'/'error' so the button always settles somewhere instead of just
+  // reverting silently (see checkForUpdates below).
+  const [checkUpdatesResult, setCheckUpdatesResult] = useState(null);
+  const [checkUpdatesError, setCheckUpdatesError] = useState('');
   // Imperative handle into the shared BackgroundStyleSection component (src/components/) — see its
   // header comment for why generateAll below needs this rather than owning bgPrompt/generation logic
   // itself.
@@ -186,6 +191,8 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
   // `project` state) is what actually writes to Supabase, same as every other mutation in this file.
   async function checkForUpdates() {
     setCheckingUpdates(true);
+    setCheckUpdatesResult(null);
+    setCheckUpdatesError('');
     try {
       const updated = await resumePendingBatches(project, {
         userId,
@@ -196,8 +203,11 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         persist: async (proj) => setProject(proj),
       });
       setProject(updated);
+      setCheckUpdatesResult('ok');
     } catch (err) {
       console.error('[StoryboardStep] checkForUpdates failed', err);
+      setCheckUpdatesResult('error');
+      setCheckUpdatesError(String(err?.message || err));
     } finally {
       setCheckingUpdates(false);
     }
@@ -396,12 +406,15 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
         </div>
       )}
 
-      {/* Gemini Batch jobs in flight for this video replace the normal generation control + grid
-          entirely — same card design as AutomationMirrorStep.jsx's mirror of the same state, so a
-          batch-provider video looks the same whether it's being watched from automation or here.
-          Nothing here can accidentally re-submit a duplicate batch: the button that would is gone
-          while this card is showing; "🔄 Check for updates" only ever checks/resumes. */}
-      {(project.pendingImageBatches || []).length > 0 ? (() => {
+      {/* Gemini Batch jobs in flight for this video used to replace the normal generation control +
+          grid entirely with just this banner + a flat "Ready so far" thumbnail-only grid — that hid
+          the real per-beat/per-scene state (image ready/loading/error, audio ready/loading) exactly
+          when it mattered most. Now it's only a progress indicator on top; the real scene-by-scene
+          view below always renders, batch or not — the same statusDot per beat/audio it already
+          shows once a batch finishes, or for any non-batch provider. Nothing here can accidentally
+          re-submit a duplicate batch: "Generate all media" below is guarded against that (see
+          generateAll); "🔄 Check for updates" only ever checks/resumes an already-submitted job. */}
+      {(project.pendingImageBatches || []).length > 0 && (() => {
         const allBatchBeats = project.scenes.flatMap((s) => s.images || []);
         const readyBatchBeats = allBatchBeats.filter((b) => b.status === 'ready');
         const batchPct = allBatchBeats.length ? Math.round((readyBatchBeats.length / allBatchBeats.length) * 100) : 0;
@@ -422,34 +435,22 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
               disabled={checkingUpdates}
               style={{ ...btnPrimary, marginTop: 14, opacity: checkingUpdates ? 0.6 : 1 }}
             >
-              {checkingUpdates ? 'Checking…' : '🔄 Check for updates'}
+              {checkingUpdates
+                ? 'Checking…'
+                : checkUpdatesResult === 'error'
+                  ? '✕ Check failed — retry'
+                  : checkUpdatesResult === 'ok'
+                    ? '✓ Checked'
+                    : '🔄 Check for updates'}
             </button>
-            {readyBatchBeats.length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={label}>Ready so far</div>
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: isMobile ? 'repeat(auto-fill, minmax(80px, 1fr))' : 'repeat(auto-fill, minmax(110px, 1fr))',
-                    gap: 8,
-                    marginTop: 8,
-                  }}
-                >
-                  {readyBatchBeats.map((b) => (
-                    <img
-                      key={b.id}
-                      src={b.url}
-                      alt=""
-                      style={{ width: '100%', aspectRatio: '1/1', objectFit: 'cover', borderRadius: 4, border: `1px solid ${T.border}` }}
-                    />
-                  ))}
-                </div>
-              </div>
+            {checkUpdatesResult === 'error' && checkUpdatesError && (
+              <div style={{ marginTop: 8, fontSize: 11, color: T.primary, fontFamily: FONT.ui }}>{checkUpdatesError}</div>
             )}
           </div>
         );
-      })() : (
-        <>
+      })()}
+
+      <>
           {/* Generation control */}
           <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
@@ -696,8 +697,7 @@ export default function StoryboardStep({ project, setProject, settings, onReady,
           </div>
         ))}
           </div>
-        </>
-      )}
+      </>
 
       <BackgroundStyleSection
         ref={bgSectionRef}
