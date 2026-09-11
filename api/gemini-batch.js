@@ -29,7 +29,17 @@ import {
   GOOGLE_CREDIT_EXHAUSTED_CODE,
 } from '../src/lib/providerErrors.js';
 
-export const config = { maxDuration: 60 };
+// memory: raised from the platform default after live evidence (Vercel function logs, 2026-09-11)
+// showed every single /api/gemini-batch invocation crashing with "instance was killed because it
+// ran out of available memory" for a solid 25+ minute window, 100% failure rate, zero Google errors
+// ever actually reaching this file's own error handling (none of its console.error lines fired) —
+// see the `status` action below for the actual leak this uncovered and fixed. This bump is a safety
+// margin on top of that fix, not a substitute for it: the leak made an otherwise-small response
+// (batch status/results for a handful of images) balloon into something that could exceed even a
+// generous memory ceiling, so both matter. If the deploy rejects this value as above the current
+// plan's per-function cap, lower it — 3009 is the documented Vercel maximum, not a value tuned
+// against this project's actual plan tier.
+export const config = { maxDuration: 60, memory: 3009 };
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 // Nano Banana 2 Flash — the cheap tier ($0.067/image standard) confirmed available and active even
@@ -71,6 +81,42 @@ const KNOWN_STATES = {
   BATCH_STATE_EXPIRED: 'failed',
   JOB_STATE_EXPIRED: 'failed',
 };
+
+// A "done" job's status response embeds its FULL results (inlinedResponses, including every image's
+// raw base64 bytes) in the exact same payload the `results` action itself fetches from this same
+// endpoint — for a chunk of up to BATCH_CHUNK_SCENES*2 images at anything above the smallest
+// resolution tier, that can be tens of MB. The `status` action only ever needs to know whether the
+// job is done, not re-carry its image bytes — doing so anyway (logged in full via JSON.stringify,
+// then echoed back in the response's `raw` field, on top of the rawText string and its JSON.parse'd
+// copy already in memory) is what turned an ordinary "is this job done yet?" poll into repeatedly
+// holding multiple full copies of a multi-MB payload at once. That is what a live Vercel function
+// log confirmed (2026-09-11) was actually crashing every single status check for two stuck videos
+// with "instance was killed because it ran out of available memory" — never a Google-side error, and
+// unfixable by any number of retries, since the same crash reproduced identically every time
+// regardless of what Google itself had actually reported. Mutates `data` IN PLACE (no cloning —
+// cloning first to then strip it would momentarily hold both the original and the copy of a
+// possibly-huge payload at once, defeating the point) so nothing downstream of this call — the
+// lightweight debug log, the JSON response — ever touches the actual image bytes again.
+function stripInlinedImageBytes(data) {
+  if (!data || typeof data !== 'object') return data;
+  const arrays = [
+    data?.response?.inlinedResponses?.inlinedResponses,
+    data?.response?.inlinedResponses,
+    data?.response?.inlined_responses?.inlined_responses,
+    data?.response?.inlined_responses,
+  ].filter(Array.isArray);
+  for (const arr of arrays) {
+    for (const item of arr) {
+      const parts = item?.response?.candidates?.[0]?.content?.parts;
+      if (!Array.isArray(parts)) continue;
+      for (const p of parts) {
+        if (typeof p?.inline_data?.data === 'string') p.inline_data.data = `[stripped, ${p.inline_data.data.length} base64 chars — see the results action for the actual image]`;
+        if (typeof p?.inlineData?.data === 'string') p.inlineData.data = `[stripped, ${p.inlineData.data.length} base64 chars — see the results action for the actual image]`;
+      }
+    }
+  }
+  return data;
+}
 
 function mapGoogleState(googleState) {
   if (KNOWN_STATES[googleState]) return KNOWN_STATES[googleState];
@@ -308,14 +354,10 @@ async function status(req, res, apiKey) {
       return res.status(502).json({ error: 'Gemini returned a non-JSON response', detail: rawText.slice(0, 500) });
     }
 
-    // TEMPORARY — full, untruncated dump of exactly what Google returned, requested explicitly
-    // after a live job that was actually BATCH_STATE_SUCCEEDED still showed "failed": the previous
-    // fix guessed at data.state / data.metadata.state without confirming either path was real.
-    // Remove once the real path is confirmed and findStateAnywhere below is proven reliable.
-    console.log('[gemini-batch] phase=status-raw-dump', jobId, JSON.stringify(data));
-
     // Scans the entire response for a BATCH_STATE_*/JOB_STATE_* string anywhere in it, rather than
-    // trusting one or two assumed paths — see findStateAnywhere's own comment for why.
+    // trusting one or two assumed paths — see findStateAnywhere's own comment for why. Run BEFORE
+    // stripping image bytes below, though it wouldn't matter either way — the state string never
+    // lives inside an inlined response's image data.
     const found = findStateAnywhere(data);
     let googleState;
     let stateSource;
@@ -335,6 +377,11 @@ async function status(req, res, apiKey) {
     console.log('[gemini-batch] phase=status', { jobId, done: !!data?.done, googleState, stateSource, hasError: !!data?.error });
 
     const state = mapGoogleState(googleState);
+
+    // See stripInlinedImageBytes's header comment — a done job's `data` can embed every image's full
+    // base64 bytes; nothing that reads this action's response (batchResumption.js's fetchBatchStatus,
+    // AutomationStep.jsx's Gemini Batch test panel) needs those here, only `results` does.
+    stripInlinedImageBytes(data);
 
     return res.status(200).json({ state, googleState, stateSource, done: !!data?.done, raw: data });
   } catch (err) {
