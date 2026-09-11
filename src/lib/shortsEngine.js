@@ -106,6 +106,7 @@ export async function createShortRecord(parent, channel, { logStep } = {}) {
       // configured provider, so the Short does too.
       imageProvider: channel.automation_image_provider || 'pollinations',
       characterBible: Array.isArray(parent.characterBible) ? parent.characterBible : [],
+      thumbnailCreativeDirection: channel.automation_thumbnail_direction?.short?.text || '',
       creativeOverride: channel.prompt_overrides?.shortScript || null,
     }),
   });

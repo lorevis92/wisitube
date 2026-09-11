@@ -26,7 +26,7 @@ import { resumePendingBatches, MAX_RECOVERY_CYCLES } from '../batchResumption';
 import { rehydrateProjectMedia } from '../mediaRehydration';
 import { isCreditExhaustedMessage } from '../providerErrors';
 import { renderVideoForExport } from '../videoRenderEngine';
-import { generateThumbnail } from '../thumbnailEngine';
+import { generateThumbnail, resolveThumbnailDirectionStyle } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
@@ -593,6 +593,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             generalNotes: '',
             references: channelCharacterReferenceStubs(channel),
             channelCharacters: channelCharactersForPrompt(channel),
+            thumbnailCreativeDirection: channel.automation_thumbnail_direction?.video?.text || '',
             creativeOverride: channel.prompt_overrides?.outline || null,
             channelIntroEnabled: channel.automation_channel_intro === true,
             niche: channel.niche || '',
@@ -992,6 +993,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         // settings.format is already forced to '9:16' for an isShort video (see the resume check);
         // generateThumbnail also falls back to project.isShort on its own.
         format: settings.format,
+        thumbnailDirection: resolveThumbnailDirectionStyle(channel, project),
       });
       const thumbnailStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),

@@ -395,12 +395,40 @@ export async function deleteVideo(id) {
 //   alter table wisitube_channels
 //     add column if not exists automation_shorts_auto_publish boolean not null default true;
 //
+// Required one-time setup for per-channel thumbnail direction (see ChannelDashboardStep.jsx's
+// "Thumbnail settings" section and src/lib/thumbnailEngine.js) — { video: {...}, short: {...} },
+// each { text, position, color, outline, outlineColor }, applied to the video's / the companion
+// Short's own thumbnail respectively:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_thumbnail_direction jsonb not null default '{}'::jsonb;
+//
 // Required one-time setup for channel-level recurring characters (see src/lib/channelCharacters.js) —
 // an array of { id, name, description, photoStoragePath } auto-injected into every new video's
 // character bible on this channel so a recurring figure keeps the same id/name/look across videos:
 //
 //   alter table wisitube_channels
 //     add column if not exists channel_characters jsonb not null default '[]'::jsonb;
+
+// Normalizes one half (video/short) of automation_thumbnail_direction to always-usable values —
+// shared by fromChannelRow (reading a saved row) and saveChannel (writing one, so a channel that
+// only ever went through updateChannelFields still round-trips a complete shape). Kept in sync with
+// thumbnailEngine.js's own DEFAULT_THUMBNAIL_DIRECTION for position/color/outline/outlineColor.
+function normalizeThumbnailDirectionEntry(entry) {
+  const e = entry && typeof entry === 'object' ? entry : {};
+  return {
+    text: typeof e.text === 'string' ? e.text : '',
+    position: ['top-left', 'top-center', 'center'].includes(e.position) ? e.position : 'center',
+    color: typeof e.color === 'string' && e.color ? e.color : '#FFFFFF',
+    outline: e.outline !== false,
+    outlineColor: typeof e.outlineColor === 'string' && e.outlineColor ? e.outlineColor : '#000000',
+  };
+}
+
+function normalizeThumbnailDirection(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return { video: normalizeThumbnailDirectionEntry(r.video), short: normalizeThumbnailDirectionEntry(r.short) };
+}
 
 function fromChannelRow(row) {
   return {
@@ -493,6 +521,7 @@ function fromChannelRow(row) {
     // Independent from automation_auto_publish (which only ever governs the main video) — see the
     // migration comment above. Defaults to true, same opt-out shape as automation_auto_publish.
     automation_shorts_auto_publish: row.automation_shorts_auto_publish ?? true,
+    automation_thumbnail_direction: normalizeThumbnailDirection(row.automation_thumbnail_direction),
     // Days of the week (JS Date.getDay(): 0=Sun … 6=Sat) this channel may publish on. A missing
     // column / non-array falls back to all seven (publish any day). An empty array means "never".
     automation_publish_days: Array.isArray(row.automation_publish_days) ? row.automation_publish_days : [0, 1, 2, 3, 4, 5, 6],
@@ -569,6 +598,7 @@ export async function saveChannel(channel) {
     automation_export_mode: channel.automation_export_mode || 'youtube',
     automation_generate_shorts: !!channel.automation_generate_shorts,
     automation_shorts_auto_publish: channel.automation_shorts_auto_publish ?? true,
+    automation_thumbnail_direction: normalizeThumbnailDirection(channel.automation_thumbnail_direction),
     automation_publish_days: Array.isArray(channel.automation_publish_days)
       ? channel.automation_publish_days
       : [0, 1, 2, 3, 4, 5, 6],

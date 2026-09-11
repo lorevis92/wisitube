@@ -38,6 +38,12 @@ function channelDefaultsPseudoVideoId(channelId) {
   return `channel-defaults-${channelId}`;
 }
 
+// Mirrors db.js's normalizeThumbnailDirectionEntry defaults — used only to seed local state before
+// a channel has loaded; the loaded channel's own (already-normalized) value takes over from there.
+function DEFAULT_THUMB_DIRECTION_ENTRY() {
+  return { text: '', position: 'center', color: '#FFFFFF', outline: true, outlineColor: '#000000' };
+}
+
 // Same list as AutomationStep.jsx's own local CONTENT_TYPES const — duplicated rather than shared,
 // same controlled-duplication convention as elsewhere in this codebase. content_type isn't purely an
 // automation setting: it also drives the manual Create → Storyboard flow's script generation and
@@ -214,6 +220,14 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [charBusyId, setCharBusyId] = useState(null);
   const [charError, setCharError] = useState('');
 
+  // "Thumbnail settings" — per-channel, per-kind (video vs Short) creative direction + text style
+  // (see src/lib/thumbnailEngine.js's resolveThumbnailDirectionStyle and db.js's
+  // normalizeThumbnailDirection, which this mirrors). `thumbDirection` is the local working copy;
+  // text is local-until-blur, everything else persists immediately, same as the sections above.
+  const [thumbSettingsOpen, setThumbSettingsOpen] = useState(false);
+  const [thumbDirection, setThumbDirection] = useState({ video: DEFAULT_THUMB_DIRECTION_ENTRY(), short: DEFAULT_THUMB_DIRECTION_ENTRY() });
+  const [thumbError, setThumbError] = useState('');
+
   // Escape closes the "how should this Short publish?" modal (same affordance as ImageLightbox /
   // ProgramManagerChat). No-op while nothing is generating; the modal itself also closes on the
   // choice and on an outside click.
@@ -284,6 +298,7 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       setNiche(ch?.niche || '');
       setNotes(ch?.editorialNotes || '');
       setChars(Array.isArray(ch?.channel_characters) ? ch.channel_characters : []);
+      setThumbDirection(ch?.automation_thumbnail_direction || { video: DEFAULT_THUMB_DIRECTION_ENTRY(), short: DEFAULT_THUMB_DIRECTION_ENTRY() });
       // App.jsx holds the single source of truth for "the currently open channel" — every load and
       // every local mutation below reports here, so components that never do their own fetch (like
       // ExportStep) can't end up looking at a stale copy of e.g. the YouTube connection state.
@@ -660,6 +675,100 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     } finally {
       setCharBusyId(null);
     }
+  }
+
+  // ---- Thumbnail settings ----
+  async function persistThumbDirection(next) {
+    setThumbDirection(next);
+    setThumbError('');
+    try {
+      const updated = await updateChannelFields(channelId, { automation_thumbnail_direction: next });
+      if (updated) {
+        setChannel(updated);
+        onChannelChange?.(updated);
+      }
+    } catch (err) {
+      setThumbError('Save failed: ' + String(err.message || err));
+    }
+  }
+
+  function updateThumbFieldLocal(kind, patch) {
+    setThumbDirection((td) => ({ ...td, [kind]: { ...td[kind], ...patch } }));
+  }
+
+  function commitThumbText() {
+    persistThumbDirection(thumbDirection);
+  }
+
+  function updateThumbFieldNow(kind, patch) {
+    persistThumbDirection({ ...thumbDirection, [kind]: { ...thumbDirection[kind], ...patch } });
+  }
+
+  // One identical block for "Video thumbnails" and "Short thumbnails" — same fields, same layout.
+  function renderThumbKindSection(kind, title) {
+    const entry = thumbDirection[kind] || DEFAULT_THUMB_DIRECTION_ENTRY();
+    return (
+      <div style={{ border: `1px solid ${T.border}`, borderRadius: 4, padding: 12, marginTop: 12 }}>
+        <div style={{ fontFamily: FONT.ui, fontSize: 12, fontWeight: 700, color: T.text, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          {title}
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <div style={label}>Creative direction</div>
+          <ExpandableTextarea
+            value={entry.text}
+            onChange={(e) => updateThumbFieldLocal(kind, { text: e.target.value })}
+            onBlur={commitThumbText}
+            placeholder="What the thumbnail image should show — subject, composition, tone…"
+            rows={2}
+            style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>
+            Text position
+            <InfoHint text="Guaranteed for Pollinations; a strong suggestion (not guaranteed) for AI-baked text on premium providers." />
+          </div>
+          <select
+            value={entry.position}
+            onChange={(e) => updateThumbFieldNow(kind, { position: e.target.value })}
+            style={{ ...inputStyle, marginTop: 8, maxWidth: 240 }}
+          >
+            <option value="top-left">Top-left</option>
+            <option value="top-center">Top-center</option>
+            <option value="center">Center</option>
+          </select>
+        </div>
+
+        <div style={{ marginTop: 12, display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+            Text color
+            <input
+              type="color"
+              value={entry.color}
+              onChange={(e) => updateThumbFieldNow(kind, { color: e.target.value })}
+              style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+            />
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+            <input type="checkbox" checked={entry.outline !== false} onChange={(e) => updateThumbFieldNow(kind, { outline: e.target.checked })} />
+            Outline
+          </label>
+          {entry.outline !== false && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+              Outline color
+              <input
+                type="color"
+                value={entry.outlineColor}
+                onChange={(e) => updateThumbFieldNow(kind, { outlineColor: e.target.value })}
+                style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+              />
+            </label>
+          )}
+        </div>
+      </div>
+    );
   }
 
   async function handleUploadStaticBgImage(e) {
@@ -1443,6 +1552,35 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                     + Add character
                   </button>
                   {charError && <div style={{ marginTop: 8, fontSize: 11, color: T.primary, fontFamily: FONT.ui }}>{charError}</div>}
+                </>
+              )}
+            </div>
+
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 16, paddingTop: 16 }}>
+              <button
+                onClick={() => setThumbSettingsOpen((v) => !v)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  width: '100%',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={label}>Thumbnail settings</span>
+                <span style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, fontWeight: 700, textTransform: 'uppercase' }}>
+                  {thumbSettingsOpen ? 'CLOSE ▲' : 'SHOW ▼'}
+                </span>
+              </button>
+
+              {thumbSettingsOpen && (
+                <>
+                  {renderThumbKindSection('video', 'Video thumbnails')}
+                  {renderThumbKindSection('short', 'Short thumbnails')}
+                  {thumbError && <div style={{ marginTop: 8, fontSize: 11, color: T.primary, fontFamily: FONT.ui }}>{thumbError}</div>}
                 </>
               )}
             </div>

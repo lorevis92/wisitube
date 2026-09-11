@@ -21,7 +21,7 @@ import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
 import { rehydrateProjectMedia } from '../mediaRehydration';
 import { renderVideoForExport } from '../videoRenderEngine';
-import { generateThumbnail } from '../thumbnailEngine';
+import { generateThumbnail, resolveThumbnailDirectionStyle } from '../thumbnailEngine';
 import { publishToYoutube } from '../youtubePublishEngine';
 import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
@@ -391,6 +391,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           generalNotes: '',
           references: channelCharacterReferenceStubs(channel),
           channelCharacters: channelCharactersForPrompt(channel),
+          thumbnailCreativeDirection: channel.automation_thumbnail_direction?.video?.text || '',
           creativeOverride: channel.prompt_overrides?.outline || null,
           channelIntroEnabled: channel.automation_channel_intro === true,
           niche: channel.niche || '',
@@ -619,6 +620,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         // static_background videos are always 16:9; a Short on such a channel is delegated to
         // runFullPipeline, so this recipe only ever renders horizontal thumbnails. Passed for parity.
         format: settings.format,
+        thumbnailDirection: resolveThumbnailDirectionStyle(channel, project),
       });
       const thumbnailStoragePath = await withTimeout(
         () => uploadMedia(userId, videoId, 'thumbnail', 'thumbnail', thumbnailBlob),

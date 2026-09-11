@@ -207,7 +207,7 @@ Narration: conversational, punchy, read-aloud friendly, no scene numbers, no das
 
 async function generateShortScript(req, res, apiKey) {
   try {
-    let topic, angle, parentTitle, language, style, imageProvider, characterBible, creativeOverride;
+    let topic, angle, parentTitle, language, style, imageProvider, characterBible, creativeOverride, thumbnailCreativeDirection;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -218,6 +218,11 @@ async function generateShortScript(req, res, apiKey) {
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'stick figures';
       imageProvider = typeof body.imageProvider === 'string' ? body.imageProvider.trim() : 'pollinations';
       creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+      // Channel-level thumbnail creative direction for the SHORT (see ChannelDashboardStep.jsx's
+      // "Thumbnail settings" > "Short thumbnails") — same idea as the main outline's
+      // thumbnailCreativeDirection, kept separate since a channel may want a different look for its
+      // Shorts thumbnails than for its main-video ones.
+      thumbnailCreativeDirection = typeof body.thumbnailCreativeDirection === 'string' ? body.thumbnailCreativeDirection.trim() : '';
       characterBible = Array.isArray(body.characterBible)
         ? body.characterBible
             .filter((c) => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim())
@@ -286,7 +291,11 @@ Rules:
 - Between 6 and 10 scenes, no more, no less.
 - image_prompt is always in English regardless of narration language, and must render well as a vertical 9:16 frame.
 - reference_id is always null.
-- thumbnail_concepts is REQUIRED and MUST contain exactly 3 objects — never omit it, never leave it empty. When this Short centers on a real, identifiable person or a well-known named character (the same figures in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — the same principle as the title naming its real subject, not a generic lookalike. Only fall back to a generic figure when the Short genuinely has no single identifiable person or character at its center. No text in the image itself (the app renders the overlay_text separately).`;
+- thumbnail_concepts is REQUIRED and MUST contain exactly 3 objects — never omit it, never leave it empty. When this Short centers on a real, identifiable person or a well-known named character (the same figures in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — the same principle as the title naming its real subject, not a generic lookalike. Only fall back to a generic figure when the Short genuinely has no single identifiable person or character at its center. No text in the image itself (the app renders the overlay_text separately).${
+      thumbnailCreativeDirection
+        ? `\n- Thumbnail creative direction for this channel's Shorts (apply to every thumbnail_concepts entry): ${thumbnailCreativeDirection}`
+        : ''
+    }`;
 
     const context = `Full video this Short teases: "${parentTitle || topic}"
 Topic: "${topic}"
@@ -411,7 +420,7 @@ export default async function handler(req, res) {
   try {
     // Phase 1: validate and sanitize the request body.
     let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
-    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground, channelIntroEnabled, niche, channelCharacters;
+    let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground, channelIntroEnabled, niche, channelCharacters, thumbnailCreativeDirection;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
@@ -480,6 +489,14 @@ export default async function handler(req, res) {
         : [];
 
       creativeOverride = typeof body.creativeOverride === 'string' ? body.creativeOverride.trim() : '';
+
+      // Channel-level thumbnail creative direction for the MAIN video (see ChannelDashboardStep.jsx's
+      // "Thumbnail settings" > "Video thumbnails" and src/lib/thumbnailEngine.js) — free text on what
+      // the thumbnail image should show (subject, composition, tone). Injected into the
+      // thumbnail_concepts rules below. Position/color/outline are NOT sent here — those are applied
+      // deterministically client-side (Pollinations canvas) or as a render-time prompt instruction
+      // (premium providers), not at this concept-authoring stage.
+      thumbnailCreativeDirection = typeof body.thumbnailCreativeDirection === 'string' ? body.thumbnailCreativeDirection.trim() : '';
 
       // Channel-level recurring characters (see src/lib/channelCharacters.js) — { id, name,
       // description, hasPhoto }. Injected into the character-bible instructions below so a figure
@@ -613,7 +630,11 @@ JSON schema:
 
 Rules:
 - ${totalScenesRule}
-- thumbnail_concepts: when this video centers on a real, identifiable person or a well-known named character (the same figures you are listing in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — exactly the same principle as the title naming its real subject, not a generic lookalike description. Only fall back to a generic figure when the video genuinely has no single identifiable person or character at its center.
+- thumbnail_concepts: when this video centers on a real, identifiable person or a well-known named character (the same figures you are listing in character_bible), every concept's image_prompt MUST name that subject explicitly by their proper name — exactly the same principle as the title naming its real subject, not a generic lookalike description. Only fall back to a generic figure when the video genuinely has no single identifiable person or character at its center.${
+      thumbnailCreativeDirection
+        ? `\n- Thumbnail creative direction for this channel (apply to every thumbnail_concepts entry): ${thumbnailCreativeDirection}`
+        : ''
+    }
 - Give each chapter a short, stable "id" (e.g. "ch1_hook", lowercase, no spaces).
 - Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces) — later calls that write individual scenes will reference these same ids, so keep them short and consistent.${providerAwareCharacterNote}${referenceContext}${channelCharacterContext}`;
 

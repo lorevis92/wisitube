@@ -5,7 +5,7 @@ import { playTimeline } from '../lib/engine';
 import { WebCodecsUnsupportedError } from '../lib/exporter';
 import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
 import { updateVideoFields } from '../lib/db';
-import { generateThumbnail } from '../lib/thumbnailEngine';
+import { generateThumbnail, resolveThumbnailDirectionStyle } from '../lib/thumbnailEngine';
 import { uploadVideo, setThumbnail, setCaptions, addToSeriesPlaylist } from '../lib/youtubePublishEngine';
 import { renderVideoForExport } from '../lib/videoRenderEngine';
 import { buildSrtFromScenes } from '../lib/srtBuilder';
@@ -303,6 +303,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         overlayText: thumbText,
         seed: thumbSeed,
         format: thumbVertical ? '9:16' : '16:9',
+        thumbnailDirection: resolveThumbnailDirectionStyle(channel, project),
       });
 
       // Draw the finished Blob onto the visible preview canvas — same pattern the "restore from

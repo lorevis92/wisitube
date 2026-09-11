@@ -44,6 +44,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           generalNotes: (settings.generalNotes || '').trim(),
           references,
           channelCharacters: channelCharactersForPrompt(channel),
+          thumbnailCreativeDirection: channel?.automation_thumbnail_direction?.video?.text || '',
           creativeOverride: channel?.prompt_overrides?.outline || null,
           // Per-video override (CreateStep.jsx's "Include channel intro at video start" checkbox,
           // seeded from the channel default) falls back to the channel default itself when unset.
