@@ -346,11 +346,17 @@ let pollingBatches = false;
  * from the full automation cycle (tick/runManagedCycle) in every way that matters:
  *
  *  - Runs every BATCH_POLL_TICK_MS (60s), NOT on the user's configured cycle interval.
- *  - Touches ONLY videos that already have a non-empty pendingImageBatches (db.js's
- *    listIncompleteVideos → waitingReason 'awaiting_batch' / hasPendingBatches). It never starts a
- *    new video, never fetches a suggestion, never touches budget, daily counters or the program
- *    manager — its only effect is checking batch status and letting an already-started video
- *    continue once its images are all ready.
+ *  - Touches videos that either already have a non-empty pendingImageBatches (db.js's
+ *    listIncompleteVideos → waitingReason 'awaiting_batch' / hasPendingBatches) OR are flagged
+ *    submissionNeverConfirmed (waitingReason 'batch_submission_failed' — a nanobanana-batch video
+ *    sitting in the media phase with zero images ready and NO batch outstanding, past
+ *    BATCH_SUBMISSION_STALE_MS: a submission that silently never went out). The latter used to be
+ *    invisible to this poll entirely (hasPendingBatches is false for it), so it was only ever
+ *    retried by a full automation cycle — which can be hours away on a long interval. Re-entering the
+ *    recipe's media phase for one of these immediately retries the submission itself (the same
+ *    generateAllMediaViaBatch call a fresh video's first attempt would make), not just a status check.
+ *    Neither case starts a genuinely new video, fetches a suggestion, or touches budget/daily
+ *    counters/the program manager — the only effect is moving an already-started video forward.
  *  - For each such video it calls the exact same per-video continuation
  *    AutomationMirrorStep.jsx's "Check for updates" button uses: runManagedResume(() =>
  *    recipe(channel, { targetVideoId })). The recipe re-enters the media phase, polls Google, and
@@ -388,13 +394,13 @@ async function pollPendingImageBatches({ userId, onProgress, onCycleEnd }) {
     console.error('[automationScheduler] pending-batch poll: failed to list incomplete videos', err);
     return;
   }
-  const awaitingBatch = videos.filter((v) => v.hasPendingBatches);
-  if (awaitingBatch.length === 0) return;
+  const needsBatchAttention = videos.filter((v) => v.hasPendingBatches || v.submissionNeverConfirmed);
+  if (needsBatchAttention.length === 0) return;
 
   pollingBatches = true;
   let ranSomething = false;
   try {
-    for (const item of awaitingBatch) {
+    for (const item of needsBatchAttention) {
       let channel;
       try {
         // eslint-disable-next-line no-await-in-loop
@@ -408,6 +414,21 @@ async function pollPendingImageBatches({ userId, onProgress, onCycleEnd }) {
       if (!recipe) {
         console.warn('[automationScheduler] pending-batch poll: no recipe for content_type', channel.content_type, '- skipping', item.videoId);
         continue;
+      }
+      // Explicit, persisted trace the moment this state is recognized — distinct from an ordinary
+      // batch-status check, and written BEFORE the retry attempt so it's on record even if the retry
+      // below also fails (or the lock is unavailable and this item gets picked up again next tick).
+      if (item.submissionNeverConfirmed) {
+        // eslint-disable-next-line no-await-in-loop
+        await logStep(
+          item.channelId,
+          item.videoId,
+          'media',
+          'submission_not_confirmed',
+          `No Gemini Batch job was ever confirmed submitted for "${item.displayTitle}" — ${Math.round(
+            (Date.now() - item.createdAt) / 60000
+          )} min in the media phase with 0/${item.counts?.imagesTotal ?? '?'} images ready and nothing outstanding. Retrying the submission now.`
+        ).catch((err) => console.error('[automationScheduler] pending-batch poll: failed to log submission_not_confirmed', item.videoId, err));
       }
       let result;
       try {

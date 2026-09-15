@@ -662,6 +662,15 @@ export async function deleteChannel(id) {
   unwrap(await supabase.from('wisitube_channels').delete().eq('id', id));
 }
 
+// How long a nanobanana-batch video can sit in the media phase with ZERO images ready and NO
+// pendingImageBatches entry before that stops looking like ordinary early progress and starts
+// looking like a batch submission that silently never went out — see listIncompleteVideos'
+// submissionNeverConfirmed below. Both this state and "a batch really is outstanding" used to
+// render as the exact same "Awaiting Gemini Batch" label (both driven by the same hasPendingBatches
+// boolean) — there was no independent signal anywhere in the app to tell them apart short of
+// opening the database.
+const BATCH_SUBMISSION_STALE_MS = 15 * 60 * 1000;
+
 // Concrete progress counts for one video — how many scenes are written, images ready, and audio
 // tracks ready, out of the relevant totals — shared by describeIncompletePhase below (the
 // one-line phase label) and listIncompleteVideos' own `counts` field (the dashboard's more
@@ -761,6 +770,22 @@ export async function listIncompleteVideos(userId) {
       const counts = computeVideoCounts(v);
       const hasPendingBatches = Array.isArray(v.pendingImageBatches) && v.pendingImageBatches.length > 0;
       const stuck = !!v.stuckError;
+      // Distinguishes "a Gemini Batch job really is outstanding, Google is working on it" from "this
+      // channel uses nanobanana-batch, we're in the media phase, but NO job was ever successfully
+      // submitted" — the two used to render identically (both just "hasPendingBatches === false or
+      // true" feeding the exact same label), so a submission that silently failed to go out looked
+      // indistinguishable from ordinary early progress, indefinitely. Scoped tightly: only the
+      // channel's current image provider, the media phase, zero images ready despite scenes/beats
+      // existing, no batch outstanding, and only once BATCH_SUBMISSION_STALE_MS has passed since the
+      // video was created — a video that's simply a minute into the media phase isn't anomalous yet.
+      const submissionNeverConfirmed =
+        channel.automation_image_provider === 'nanobanana-batch' &&
+        phase === 'media' &&
+        !v.staticBackground &&
+        !hasPendingBatches &&
+        counts.imagesTotal > 0 &&
+        counts.imagesReady === 0 &&
+        Date.now() - (v.createdAt || 0) > BATCH_SUBMISSION_STALE_MS;
       results.push({
         videoId: v.id,
         channelId: channel.id,
@@ -770,14 +795,17 @@ export async function listIncompleteVideos(userId) {
         phase,
         // A video explicitly given up on (see videoResumption.js's MAX_RESUME_ATTEMPTS) shows that
         // message instead of an ordinary progress label — it isn't "in progress" the same way, it's
-        // stuck, and this dashboard is the one place that fact needs to stay visible.
-        phaseLabel: v.stuckError || describeIncompletePhase(v, phase, counts),
+        // stuck, and this dashboard is the one place that fact needs to stay visible. A batch that
+        // never confirmed submission gets its own equally-visible badge, ahead of the ordinary
+        // progress label, for the same reason.
+        phaseLabel: v.stuckError || (submissionNeverConfirmed ? '⚠ Batch submission never confirmed' : describeIncompletePhase(v, phase, counts)),
         counts,
         isStaticBackground: !!v.staticBackground,
         stuck,
         stuckMessage: v.stuckError || null,
-        waitingReason: hasPendingBatches ? 'awaiting_batch' : stuck ? 'stuck' : 'idle',
+        waitingReason: hasPendingBatches ? 'awaiting_batch' : submissionNeverConfirmed ? 'batch_submission_failed' : stuck ? 'stuck' : 'idle',
         hasPendingBatches,
+        submissionNeverConfirmed,
         // Set by src/lib/batchResumption.js while Google's batch service is returning 503s for one
         // of this video's jobs — { since, retryCount, resubmittedAt? }. Surfaced reassuringly in the
         // dashboard (AutomationMirrorStep.jsx) so an hour-long Google hiccup doesn't look like a hang.

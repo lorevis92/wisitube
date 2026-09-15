@@ -96,8 +96,20 @@ function formatCountsDetail(item) {
 function formatWaitingReason(item, live) {
   if (live) return '▶ Active — a cycle is generating this video right now';
   if (item.waitingReason === 'awaiting_batch') return "⏳ Waiting on Google's batch processing";
+  // Distinct from 'awaiting_batch': no job was ever confirmed submitted (pendingImageBatches is
+  // empty), so there is nothing outstanding to actually wait on — see db.js's
+  // submissionNeverConfirmed. The automatic poll already retries this every ~60s (see
+  // automationScheduler.js), "Resume now" below forces an immediate retry too.
+  if (item.waitingReason === 'batch_submission_failed') return '⚠ Batch submission never confirmed — retrying automatically';
   if (item.waitingReason === 'stuck') return item.stuckMessage || '⚠ Stuck — needs manual review';
   return '⏸ Idle — not part of an active cycle right now';
+}
+
+// Shared by the row's border/background and its two text colors below — a submission that never
+// confirmed is exactly as alarming as 'stuck' (both need a human to notice something's wrong, as
+// opposed to 'awaiting_batch'/'idle', which are ordinary states), so both get the same red treatment.
+function isAlarming(item) {
+  return item.stuck || item.waitingReason === 'batch_submission_failed';
 }
 
 // Reassuring readout for a Google batch-service outage (src/lib/batchResumption.js's
@@ -580,6 +592,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
               // live.phaseDetail is the recipe's own progress message ("13/48 scenes written",
               // "42% rendered", …) — always fresher than the DB-count readout while a cycle runs.
               const countsDetail = live ? live.phaseDetail || formatCountsDetail(item) : formatCountsDetail(item);
+              const alarming = isAlarming(item);
               return (
                 <div
                   key={item.videoId}
@@ -587,15 +600,15 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 8,
-                    border: `1px solid ${live ? T.green : item.stuck ? T.primaryBorder : T.border}`,
-                    background: item.stuck ? T.primaryLight : 'transparent',
+                    border: `1px solid ${live ? T.green : alarming ? T.primaryBorder : T.border}`,
+                    background: alarming ? T.primaryLight : 'transparent',
                     borderRadius: 4,
                     padding: 10,
                   }}
                 >
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontFamily: FONT.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{item.displayTitle}</div>
-                    <div style={{ ...mono, fontSize: 11, color: live ? T.green : item.stuck ? T.primary : T.textSecondary, marginTop: 4 }}>
+                    <div style={{ ...mono, fontSize: 11, color: live ? T.green : alarming ? T.primary : T.textSecondary, marginTop: 4 }}>
                       {item.channelName} · {phaseText}
                     </div>
                     {countsDetail && <div style={{ ...mono, fontSize: 11, color: T.textSecondary, marginTop: 2 }}>{countsDetail}</div>}
@@ -603,7 +616,8 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
                       style={{
                         fontFamily: FONT.ui,
                         fontSize: 11,
-                        color: live ? T.green : item.waitingReason === 'stuck' ? T.primary : T.textSecondary,
+                        color: live ? T.green : alarming ? T.primary : T.textSecondary,
+                        fontWeight: alarming ? 700 : 400,
                         marginTop: 4,
                       }}
                     >
