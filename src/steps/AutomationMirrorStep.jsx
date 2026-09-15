@@ -71,6 +71,26 @@ function formatDateTime(ts) {
   return ts ? new Date(ts).toLocaleString() : 'unknown time';
 }
 
+// Deliberately relative ("Xm ago"), unlike formatDateTime's exact timestamp above — proof-of-life
+// for the poll/a cycle (see the recipes' resume branch, which stamps project.lastCheckedAt every
+// time either one actually picks this video up, whatever the outcome). The whole point is a
+// same-glance read: "is the system still actively looking at this video, or did that stop a while
+// ago" is much faster to judge from "2m ago" than from a wall-clock time the viewer has to subtract
+// themselves — and if it stays old across a page reload, that's a clear, direct signal something
+// stopped on OUR side, as opposed to Google simply being slow. null (never checked yet, e.g. a video
+// still on its very first attempt) renders nothing rather than a misleading "unknown time".
+function formatLastChecked(ts) {
+  if (!ts) return null;
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ${min % 60}m ago`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ago`;
+}
+
 // Concrete progress readout for one row, built from listIncompleteVideos' `counts` — only the
 // counts relevant to the video's CURRENT phase are meaningful (e.g. image counts mean nothing while
 // still writing scenes), so this only ever shows something for the two phases that have real
@@ -101,15 +121,24 @@ function formatWaitingReason(item, live) {
   // submissionNeverConfirmed. The automatic poll already retries this every ~60s (see
   // automationScheduler.js), "Resume now" below forces an immediate retry too.
   if (item.waitingReason === 'batch_submission_failed') return '⚠ Batch submission never confirmed — retrying automatically';
+  // Distinct from BOTH 'awaiting_batch' (ordinary, ongoing wait) AND 'batch_submission_failed' (no
+  // job ever went out at all): here a real job WAS accepted by Google and status checks keep
+  // succeeding, but batchStats.pendingRequestCount hasn't moved in over 2 hours — see
+  // batchResumption.js's withAcceptedButStuckFromEntries. Deliberately no "retrying automatically"
+  // here, unlike the line above — this one is never auto-resubmitted (see that file's own comment
+  // for why), it's visibility only, a human decides whether to wait it out or intervene.
+  if (item.waitingReason === 'batch_accepted_stuck')
+    return '⚠ Accepted by Google but stuck at 0 progress for over 2 hours — likely a temporary issue on Google’s side.';
   if (item.waitingReason === 'stuck') return item.stuckMessage || '⚠ Stuck — needs manual review';
   return '⏸ Idle — not part of an active cycle right now';
 }
 
 // Shared by the row's border/background and its two text colors below — a submission that never
-// confirmed is exactly as alarming as 'stuck' (both need a human to notice something's wrong, as
-// opposed to 'awaiting_batch'/'idle', which are ordinary states), so both get the same red treatment.
+// confirmed, or a job accepted but stuck, are exactly as alarming as 'stuck' (all three need a human
+// to notice something's wrong, as opposed to 'awaiting_batch'/'idle', which are ordinary states), so
+// all three get the same red treatment.
 function isAlarming(item) {
-  return item.stuck || item.waitingReason === 'batch_submission_failed';
+  return item.stuck || item.waitingReason === 'batch_submission_failed' || item.waitingReason === 'batch_accepted_stuck';
 }
 
 // Reassuring readout for a Google batch-service outage (src/lib/batchResumption.js's
@@ -639,7 +668,10 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
                         {formatGoogleServiceIssue(item.googleServiceIssue)}
                       </div>
                     )}
-                    <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 4 }}>started {formatDateTime(item.createdAt)}</div>
+                    <div style={{ ...mono, fontSize: 10, color: T.textMuted, marginTop: 4 }}>
+                      started {formatDateTime(item.createdAt)}
+                      {formatLastChecked(item.lastCheckedAt) && <> · Last checked: {formatLastChecked(item.lastCheckedAt)}</>}
+                    </div>
                   </div>
 
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -651,7 +683,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
                       Open in Storyboard
                     </button>
 
-                    {item.waitingReason === 'awaiting_batch' && (
+                    {(item.waitingReason === 'awaiting_batch' || item.waitingReason === 'batch_accepted_stuck') && (
                       <button
                         onClick={() => checkVideoForUpdates(item)}
                         disabled={anyBusy || !!live}
@@ -662,7 +694,7 @@ export default function AutomationMirrorStep({ run, userId, onResume, isMobile, 
                       </button>
                     )}
 
-                    {item.waitingReason !== 'awaiting_batch' && (
+                    {item.waitingReason !== 'awaiting_batch' && item.waitingReason !== 'batch_accepted_stuck' && (
                       <button
                         onClick={() => resumeVideoNow(item)}
                         disabled={anyBusy || item.waitingReason === 'stuck' || !!live}

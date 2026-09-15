@@ -255,7 +255,15 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   if (resumable) {
     videoId = resumable.id;
     createdAt = resumable.createdAt || Date.now();
+    // See fullPipelineRecipe.js's identical line — proof of life for the dashboard's "Last checked:
+    // Xm ago", stamped before anything below can fail.
+    updateVideoFields(videoId, { lastCheckedAt: Date.now() }).catch((err) =>
+      console.error('[staticBackgroundRecipe] failed to stamp lastCheckedAt', videoId, err)
+    );
     project = await rehydrateProjectMedia(resumable);
+    // Also fold onto the in-memory project — see fullPipelineRecipe.js's identical line for why
+    // (every persist() call in this invocation rebuilds the record from this local `project`).
+    project = { ...project, lastCheckedAt: Date.now() };
     // See fullPipelineRecipe.js's identical line — stamp createdByAutomation on a findResumableVideo
     // pickup (never on an explicit targetVideoId resume).
     if (!targetVideoId && project.createdByAutomation !== true) {

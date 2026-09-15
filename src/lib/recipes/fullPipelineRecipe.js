@@ -395,6 +395,14 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   if (resumable) {
     videoId = resumable.id;
     createdAt = resumable.createdAt || Date.now();
+    // Proof of life for the dashboard (AutomationMirrorStep.jsx's "Last checked: Xm ago") — stamped
+    // the instant a video is picked up for resume, before anything below can fail, so it reflects
+    // "the poll/a cycle actually looked at this video just now" regardless of what happens next
+    // (success, no change, or an error a few lines down). Best-effort and fire-and-forget: a failed
+    // write here must never block the real resume work, and there's nothing useful to retry it with.
+    updateVideoFields(videoId, { lastCheckedAt: Date.now() }).catch((err) =>
+      console.error('[fullPipelineRecipe] failed to stamp lastCheckedAt', videoId, err)
+    );
     // blob: URLs never survive a reload — a beat/audio that finished on an earlier cycle (in a
     // browser session that's since closed) has a storagePath but a dead url/blob. Rehydrating here,
     // before anything below checks readiness or touches media/render/thumbnail/YouTube, means those
@@ -402,6 +410,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     // in. (The rendered MP4 is not persisted, so it's never among what gets rehydrated — a resume
     // always re-renders.)
     project = await rehydrateProjectMedia(resumable);
+    // Also fold onto the in-memory project (not just the immediate targeted write above) — every
+    // phase's own persist()/persistMedia() call in THIS invocation rebuilds the whole record from
+    // this local `project` object (see videoRecord() below); without this, the next one of those
+    // would blindly overwrite the column and erase the stamp the moment it ran. Same reasoning as
+    // createdByAutomation right below.
+    project = { ...project, lastCheckedAt: Date.now() };
     // A companion Short is always a 9:16 video regardless of the channel's own format setting, and
     // the record itself is the source of truth for that (isShort persisted at creation — see
     // shortsEngine.js), so every resume path (poll, cycle, manual) forces it the same way here.

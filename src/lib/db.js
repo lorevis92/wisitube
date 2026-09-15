@@ -209,6 +209,12 @@ const VIDEO_DOWNSTREAM_FIELDS = [
   'isShort',
   'parentVideoId',
   'shortVideoId',
+  // Stamped by the recipes' resume branch every time the poll/a cycle picks this video up (see
+  // fullPipelineRecipe.js/staticBackgroundRecipe.js) — protected here for the same reason as the
+  // trio above: persistVideoMediaProgress exists specifically for the media phase's overlapping-
+  // writer risk (poll, manual "Check for updates", a full cycle, all potentially touching the same
+  // video), and a writer whose in-memory snapshot predates a concurrent stamp must never revert it.
+  'lastCheckedAt',
 ];
 
 /**
@@ -786,26 +792,53 @@ export async function listIncompleteVideos(userId) {
         counts.imagesTotal > 0 &&
         counts.imagesReady === 0 &&
         Date.now() - (v.createdAt || 0) > BATCH_SUBMISSION_STALE_MS;
+      // Set by src/lib/batchResumption.js's withAcceptedButStuckFromEntries once a job's own
+      // batchStats.pendingRequestCount has sat unchanged for ACCEPTED_BUT_STUCK_MS — distinct from
+      // submissionNeverConfirmed (no job ever went out at all) AND from googleServiceIssue (the
+      // status endpoint itself erroring with 503s): here the status check keeps succeeding and
+      // Google keeps saying the job is running, it just never advances. Only meaningful alongside
+      // hasPendingBatches (there IS a real outstanding job — it's a refinement of 'awaiting_batch',
+      // not an alternative to it), so it's folded into that branch below rather than its own.
+      const acceptedButStuck = !!v.batchAcceptedButStuck;
       results.push({
         videoId: v.id,
         channelId: channel.id,
         channelName: channel.name || 'Untitled channel',
         displayTitle: v.displayTitle || v.topic || 'Untitled video',
         createdAt: v.createdAt,
+        // Last time the poll or a cycle actually asked about this video's status, whatever the
+        // outcome — see updateVideoLastChecked / the recipes' resume branch. null for a video that's
+        // never been resumed/checked at all yet (e.g. still on its very first attempt).
+        lastCheckedAt: v.lastCheckedAt || null,
         phase,
         // A video explicitly given up on (see videoResumption.js's MAX_RESUME_ATTEMPTS) shows that
         // message instead of an ordinary progress label — it isn't "in progress" the same way, it's
         // stuck, and this dashboard is the one place that fact needs to stay visible. A batch that
-        // never confirmed submission gets its own equally-visible badge, ahead of the ordinary
-        // progress label, for the same reason.
-        phaseLabel: v.stuckError || (submissionNeverConfirmed ? '⚠ Batch submission never confirmed' : describeIncompletePhase(v, phase, counts)),
+        // never confirmed submission, or one stuck at zero Google-side progress, gets its own
+        // equally-visible badge, ahead of the ordinary progress label, for the same reason.
+        phaseLabel: v.stuckError
+          ? v.stuckError
+          : submissionNeverConfirmed
+            ? '⚠ Batch submission never confirmed'
+            : acceptedButStuck
+              ? '⚠ Accepted by Google but stuck'
+              : describeIncompletePhase(v, phase, counts),
         counts,
         isStaticBackground: !!v.staticBackground,
         stuck,
         stuckMessage: v.stuckError || null,
-        waitingReason: hasPendingBatches ? 'awaiting_batch' : submissionNeverConfirmed ? 'batch_submission_failed' : stuck ? 'stuck' : 'idle',
+        waitingReason: hasPendingBatches
+          ? acceptedButStuck
+            ? 'batch_accepted_stuck'
+            : 'awaiting_batch'
+          : submissionNeverConfirmed
+            ? 'batch_submission_failed'
+            : stuck
+              ? 'stuck'
+              : 'idle',
         hasPendingBatches,
         submissionNeverConfirmed,
+        batchAcceptedButStuck: v.batchAcceptedButStuck || null,
         // Set by src/lib/batchResumption.js while Google's batch service is returning 503s for one
         // of this video's jobs — { since, retryCount, resubmittedAt? }. Surfaced reassuringly in the
         // dashboard (AutomationMirrorStep.jsx) so an hour-long Google hiccup doesn't look like a hang.

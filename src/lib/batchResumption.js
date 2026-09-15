@@ -77,6 +77,50 @@ function withServiceIssueFromEntries(project) {
   return next;
 }
 
+// How long a job's batchStats.pendingRequestCount can stay EXACTLY unchanged across successive
+// status checks before it's flagged "accepted but stuck" — a distinct failure mode from both the
+// 503-unavailable handling above (Google's status endpoint itself erroring) and
+// submissionNeverConfirmed (db.js — no job ever got submitted at all): here the status check keeps
+// succeeding, Google keeps saying the job exists and is running, but its own progress counter never
+// moves. Confirmed live against a real stuck job (2026-09-15): api/gemini-batch.js's status action
+// returned HTTP 200, state 'processing', with metadata.batchStats.pendingRequestCount identical to
+// createTime all the way through — Google accepted the job and never touched it again. Deliberately
+// NOT auto-resubmitted the way a 503 give-up is: an unresponsive status endpoint is a clear signal
+// Google's own infra has a problem, but a job that Google itself confirms is "running" might still
+// complete on its own — resubmitting it risks paying twice for images that show up ten minutes after
+// we gave up. This is visibility only; a human decides whether to wait it out or intervene.
+const ACCEPTED_BUT_STUCK_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+// Reads batchStats.pendingRequestCount from a status response the same defensive way
+// findStateAnywhere (api/gemini-batch.js) reads the state string — this exact path is confirmed live
+// (see the comment above), but Google's schema has surprised this codebase before, so a missing/
+// non-numeric value degrades to "can't track progress for this job" rather than a false positive.
+function pendingRequestCountFrom(status) {
+  const n = Number(status?.raw?.metadata?.batchStats?.pendingRequestCount);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Recompute project.batchAcceptedButStuck { since, jobIds } from whichever pending entries have gone
+// ACCEPTED_BUT_STUCK_MS with no change in their own pendingRequestCount — mirrors
+// withServiceIssueFromEntries's shape exactly, but this is a wholly separate signal: a video can be a
+// normal 'awaiting_batch' (googleServiceIssue null, batchAcceptedButStuck null), mid a 503 outage
+// (googleServiceIssue set), AND/OR carrying a job stuck at zero progress (batchAcceptedButStuck set)
+// — these are independent, not mutually exclusive, since they come from different jobs or different
+// moments in the same job's life.
+function withAcceptedButStuckFromEntries(project) {
+  const stuckEntries = (project.pendingImageBatches || []).filter(
+    (e) => e.pendingRequestCountUnchangedSince && Date.now() - e.pendingRequestCountUnchangedSince > ACCEPTED_BUT_STUCK_MS
+  );
+  if (stuckEntries.length > 0) {
+    const since = Math.min(...stuckEntries.map((e) => e.pendingRequestCountUnchangedSince));
+    return { ...project, batchAcceptedButStuck: { since, jobIds: stuckEntries.map((e) => e.jobId) } };
+  }
+  if (!project.batchAcceptedButStuck) return project;
+  const next = { ...project };
+  delete next.batchAcceptedButStuck;
+  return next;
+}
+
 function base64ToBlob(base64, mimeType) {
   const byteChars = atob(base64);
   const byteNumbers = new Array(byteChars.length);
@@ -360,6 +404,25 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
       await persist?.(current);
     }
 
+    // "Accepted but stuck" tracking (see withAcceptedButStuckFromEntries's header comment) —
+    // independent of the state branches below: a job can be 'processing' (or even still reporting
+    // 'pending') for hours with this exact same pendingRequestCount every single check. Only ever
+    // records/clears the clock; the actual project-level flag is derived once, after the loop.
+    const pendingRequestCount = pendingRequestCountFrom(status);
+    if (pendingRequestCount !== null && pendingRequestCount !== entry.lastPendingRequestCount) {
+      // First observation for this job, OR real progress since the last check — either way, reset
+      // the clock to now rather than flag it.
+      current = updateBatchEntry(current, entry.jobId, {
+        lastPendingRequestCount: pendingRequestCount,
+        pendingRequestCountUnchangedSince: Date.now(),
+      });
+      // eslint-disable-next-line no-await-in-loop
+      await persist?.(current);
+    }
+    // pendingRequestCount === entry.lastPendingRequestCount: leave pendingRequestCountUnchangedSince
+    // exactly as it was — that's what lets it keep aging across checks instead of resetting on
+    // every single one, which is the whole signal withAcceptedButStuckFromEntries reads.
+
     if (status.state === 'succeeded') {
       let results;
       try {
@@ -475,6 +538,14 @@ export async function resumePendingBatches(project, { userId, videoId, channelId
         : `${serviceGiveUps.length} job(s) written off after more than an hour of Google 503s — couldn't resubmit yet, will retry.`,
     });
   }
+
+  // Recompute the "accepted but stuck" banner from whatever entries are still pending after
+  // everything above (a job that just succeeded/failed above is gone from pendingImageBatches by
+  // now, so it can't spuriously keep this flag set once it's actually resolved). Only persists when
+  // it actually changes, same as the service-issue banner's own pattern.
+  const wasStuck = !!project.batchAcceptedButStuck;
+  current = withAcceptedButStuckFromEntries(current);
+  if (!!current.batchAcceptedButStuck !== wasStuck) await persist?.(current);
 
   // TEMPORARY diagnostic (remove once root-caused) — confirms this function actually reached its
   // end (as opposed to the caller giving up/navigating away mid-run) and what it ended with.
