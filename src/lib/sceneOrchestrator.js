@@ -3,6 +3,7 @@
 // previousTail so the voiceover reads as one continuous script rather than disjointed fragments.
 
 import { isCreditExhaustedMessage } from './providerErrors';
+import { postJSON } from './httpJson';
 
 const MAX_SCENES_PER_CALL = 16;
 const RETRY_BACKOFF_MS = 3000;
@@ -136,18 +137,18 @@ export async function generateAllScenes(outline, context, onProgress, resumeFrom
 }
 
 async function callGenerateImage(payload, signal) {
-  const res = await fetch('/api/generate-image', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  const data = await res.json();
+  // postJSON (src/lib/httpJson.js) reads the body as text before parsing — a platform-level failure
+  // (a maxDuration timeout, a billing/DEPLOYMENT_DISABLED block, an edge error page) returns plain
+  // text or HTML with an HTTP status that still looks ordinary, and a bare res.json() on that used
+  // to surface here as a bare, unreadable "Unexpected token" SyntaxError instead of an actionable
+  // message — exactly what happened for thumbnail generation on 2026-09-16 (the whole deployment
+  // was disabled for payment; this call is what a thumbnail regeneration goes through).
+  const { ok, data } = await postJSON('/api/generate-image', payload, { signal });
   // Prefer the provider's own detail over our generic wrapper so the real cause (fal.ai's raw
   // message, or the recognized "credit exhausted" line the endpoint puts in both fields) reaches
   // the caller — and from there scene.audioError / beat.errorMessage — instead of being flattened
   // to "generation failed (HTTP 502)".
-  if (!res.ok) throw new Error(data.detail || data.error || 'Image generation failed');
+  if (!ok) throw new Error(data.detail || data.error || 'Image generation failed');
   if (!data.imageUrl) throw new Error('Image generation returned no image URL');
   return data;
 }
@@ -168,16 +169,11 @@ export async function generateImage(prompt, provider, referenceImages, opts = {}
 }
 
 async function callGenerateAudio(payload, signal) {
-  const res = await fetch('/api/generate-audio', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  const data = await res.json();
+  // See callGenerateImage above — same postJSON, same reason.
+  const { ok, data } = await postJSON('/api/generate-audio', payload, { signal });
   // Same as callGenerateImage above: prefer data.detail (fal.ai's real message, or the recognized
   // "credit exhausted" line) so the true cause reaches scene.audioError instead of being lost.
-  if (!res.ok) throw new Error(data.detail || data.error || 'Audio generation failed');
+  if (!ok) throw new Error(data.detail || data.error || 'Audio generation failed');
   if (!data.audioUrl) throw new Error('Audio generation returned no audio URL');
   return data;
 }

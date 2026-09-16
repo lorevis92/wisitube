@@ -17,6 +17,7 @@
 // phase is one of 'upload' | 'thumbnail' | 'captions' | 'playlist', matching ExportStep's ytErrors keys.
 import { uploadVideoToYoutube } from './youtubeUpload';
 import { buildSrtFromScenes } from './srtBuilder';
+import { postJSON } from './httpJson';
 
 function blobToDataUri(blob) {
   return new Promise((resolve, reject) => {
@@ -213,27 +214,33 @@ export async function setThumbnail(videoId, thumbnailBlob, { channel, onProgress
       sourceType: thumbnailBlob.type,
       sourceBytes: thumbnailBlob.size,
     });
-    let res;
+    // postJSON (src/lib/httpJson.js) reads the body as text before parsing — a platform-level
+    // failure (a maxDuration timeout, a billing/DEPLOYMENT_DISABLED block, an edge error page)
+    // returns plain text or HTML with an HTTP status that still looks ordinary; a bare res.json()
+    // on that surfaces as a bare, unreadable "Unexpected token" SyntaxError instead of an
+    // actionable message.
+    let ok, status, data;
     try {
-      res = await fetch('/api/youtube', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set-thumbnail', channelId: channel?.id, refreshToken, videoId, thumbnailBlob: dataUrl }),
-      });
+      ({ ok, status, data } = await postJSON('/api/youtube', {
+        action: 'set-thumbnail',
+        channelId: channel?.id,
+        refreshToken,
+        videoId,
+        thumbnailBlob: dataUrl,
+      }));
     } catch (err) {
       console.error('[yt-upload] phase=set-thumbnail:fetch-error', err?.message, err?.stack);
       throw err;
     }
-    console.log('[yt-upload] phase=set-thumbnail:after', { status: res.status, ok: res.ok });
-    const data = await res.json();
-    if (!res.ok) {
+    console.log('[yt-upload] phase=set-thumbnail:after', { status, ok });
+    if (!ok) {
       // error is a string for our own validation failures, but a boolean flag when it's a
       // passthrough of Google's response (see api/youtube.js set-thumbnail) — the real message
       // is in detail/status in that case.
       const message =
         typeof data.error === 'string' && data.error
           ? data.error
-          : `YouTube rejected the thumbnail (HTTP ${data.status ?? res.status}): ${data.detail || 'Unknown error'}`;
+          : `YouTube rejected the thumbnail (HTTP ${data.status ?? status}): ${data.detail || 'Unknown error'}`;
       throw new Error(message);
     }
     return true;
