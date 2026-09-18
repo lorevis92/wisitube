@@ -302,7 +302,17 @@ export async function listPendingPromises(channelId) {
 }
 
 export async function deleteVideo(id) {
-  unwrap(await supabase.from('wisitube_videos').delete().eq('id', id));
+  // .select('id') so the response actually reports which rows matched the delete — without it,
+  // Supabase returns no error and an empty body both for "deleted 1 row" and for "RLS's USING
+  // clause matched 0 rows" (e.g. a DELETE policy that's missing or scoped wrong), so a delete that
+  // silently did nothing looked identical to a real one: the UI removed the row locally, but the
+  // row was still in Postgres and came right back on the next fetch. Throwing here instead surfaces
+  // that as a visible "Delete failed" in the UI (see AutomationMirrorStep.jsx's deleteVideoRow)
+  // rather than a delete that appears to work and then silently reverts.
+  const data = unwrap(await supabase.from('wisitube_videos').delete().eq('id', id).select('id'));
+  if (!data || data.length === 0) {
+    throw new Error('Delete had no effect — the video row still exists (likely a missing/misconfigured Supabase RLS DELETE policy on wisitube_videos).');
+  }
 }
 
 // ---- Channels ----
