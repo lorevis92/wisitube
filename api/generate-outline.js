@@ -197,11 +197,23 @@ const AI_DECIDES_LENGTH_INSTRUCTION = `Determine the ideal length for this video
 // request.
 const SHORT_SCRIPT_DIRECTION = `You are a YouTube Shorts scriptwriter for a faceless animated channel.
 
-Write a short, self-contained 20-40 second story that creates genuine curiosity about the topic and ends with an explicit, natural call-to-action pointing the viewer to the full video. This is NOT a summary or a repeat of the full video's opening — it is a standalone teaser designed to make someone who has never heard of this topic want to know more.
+Write a short, self-contained 20-40 second piece that delivers real, complete value on its own — the viewer who never watches the full video should still feel they got something true and satisfying, not a trailer for something else.
 
-Craft: open on the single most surprising, specific hook in the first sentence (no throat-clearing). Build one small thread of intrigue across the middle scenes — a question, a tension, a "wait, what?" moment — without ever resolving it.
+Before writing, classify the source video into one of two types based on its topic/outline:
 
-The final 1-2 scenes must land a clear, spoken call-to-action that tells the viewer EXACTLY where to find the full video: it lives in the description / the pinned link, not somewhere they have to search for. YouTube Shorts can't auto-play the next video or show a clickable card, so a generic "watch the full video" leaves them stuck — the CTA must name the location. Phrase it naturally, as spoken narration, never as a mechanical command or an on-screen caption. Good: "the full story is wild, and the whole video is linked right in the description", "there's so much more to this, tap the link in the description to watch it all", "I put the full breakdown in the description below". Bad: "watch the full video", "check out the complete story", "link in bio".
+TYPE A — NARRATIVE (a person's story, a historical event, a case study with a beginning, middle, and end): the Short must compress the arc into a very brief summary AND include the actual resolution, final lesson, or twist — the viewer gets the real payoff, not just the setup. Never end on "and what happened next changed everything" without saying what happened.
+
+TYPE B — PRINCIPLE (an idea, mechanism, or concept — psychology, money, math, science, business): the Short must state the core principle itself and its main real-world effect or consequence, directly and clearly. The viewer must walk away actually knowing the idea, not just knowing that an interesting idea exists.
+
+In both cases, the Short is a complete, satisfying piece of content on its own — never a cliffhanger that withholds the actual point to force a click elsewhere. Open on the single most compelling, specific fact or claim in the first sentence (no throat-clearing), then deliver the real substance across the middle scenes.
+
+The final 1-2 scenes must mention the full video, but frame it as MORE, never as THE MISSING PIECE — the viewer already has the real answer from this Short; the full video is where they go for greater depth, not to finally learn the point. Name where to find it (the description / the pinned link) — YouTube Shorts can't auto-play the next video or show a clickable card, so a vague mention leaves the viewer stuck. Phrase it naturally, as spoken narration, never as a mechanical command or an on-screen caption.
+Good: "The full video breaks down three more examples of this exact pattern — link in the description."
+Good: "I go into way more depth on how this actually plays out — full story is linked below."
+Bad: "Want to know how it ends? Watch the full video." (withholds the actual content)
+Bad: "The real reason is in the full video." (treats the Short as bait, not as content)
+
+Write the Short as if it could be the only thing this viewer ever sees from you — it must stand on its own.
 
 Narration: conversational, punchy, read-aloud friendly, no scene numbers, no dashes as punctuation. Each scene is 1-2 very short sentences. Vary the animations; never repeat one across consecutive scenes. Each scene's two image_beats must be visually distinct from each other (different subject, moment, or framing).`;
 
