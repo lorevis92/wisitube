@@ -425,6 +425,20 @@ export async function deleteVideo(id) {
 //
 //   alter table wisitube_channels
 //     add column if not exists channel_characters jsonb not null default '[]'::jsonb;
+//
+// Required one-time setup for per-channel day+time publishing slots (see AutomationStep.jsx's
+// "Publishing schedule" section and automationScheduler.js's per-channel slot check) — an explicit
+// calendar of { day, time } entries (day: 0=Sun…6=Sat, time: "HH:MM" local) that, when non-empty,
+// entirely replaces the global "check every N hours/days" interval for that one channel; empty
+// (the default) leaves the channel on the old interval + automation_publish_days model, unchanged.
+// automation_last_slot_key records the last slot this channel actually triggered on (e.g.
+// "2026-09-16T13:00" — today's date + the slot's time), so the same slot can't double-fire within
+// the minute it matches, while still firing again next week (a fresh date) and letting other slots
+// the same day fire independently (different key):
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_schedule_slots jsonb not null default '[]'::jsonb,
+//     add column if not exists automation_last_slot_key text;
 
 // Normalizes one half (video/short) of automation_thumbnail_direction to always-usable values —
 // shared by fromChannelRow (reading a saved row) and saveChannel (writing one, so a channel that
@@ -444,6 +458,17 @@ function normalizeThumbnailDirectionEntry(entry) {
 function normalizeThumbnailDirection(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   return { video: normalizeThumbnailDirectionEntry(r.video), short: normalizeThumbnailDirectionEntry(r.short) };
+}
+
+// Drops anything that isn't a genuine { day: 0-6, time: "HH:MM" } entry — shared by fromChannelRow
+// and saveChannel so a malformed slot (a stray column edit, a future format change) never reaches
+// automationScheduler.js's per-minute matching, which trusts these shapes completely.
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+function normalizeScheduleSlots(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((s) => s && typeof s === 'object' && Number.isInteger(Number(s.day)) && Number(s.day) >= 0 && Number(s.day) <= 6 && HHMM_RE.test(s.time))
+    .map((s) => ({ day: Number(s.day), time: s.time }));
 }
 
 function fromChannelRow(row) {
@@ -541,6 +566,13 @@ function fromChannelRow(row) {
     // Days of the week (JS Date.getDay(): 0=Sun … 6=Sat) this channel may publish on. A missing
     // column / non-array falls back to all seven (publish any day). An empty array means "never".
     automation_publish_days: Array.isArray(row.automation_publish_days) ? row.automation_publish_days : [0, 1, 2, 3, 4, 5, 6],
+    // Explicit day+time slots (see the migration comment above) — non-empty overrides the global
+    // interval entirely for this channel; empty (default) keeps the old interval-driven behavior.
+    automation_schedule_slots: normalizeScheduleSlots(row.automation_schedule_slots),
+    // Last slot key this channel actually triggered a cycle on — engine-owned state (written by
+    // automationScheduler.js), not something the user edits directly, same convention as
+    // automation_last_reset_date above.
+    automation_last_slot_key: row.automation_last_slot_key || null,
     // Recurring characters defined once at the channel level (ChannelDashboardStep.jsx) and merged
     // into every new video's character bible by src/lib/channelCharacters.js — each is
     // { id, name, description, photoStoragePath }. photoStoragePath (optional) points at a
@@ -618,6 +650,8 @@ export async function saveChannel(channel) {
     automation_publish_days: Array.isArray(channel.automation_publish_days)
       ? channel.automation_publish_days
       : [0, 1, 2, 3, 4, 5, 6],
+    automation_schedule_slots: normalizeScheduleSlots(channel.automation_schedule_slots),
+    automation_last_slot_key: channel.automation_last_slot_key || null,
     channel_characters: Array.isArray(channel.channel_characters) ? channel.channel_characters : [],
   };
   const data = unwrap(await supabase.from('wisitube_channels').upsert(row, { onConflict: 'id' }).select().single());

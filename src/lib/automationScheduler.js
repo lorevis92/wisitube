@@ -13,7 +13,16 @@
 // "Stop" always has something real to stop regardless of which one started it. Dry runs never go
 // through here — they don't spend money or touch automation_daily_upload_count, so they have no
 // need for the lock and keep using AutomationStep.jsx's own local stop ref exactly as before.
-import { getSchedulerSettings, saveSchedulerSettings, logAutomationStep, getLastRealAutomationLogEntry, listIncompleteVideos, loadChannel } from './db';
+import {
+  getSchedulerSettings,
+  saveSchedulerSettings,
+  logAutomationStep,
+  getLastRealAutomationLogEntry,
+  listIncompleteVideos,
+  loadChannel,
+  listChannels,
+  updateChannelFields,
+} from './db';
 import { runAutomationCycle, getRecipeForContentType, logStep } from './automationEngine';
 
 const TICK_MS = 60 * 1000;
@@ -162,10 +171,15 @@ let claimedLocally = false;
  * in a finally (with a retry — see releaseLock), and the heartbeat is stopped there first, so even
  * a total failure to write the release leaves the lock reclaimable within HEARTBEAT_STALE_MS. A tab
  * that vanishes mid-run is covered by the same heartbeat mechanism.
+ *
+ * channelIds: passed straight through to runAutomationCycle's own scoping (null = every enabled
+ * channel, same as always). resetInterval: false for a slot-triggered run (see tick() below) — a
+ * channel's own Publishing schedule slot firing must never push out the global interval's timer,
+ * since that interval belongs exclusively to the still-on-the-old-model channels at that point.
  */
-export async function runManagedCycle({ userId, onUpdate, onProgress }) {
-  return withSchedulerLock({ label: 'cycle', resetInterval: true }, ({ shouldStop }) =>
-    runAutomationCycle({ userId, dryRun: false, onUpdate, onProgress, shouldStop })
+export async function runManagedCycle({ userId, onUpdate, onProgress, channelIds = null, resetInterval = true }) {
+  return withSchedulerLock({ label: 'cycle', resetInterval }, ({ shouldStop }) =>
+    runAutomationCycle({ userId, dryRun: false, onUpdate, onProgress, shouldStop, channelIds })
   );
 }
 
@@ -468,6 +482,26 @@ async function pollPendingImageBatches({ userId, onProgress, onCycleEnd }) {
   }
 }
 
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+// The slot key `channel`'s own automation_schedule_slots resolves to RIGHT NOW (local time, rounded
+// to the minute), or null if no configured slot matches this exact minute. 'YYYY-MM-DDTHH:MM' —
+// today's date combined with the matching slot's time, not just the slot's day+time on their own:
+// that's what lets the exact same weekly slot (e.g. "Monday 13:00") produce a fresh key every week
+// it fires (so automation_last_slot_key comparing unequal lets it fire again) while a single tick
+// landing on this minute only ever computes one key, so a same-day, same-time double-tick can never
+// slip through as two different keys.
+function currentSlotKeyFor(channel, now = new Date()) {
+  const slots = Array.isArray(channel.automation_schedule_slots) ? channel.automation_schedule_slots : [];
+  if (slots.length === 0) return null;
+  const day = now.getDay();
+  const hhmm = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+  if (!slots.some((s) => Number(s.day) === day && s.time === hhmm)) return null;
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}T${hhmm}`;
+}
+
 let timerId = null;
 let batchTimerId = null;
 
@@ -484,6 +518,47 @@ let batchTimerId = null;
 // resumes cleanly from the new lastRunStartedAt runManagedCycle just wrote.
 let awaitingLockRelease = false;
 
+// Per-channel Publishing schedule slots (AutomationStep.jsx) — checked every tick, independent of
+// the global interval below and of whether it has elapsed. A channel with any automation_schedule_slots
+// configured is entirely opted out of the interval model (see the filter this feeds into
+// runManagedCycle's old-model call, right after this function): the only thing that can ever start a
+// cycle for it is one of its own slots matching the current minute. Multiple channels due in the
+// same tick are started together as a single scoped runAutomationCycle call (one lock acquisition),
+// not one call per channel.
+async function runDueSlotChannels({ channels, userId, onUpdate, onProgress, onCycleEnd }) {
+  const now = new Date();
+  const dueChannelIds = [];
+  for (const channel of channels) {
+    const key = currentSlotKeyFor(channel, now);
+    if (!key || key === channel.automation_last_slot_key) continue;
+    dueChannelIds.push(channel.id);
+    // Recorded BEFORE the (possibly long) cycle runs below, not after — so a slot can never
+    // double-fire even if this same minute somehow sees two ticks (the lock write below also takes
+    // an await, widening the window a plain in-memory guard wouldn't cover). Best-effort: a failed
+    // write here just means a possible re-check next tick, which currentSlotKeyFor's minute-rounding
+    // makes harmless in practice (the minute will very likely have already passed by then).
+    // eslint-disable-next-line no-await-in-loop
+    await updateChannelFields(channel.id, { automation_last_slot_key: key }).catch((err) =>
+      console.error('[automationScheduler] failed to record slot key for channel', channel.id, err)
+    );
+  }
+  if (dueChannelIds.length === 0) return;
+
+  const result = await runManagedCycle({ userId, onUpdate, onProgress, channelIds: dueChannelIds, resetInterval: false });
+  if (result.started) {
+    onCycleEnd?.();
+  } else {
+    // The shared lock was held by something else (a manual run, the old-model interval cycle, or
+    // another slot check) — the slot's own automation_last_slot_key is already recorded above, so
+    // this occurrence won't retry itself; it'll simply wait for its next scheduled occurrence. Worth
+    // a visible log line (unlike a routine blocked batch poll) since a missed slot is exactly the
+    // kind of silent failure this feature exists to avoid.
+    await logAutomationStep(null, null, 'scheduler', 'blocked', `slot-scheduled channel(s) due but the lock was unavailable: ${result.reason}`).catch(
+      (err) => console.error('[automationScheduler] failed to log a blocked slot tick', err)
+    );
+  }
+}
+
 async function tick({ userId, onUpdate, onProgress, onCycleEnd }) {
   let settings;
   try {
@@ -497,13 +572,43 @@ async function tick({ userId, onUpdate, onProgress, onCycleEnd }) {
     return;
   }
 
+  // Fetched once per tick and shared by both the slot check and the old-model interval call below —
+  // a transient failure here degrades to "skip the slot check this tick, and let the old-model call
+  // run unfiltered" rather than either mechanism silently stalling forever.
+  let channels = [];
+  try {
+    channels = await listChannels();
+  } catch (err) {
+    console.error('[automationScheduler] failed to list channels for the slot check', err);
+  }
+  const enabledChannels = channels.filter((c) => c.automation_enabled === true);
+  const slotChannels = enabledChannels.filter((c) => Array.isArray(c.automation_schedule_slots) && c.automation_schedule_slots.length > 0);
+  if (slotChannels.length > 0) {
+    await runDueSlotChannels({ channels: slotChannels, userId, onUpdate, onProgress, onCycleEnd });
+  }
+
   const intervalElapsed = !settings.lastRunStartedAt || Date.now() - settings.lastRunStartedAt >= intervalMs(settings);
 
   // Neither due on the ordinary interval schedule NOR mid-retry after an earlier block this cycle
   // (see awaitingLockRelease above) — genuinely nothing to do yet.
   if (!intervalElapsed && !awaitingLockRelease) return;
 
-  const result = await runManagedCycle({ userId, onUpdate, onProgress });
+  // Excludes any channel with its own Publishing schedule slots configured — those are exclusively
+  // driven by runDueSlotChannels above, never by this interval, regardless of how long it's been
+  // since their last run. When the listChannels() read above failed, channels is [] and this filter
+  // would incorrectly scope the cycle to nothing at all — fall back to unfiltered (every enabled
+  // channel) rather than let a transient read failure silently stop the old-model cycle from running.
+  const oldModelChannelIds = channels.length ? enabledChannels.filter((c) => !slotChannels.includes(c)).map((c) => c.id) : null;
+
+  // Every enabled channel has moved to its own Publishing schedule — nothing for the interval model
+  // to do. Skip the cycle entirely rather than acquiring the lock (and bumping lastRunStartedAt /
+  // the "Last run" timestamp AutomationStep.jsx shows for this panel) for a run with zero channels.
+  if (oldModelChannelIds && oldModelChannelIds.length === 0) {
+    awaitingLockRelease = false;
+    return;
+  }
+
+  const result = await runManagedCycle({ userId, onUpdate, onProgress, channelIds: oldModelChannelIds });
   if (!result.started) {
     // The interval has elapsed (or we were already retrying) and the lock is still held elsewhere —
     // keep retrying every tick until it frees up, ignoring the interval timer from here on (see

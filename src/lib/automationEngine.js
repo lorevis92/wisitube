@@ -127,7 +127,14 @@ export function canRunChannelToday(channel) {
   // seven days (publish any day); an explicit list restricts to those days. This gates the whole
   // channel for the cycle, so it sits BEFORE the videos_per_day / budget checks and coexists with
   // them: on a scheduled day, videos_per_day still governs how many videos that day.
-  const publishDays = Array.isArray(channel.automation_publish_days) ? channel.automation_publish_days : null;
+  //
+  // Skipped entirely for a channel with its own Publishing schedule slots configured
+  // (automation_schedule_slots — see AutomationStep.jsx / automationScheduler.js): the day (and exact
+  // time) is already enforced by which slot matched to get this channel's cycle started in the first
+  // place, so this is fallback behavior for channels that haven't configured slots, not an extra gate
+  // stacked on top of them.
+  const hasScheduleSlots = Array.isArray(channel.automation_schedule_slots) && channel.automation_schedule_slots.length > 0;
+  const publishDays = !hasScheduleSlots && Array.isArray(channel.automation_publish_days) ? channel.automation_publish_days : null;
   if (publishDays) {
     const today = new Date().getDay();
     if (!publishDays.includes(today)) {
@@ -267,8 +274,14 @@ const DRY_RUN_STEPS = [
  * (see the exhaustion loop below) — never mid-video. Returning true ends the current channel's
  * turn (finishing whatever video is already in flight) and, on the next channel-loop iteration,
  * ends the whole cycle without starting another channel.
+ * channelIds: optional array of channel ids to scope this run to (still filtered by
+ * automation_enabled same as always) — null/omitted runs every enabled channel, exactly as before.
+ * Used by automationScheduler.js to run only the channel(s) whose own Publishing schedule slot just
+ * came due, or only the channels still on the old interval model (excluding slot-scheduled ones),
+ * without disturbing the "Run now" / dry-run preview paths, which never pass this and so still see
+ * every enabled channel.
  */
-export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onProgress, shouldStop = () => false }) {
+export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onProgress, shouldStop = () => false, channelIds = null }) {
   console.warn('[run-cycle-debug] runAutomationCycle() entered', { dryRun });
   const allChannels = await listChannels();
   console.warn('[run-cycle-debug] runAutomationCycle() listChannels() returned', allChannels.length, 'channels');
@@ -279,6 +292,7 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
   // something else happened to touch its row. created_at never changes.
   const channels = allChannels
     .filter((c) => c.automation_enabled === true)
+    .filter((c) => !channelIds || channelIds.includes(c.id))
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   console.warn('[run-cycle-debug] runAutomationCycle()', channels.length, 'channels have automation_enabled === true');
 

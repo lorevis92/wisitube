@@ -65,6 +65,18 @@ const YOUTUBE_CATEGORIES = [
   { id: '29', label: 'Nonprofits & Activism' },
 ];
 
+// Mon-first ordering, matching "Publish on these days" below — values are JS Date.getDay() numbers
+// (0=Sun…6=Sat), same convention automation_publish_days already uses.
+const SCHEDULE_SLOT_DAYS = [
+  { value: 1, label: 'Monday' },
+  { value: 2, label: 'Tuesday' },
+  { value: 3, label: 'Wednesday' },
+  { value: 4, label: 'Thursday' },
+  { value: 5, label: 'Friday' },
+  { value: 6, label: 'Saturday' },
+  { value: 0, label: 'Sunday' },
+];
+
 const LOG_POLL_MS = 1500;
 
 function timeAgo(ts) {
@@ -628,7 +640,9 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         <div style={label}>Automatic scheduling</div>
         <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 8, lineHeight: 1.6, maxWidth: 620 }}>
           Runs a real (non-dry-run) cycle on its own, on the interval below — only while this browser tab stays open, same as every other
-          background process in this app. Off by default.
+          background process in this app. Off by default. A channel with its own Publishing schedule slots configured (see that channel's
+          settings below) ignores the interval entirely and follows its own day+time calendar instead — but this toggle still has to stay on,
+          since both mechanisms share the same background heartbeat.
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, fontSize: 13, fontFamily: FONT.ui, color: T.text }}>
@@ -975,15 +989,16 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       { n: 0, dl: 'Sun' },
                     ];
                     const selected = Array.isArray(c.automation_publish_days) ? c.automation_publish_days : [0, 1, 2, 3, 4, 5, 6];
+                    const hasSlots = Array.isArray(c.automation_schedule_slots) && c.automation_schedule_slots.length > 0;
                     const toggle = (n) => {
                       const next = selected.includes(n) ? selected.filter((d) => d !== n) : [...selected, n];
                       updateAndSaveImmediately(c.id, { automation_publish_days: next.sort((a, b) => a - b) });
                     };
                     return (
-                      <div style={{ gridColumn: '1 / -1' }}>
+                      <div style={{ gridColumn: '1 / -1', opacity: hasSlots ? 0.5 : 1 }}>
                         <div style={label}>
                           Publish on these days
-                          <InfoHint text="Days of the week automation is allowed to work on this channel at all — on any other day, the channel is skipped entirely for the cycle." />
+                          <InfoHint text="Days of the week automation is allowed to work on this channel at all — on any other day, the channel is skipped entirely for the cycle. Ignored once this channel has any Publishing schedule slot configured below." />
                         </div>
                         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
                           {DAYS.map(({ n, dl }) => (
@@ -991,14 +1006,100 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                               key={n}
                               style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}
                             >
-                              <input type="checkbox" checked={selected.includes(n)} disabled={running} onChange={() => toggle(n)} />
+                              <input type="checkbox" checked={selected.includes(n)} disabled={running || hasSlots} onChange={() => toggle(n)} />
                               {dl}
                             </label>
                           ))}
                         </div>
-                        {selected.length === 0 && (
-                          <div style={{ fontSize: 10, color: T.yellow, fontFamily: FONT.ui, marginTop: 6 }}>
-                            No days selected — this channel won't publish at all.
+                        {hasSlots ? (
+                          <div style={{ fontSize: 10, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6 }}>
+                            Ignored — this channel follows its Publishing schedule slots below instead.
+                          </div>
+                        ) : (
+                          selected.length === 0 && (
+                            <div style={{ fontSize: 10, color: T.yellow, fontFamily: FONT.ui, marginTop: 6 }}>
+                              No days selected — this channel won't publish at all.
+                            </div>
+                          )
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {(() => {
+                    // Explicit day+time slots — non-empty entirely replaces the global interval
+                    // panel's "check every N hours/days" for this one channel (automationScheduler.js's
+                    // tick() excludes any channel with slots from that interval-driven call and instead
+                    // starts a cycle for it the moment local time matches one of these). Always stored
+                    // as concrete { day, time } entries, never an "every day" marker — selecting "Every
+                    // day" below is a write-time action that fans out into 7 same-time slots (one per
+                    // day) so the scheduler's own matching logic never needs a second concept.
+                    const slots = Array.isArray(c.automation_schedule_slots) ? c.automation_schedule_slots : [];
+                    const saveSlots = (next) => updateAndSaveImmediately(c.id, { automation_schedule_slots: next });
+                    const addSlot = () => saveSlots([...slots, { day: 1, time: '09:00' }]);
+                    const removeSlot = (idx) => saveSlots(slots.filter((_, i) => i !== idx));
+                    const setSlotDay = (idx, value) => {
+                      if (value === 'all') {
+                        const time = slots[idx].time;
+                        const expanded = [0, 1, 2, 3, 4, 5, 6].map((d) => ({ day: d, time }));
+                        saveSlots([...slots.slice(0, idx), ...expanded, ...slots.slice(idx + 1)]);
+                      } else {
+                        saveSlots(slots.map((s, i) => (i === idx ? { ...s, day: Number(value) } : s)));
+                      }
+                    };
+                    const setSlotTime = (idx, value) => saveSlots(slots.map((s, i) => (i === idx ? { ...s, time: value } : s)));
+
+                    return (
+                      <div style={{ gridColumn: '1 / -1' }}>
+                        <div style={label}>
+                          Publishing schedule
+                          <InfoHint text="Exact day+time slots that start a real cycle for this channel — leave empty to keep using the global interval + Publish on these days above. Once you add a slot, the interval is ignored entirely for this channel." />
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                          {slots.map((slot, idx) => (
+                            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <select
+                                value={String(slot.day)}
+                                disabled={running}
+                                onChange={(e) => setSlotDay(idx, e.target.value)}
+                                style={{ ...inputStyle, width: 140 }}
+                              >
+                                <option value="all">Every day</option>
+                                {SCHEDULE_SLOT_DAYS.map((d) => (
+                                  <option key={d.value} value={d.value}>
+                                    {d.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <input
+                                type="time"
+                                value={slot.time || '09:00'}
+                                disabled={running}
+                                onChange={(e) => setSlotTime(idx, e.target.value)}
+                                style={{ ...inputStyle, width: 110 }}
+                              />
+                              <button
+                                onClick={() => removeSlot(idx)}
+                                disabled={running}
+                                title="Remove this slot"
+                                style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
+                              >
+                                🗑
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <button
+                          onClick={addSlot}
+                          disabled={running}
+                          style={{ ...btnGhost, marginTop: 8, padding: '6px 12px', fontSize: 11 }}
+                        >
+                          + Add time slot
+                        </button>
+                        {slots.length > 0 && (
+                          <div style={{ fontSize: 10, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6 }}>
+                            This channel follows {slots.length} slot{slots.length === 1 ? '' : 's'} above instead of the global interval — Publish
+                            on these days no longer applies while any slot is configured.
                           </div>
                         )}
                       </div>
