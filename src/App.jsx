@@ -16,14 +16,14 @@ import { T, FONT, mono, card, btnGhost, btnPrimary } from './theme';
 import { createId, saveVideo, persistVideoMediaProgress, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { STYLES } from './lib/pollinations';
-import { generateAllScenes } from './lib/sceneOrchestrator';
+import { generateAllScenes, splitScriptIntoScenes, generateBeatsForScript } from './lib/sceneOrchestrator';
 import { auditScriptRepetition, describeAudit } from './lib/repetitionAudit';
 import { useConfirm } from './components/useConfirm';
 import { supabase } from './lib/supabase';
 import { resumePendingBatches } from './lib/batchResumption';
 import { rehydrateProjectMedia } from './lib/mediaRehydration';
 import { uploadMedia } from './lib/mediaStorage';
-import { mergeChannelCharacters } from './lib/channelCharacters';
+import { mergeChannelCharacters, channelCharactersForPrompt, channelCharacterReferenceStubs } from './lib/channelCharacters';
 
 let sceneIdCounter = 1;
 let beatIdCounter = 1;
@@ -119,6 +119,12 @@ export default function App() {
   const [currentChannel, setCurrentChannel] = useState(null);
   const [settings, setSettings] = useState({
     topic: '',
+    // 'topic' (default, Claude writes the narration from a topic description) vs. 'script' (the user
+    // pastes their own complete narration — see CreateStep.jsx's "Paste your own script" toggle and
+    // App.jsx's handleScriptSubmit/runScriptPlan/runScriptBeatsGeneration). userScript only matters
+    // when this is 'script'.
+    creationMode: 'topic',
+    userScript: '',
     style: 'facestick',
     voice: 'af_heart',
     voiceEngine: 'kokoro',
@@ -171,6 +177,17 @@ export default function App() {
   // `project`, exactly like the old single-call flow.
   const [titleOptions, setTitleOptions] = useState(null);
   const [pendingPlan, setPendingPlan] = useState(null);
+  // "Paste your own script" mode (CreateStep.jsx) — parallel to titleOptions/pendingPlan above, but
+  // for the script-driven pipeline (handleScriptSubmit/runScriptPlan/runScriptBeatsGeneration below),
+  // which skips titles/outline entirely. pendingScript is the raw text (kept so a failure during the
+  // plan stage itself can be retried); pendingScriptPlan is the resolved plan (title/description/
+  // characterBible/verified scene split) once the plan stage succeeds, so a later failure during the
+  // beats stage retries ONLY that stage instead of re-running (and re-paying for) the plan stage.
+  // Exactly one of pendingPlan/pendingScript is ever non-null at a time — whichever flow is in
+  // flight — and both are used to decide the error UI's retry/back handlers (see the
+  // 'generating-scenes' tab below).
+  const [pendingScript, setPendingScript] = useState(null);
+  const [pendingScriptPlan, setPendingScriptPlan] = useState(null);
   const [sceneProgress, setSceneProgress] = useState({ current: 0, total: 0 });
   // True only during the final anti-repetition editorial pass (after all scenes are written, before
   // Storyboard) — swaps the "Writing your scenes…" loader copy so the extra wait is explained.
@@ -348,6 +365,8 @@ export default function App() {
     generationRef.current += 1;
     setTitleOptions(titles);
     setPendingPlan(null);
+    setPendingScript(null);
+    setPendingScriptPlan(null);
     setGenerationError('');
     setTab('titles');
   }
@@ -582,6 +601,217 @@ export default function App() {
     await runSceneGeneration(plan, newProjectId, newCreatedAt, generation, currentChannelId);
   }
 
+  // "Paste your own script" mode (CreateStep.jsx's alternative to "Describe your topic") — the user
+  // supplies the complete narration themselves; Claude never writes or rewrites a word of it, only
+  // splits it into scenes and illustrates them (see api/generate-scenes.js's split-script mode and
+  // sceneOrchestrator.js's splitScriptIntoScenes/generateBeatsForScript). Mirrors handleOutlineReady
+  // above in every way that's still relevant (new project id, reference-Blob conversion, channel
+  // character merge, static-background/thumbnail prep) but skips titles and outline entirely — there
+  // is no chapter plan to build, the script itself already IS the finished narration.
+  async function handleScriptSubmit(scriptText) {
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    const newProjectId = createId();
+    const newCreatedAt = Date.now();
+    setProjectId(newProjectId);
+    setCreatedAt(newCreatedAt);
+    setProject(null);
+    setOpenVideoChannelId(currentChannelId);
+    setGenerationError('');
+    setPendingPlan(null);
+    setTitleOptions(null);
+    setPendingScript(scriptText);
+    setPendingScriptPlan(null);
+    setSceneProgress({ current: 0, total: 0 });
+    setTab('generating-scenes');
+    await runScriptPlan(scriptText, newProjectId, newCreatedAt, generation, currentChannelId);
+  }
+
+  // Stage 1 of the script pipeline — splits+verifies the script, folds in the channel's recurring
+  // characters, resolves static-background/thumbnail assets, then hands off to stage 2 (beats) below.
+  // A failure here (including the verbatim-verification check) leaves pendingScriptPlan null, so
+  // retryScript knows to re-run this whole stage rather than just the beats stage.
+  async function runScriptPlan(scriptText, id, createdAtVal, generation, channelIdVal) {
+    try {
+      // Same reference-Blob conversion as handleOutlineReady above — File objects don't always
+      // survive structured-clone/IndexedDB round-trips as cleanly as Blobs do.
+      const references = await Promise.all(
+        (settings.references || [])
+          .filter((r) => r.file)
+          .map(async (r) => ({ id: r.id, label: r.label, file: new Blob([await r.file.arrayBuffer()], { type: r.file.type }) }))
+      );
+
+      const scriptContext = {
+        language: settings.language,
+        style: STYLES[settings.style].label,
+        imageProvider: settings.imageProvider,
+        contentType: settings.contentType,
+        characterHints: (settings.characterHints || [])
+          .filter((c) => c && (c.name?.trim() || c.details?.trim()))
+          .map((c) => ({ name: (c.name || '').trim(), details: (c.details || '').trim() })),
+        generalNotes: (settings.generalNotes || '').trim(),
+        references: [
+          ...references.map((r) => ({ id: r.id, label: r.label })),
+          ...channelCharacterReferenceStubs(currentChannel),
+        ],
+        channelCharacters: channelCharactersForPrompt(currentChannel),
+        thumbnailCreativeDirection: currentChannel?.automation_thumbnail_direction?.video?.text || '',
+      };
+
+      const split = await splitScriptIntoScenes(scriptText, scriptContext);
+      if (generationRef.current !== generation) return;
+
+      let characterBible = (split.characterBible || []).map((c) => ({
+        id: c.id || crypto.randomUUID(),
+        name: c.name || '',
+        baseDescription: c.base_description || '',
+        variants: Array.isArray(c.variants) ? c.variants.map((v) => ({ label: v.label || '', description: v.description || '' })) : [],
+      }));
+
+      let mergedReferences = references;
+      try {
+        const merged = await mergeChannelCharacters(currentChannel, characterBible, references);
+        characterBible = merged.characterBible;
+        mergedReferences = merged.references;
+      } catch (err) {
+        console.error('[runScriptPlan] channel character merge failed', err);
+      }
+
+      // Same deferred-upload handling as handleOutlineReady above — see its own comment for the
+      // reasoning (nothing here is script-mode-specific).
+      let staticBackground = null;
+      let staticTextStyle = null;
+      let thumbnailStoragePath = null;
+      if (settings.contentType === 'static_background') {
+        const sb = settings.staticBackground || { type: 'color', color: '#111111' };
+        if (sb.type === 'image' && sb.blob && !sb.imageStoragePath) {
+          try {
+            const path = await uploadMedia(session.user.id, id, 'static-background', 'bg', sb.blob);
+            staticBackground = { type: 'image', imageStoragePath: path, url: URL.createObjectURL(sb.blob), blob: sb.blob };
+          } catch (err) {
+            console.error('[runScriptPlan] failed to upload static background image, falling back to color', err);
+            staticBackground = { type: 'color', color: sb.color || '#111111', imageStoragePath: null, url: null, blob: null };
+          }
+        } else {
+          staticBackground = { type: sb.type || 'color', color: sb.color || '#111111', imageStoragePath: sb.imageStoragePath || null, url: null, blob: null };
+        }
+        staticTextStyle = settings.staticTextStyle || null;
+
+        if (settings.thumbnailMode === 'manual' && settings.manualThumbnailFile) {
+          try {
+            thumbnailStoragePath = await uploadMedia(session.user.id, id, 'thumbnail', 'thumbnail', settings.manualThumbnailFile);
+          } catch (err) {
+            console.error('[runScriptPlan] failed to upload manual thumbnail', err);
+          }
+        }
+      }
+
+      const plan = {
+        title: split.title,
+        description: split.description,
+        tags: split.tags,
+        thumbnails: split.thumbnails,
+        characterBible,
+        references: mergedReferences,
+        // Narration-only at this point (verbatim-verified in splitScriptIntoScenes) — the beats
+        // stage below pairs each of these with the image_beats it writes, never altering the text.
+        narrations: split.scenes,
+        totalScenes: split.scenes.length,
+        staticBackground,
+        staticTextStyle,
+        thumbnailStoragePath,
+      };
+      setPendingScriptPlan(plan);
+      setSceneProgress({ current: 0, total: plan.totalScenes });
+      await runScriptBeatsGeneration(plan, id, createdAtVal, generation, channelIdVal);
+    } catch (e) {
+      if (generationRef.current !== generation) return;
+      setGenerationError(String(e.message || e));
+    }
+  }
+
+  // Stage 2 of the script pipeline — writes image_beats for the already-fixed, already-verified
+  // narration (chunked, same MAX_SCENES_PER_CALL cap the outline pipeline uses), persisting partial
+  // progress exactly like runSceneGeneration above via the SAME persistPartial (it's already generic
+  // enough — it never reads plan.outline/plan.totalScenes, only the fields both flows share).
+  //
+  // Deliberately skips the anti-repetition editorial pass runSceneGeneration always runs: that pass
+  // can keep/delete/merge/reword scenes, which would silently violate this whole mode's one hard
+  // guarantee — the user's narration is never rewritten. "From here on, exactly the same pipeline as
+  // a normal video" starts at the setProject call below.
+  async function runScriptBeatsGeneration(plan, id, createdAtVal, generation, channelIdVal) {
+    const context = {
+      style: STYLES[settings.style].label,
+      imageProvider: settings.imageProvider,
+      format: settings.format,
+    };
+    const isStaticBackground = settings.contentType === 'static_background';
+    try {
+      const scenes = await generateBeatsForScript(
+        plan.narrations,
+        plan.characterBible,
+        plan.references.map((r) => ({ id: r.id, label: r.label })),
+        context,
+        (soFar, total) => {
+          if (generationRef.current !== generation) return;
+          setSceneProgress({ current: soFar.length, total });
+          persistPartial(plan, soFar, id, createdAtVal, channelIdVal);
+        },
+        isStaticBackground
+      );
+      if (generationRef.current !== generation) return;
+
+      setProject({
+        titles: [plan.title],
+        selectedTitle: 0,
+        description: plan.description,
+        tags: plan.tags,
+        thumbnails: plan.thumbnails,
+        subtitles: true,
+        references: plan.references,
+        characterBible: plan.characterBible,
+        scenes: buildScenesFromRaw(scenes, isStaticBackground),
+        series: settings.series || null,
+        subject: null,
+        promisedFollowUp: null,
+        ...(isStaticBackground
+          ? { staticBackground: plan.staticBackground, staticTextStyle: plan.staticTextStyle, ...(plan.thumbnailStoragePath ? { thumbnailStoragePath: plan.thumbnailStoragePath } : {}) }
+          : {}),
+      });
+      setTab('storyboard');
+    } catch (e) {
+      if (generationRef.current !== generation) return;
+      setGenerationError(String(e.message || e));
+    }
+  }
+
+  function retryScript() {
+    if (!projectId) return;
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    setGenerationError('');
+    // Same openVideoChannelId-is-safe-to-read-directly reasoning as retryScenes below — this fires
+    // from a later, separate render (a user click).
+    if (pendingScriptPlan) {
+      // The plan stage already succeeded once — only the beats stage failed (or was interrupted), so
+      // only retry that, rather than re-running (and re-paying for) the plan stage again.
+      runScriptBeatsGeneration(pendingScriptPlan, projectId, createdAt, generation, openVideoChannelId);
+    } else if (pendingScript) {
+      runScriptPlan(pendingScript, projectId, createdAt, generation, openVideoChannelId);
+    }
+  }
+
+  function backToCreateFromScriptFailure() {
+    generationRef.current += 1;
+    setPendingScript(null);
+    setPendingScriptPlan(null);
+    setGenerationError('');
+    setSceneProgress({ current: 0, total: 0 });
+    // settings.userScript itself is untouched (it lives in `settings`, not in this transient
+    // pipeline state) — the user's pasted text is still there when CreateStep re-renders.
+    setTab('create');
+  }
+
   function retryScenes() {
     if (!pendingPlan || !projectId) return;
     generationRef.current += 1;
@@ -612,6 +842,8 @@ export default function App() {
     const generation = generationRef.current;
     setTitleOptions(null);
     setPendingPlan(null);
+    setPendingScript(null);
+    setPendingScriptPlan(null);
     setGenerationError('');
 
     // Media archived after publish (src/lib/mediaArchival.js) — project.scenes and every scene
@@ -745,6 +977,8 @@ export default function App() {
     setOpenVideoChannelId(null);
     setTitleOptions(null);
     setPendingPlan(null);
+    setPendingScript(null);
+    setPendingScriptPlan(null);
     setGenerationError('');
     setSceneProgress({ current: 0, total: 0 });
 
@@ -758,7 +992,9 @@ export default function App() {
       }
     }
 
-    setSettings((s) => ({ ...s, topic, series, contentType }));
+    // Always back to "Describe your topic" mode — a suggestion (or "+ New video") is a fresh start,
+    // never a continuation of whatever script the user may have been pasting into a previous session.
+    setSettings((s) => ({ ...s, topic, series, contentType, creationMode: 'topic', userScript: '' }));
     setTab('create');
   }
 
@@ -813,9 +1049,11 @@ export default function App() {
     setOpenVideoChannelId(null);
     setTitleOptions(null);
     setPendingPlan(null);
+    setPendingScript(null);
+    setPendingScriptPlan(null);
     setGenerationError('');
     setSceneProgress({ current: 0, total: 0 });
-    setSettings((s) => ({ ...s, topic: '', series: null, contentType: channel.content_type || 'full_pipeline' }));
+    setSettings((s) => ({ ...s, topic: '', series: null, contentType: channel.content_type || 'full_pipeline', creationMode: 'topic', userScript: '' }));
     setTab('create');
   }
 
@@ -997,7 +1235,14 @@ export default function App() {
                 and gives you a timeline to fine-tune — then exports a ready-to-upload YouTube video. Free AI, no watermarks.
               </p>
             </div>
-            <CreateStep settings={settings} setSettings={setSettings} onTitles={handleTitles} channel={currentChannel} isMobile={isMobile} />
+            <CreateStep
+              settings={settings}
+              setSettings={setSettings}
+              onTitles={handleTitles}
+              onScriptSubmit={handleScriptSubmit}
+              channel={currentChannel}
+              isMobile={isMobile}
+            />
           </>
         )}
 
@@ -1028,21 +1273,23 @@ export default function App() {
                 {generationError}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={retryScenes} style={btnGhost}>
+                <button onClick={pendingScript ? retryScript : retryScenes} style={btnGhost}>
                   Retry
                 </button>
-                <button onClick={backToTitlesFromFailure} style={btnGhost}>
-                  ← Back to titles
+                <button onClick={pendingScript ? backToCreateFromScriptFailure : backToTitlesFromFailure} style={btnGhost}>
+                  ← Back {pendingScript ? 'to your script' : 'to titles'}
                 </button>
               </div>
             </div>
           ) : (
             <FullScreenLoader
-              title={finalizingScript ? 'Tightening the script…' : 'Writing your scenes…'}
+              title={finalizingScript ? 'Tightening the script…' : pendingScript ? 'Preparing your video…' : 'Writing your scenes…'}
               subtitle={
                 finalizingScript
                   ? 'A final editorial pass removing anything the script already said'
-                  : 'Claude is turning the outline into narration and image prompts, chapter by chapter'
+                  : pendingScript
+                    ? 'Splitting your script into scenes and writing the image prompts — your narration is never rewritten'
+                    : 'Claude is turning the outline into narration and image prompts, chapter by chapter'
               }
               progress={finalizingScript ? undefined : sceneProgress}
             />

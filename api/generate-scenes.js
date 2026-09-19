@@ -248,6 +248,428 @@ Perform the repetition audit and return the JSON array now.`,
   }
 }
 
+// Shared by the default (outline-driven) scene-chunk handler below and splitScriptBeats (the
+// "paste your own script" mode further down) — both hand the model a character_bible and must
+// validate it the exact same way, since both feed the exact same character_id/variant_label
+// assignment rules downstream.
+function parseCharacterBibleForBeats(raw) {
+  return Array.isArray(raw)
+    ? raw
+        .filter((c) => c && typeof c === 'object' && typeof c.id === 'string' && c.id)
+        .map((c) => ({
+          id: c.id,
+          name: typeof c.name === 'string' ? c.name : '',
+          variants: Array.isArray(c.variants) ? c.variants.filter((v) => v && typeof v.label === 'string').map((v) => v.label) : [],
+        }))
+    : [];
+}
+
+// Shared by the default scene-chunk handler and splitScriptBeats — same reasoning as
+// parseCharacterBibleForBeats above, for reference photos instead of characters.
+function parseReferencesForBeats(raw) {
+  return Array.isArray(raw)
+    ? raw.filter((r) => r && typeof r.id === 'string' && typeof r.label === 'string' && r.label.trim()).map((r) => ({ id: r.id, label: r.label.trim() }))
+    : [];
+}
+
+// Shared by the default scene-chunk handler and splitScriptBeats. Both sections are entirely about
+// assigning a reference photo / character appearance to an image_beat — the caller is responsible
+// for only calling these when the content type actually has image_beats at all (static_background
+// never does). Returns '' when there's nothing to offer, so a caller can always splice the result
+// straight into its own template string.
+function buildReferenceSection(refs) {
+  if (!refs.length) return '';
+  return `
+
+You have been given these reference photos, each with a label describing who/what they depict and in what context:
+${refs.map((r) => `- id: "${r.id}", label: "${r.label}"`).join('\n')}
+
+For EVERY image beat where the main subject (the person these references depict) is visibly present — as the focal subject, in the background, or partially visible — you MUST set reference_id to the id of the reference whose label best matches that beat's time period, appearance, or context. Do NOT leave reference_id null just because no label is a perfect match: if multiple references exist for the same subject, pick the closest match by context rather than skipping. Only set reference_id to null when the subject is genuinely NOT depicted in that specific beat. When in doubt, default to using the reference photo rather than skipping it.
+
+When reference_id is set, image_prompt MUST be an editing instruction, never a fresh description that ignores the photo: state explicitly to keep the subject's face, hairstyle and distinctive features from the reference photo, and describe ONLY what changes — in the exact form "keep the subject's face, hairstyle and distinctive features from the reference photo; change only: [scene/setting/action]". When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`;
+}
+
+function buildCharacterAssignmentSection(characterBible) {
+  if (!characterBible.length) return '';
+  return `
+
+Character bible for this video (already established — do NOT invent new characters, only ever use these exact ids):
+${characterBible.map((c) => `- id: "${c.id}", name: "${c.name}"${c.variants.length ? `, variants: [${c.variants.map((l) => `"${l}"`).join(', ')}]` : ''}`).join('\n')}
+
+For EVERY image beat where one of these characters is visibly present — as the focal subject, in the background, or partially visible — character_id and variant_label are REQUIRED: do NOT leave them null just because no variant is a perfect match, pick the closest one by that beat's narrative context. Only set character_id and variant_label to null when no character_bible character is genuinely depicted in that specific beat. If a beat has both a valid reference_id and a valid character_id for the same character, reference_id (a real photo) takes priority for the final image — character_id and variant_label are still saved as information regardless.`;
+}
+
+// Shared by the default scene-chunk handler and splitScriptBeats — same provider-aware split as
+// api/generate-outline.js's own imagePromptFieldDescription.
+function buildImagePromptFieldDescription(imageProvider, vertical) {
+  const premiumProvider = imageProvider === 'nanobanana' || imageProvider === 'gptimage';
+  return premiumProvider
+    ? `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Write it as a natural sentence that explicitly names the recognizable character/person by their proper name or title (e.g. "Legolas skateboarding in streetwear", not "a blond elf with pointed ears skateboarding") — trust the model's own knowledge for their appearance. Additionally: if this beat visually represents a specific number, statistic, price, percentage, or short quote mentioned in the narration, include the EXACT text to render on-screen in quotes within the prompt (e.g. a chart labeled "+340%"), and state it must be rendered verbatim, character-for-character accurate — never approximated or altered. Only do this when on-screen text genuinely aids comprehension (data/finance/stats content), not for purely narrative/scenic beats.`
+    : `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.`;
+}
+
+// ---- mode: 'split-script' ----
+//
+// Alternative to the titles → outline → scenes pipeline for a video whose narration the USER writes
+// themselves (CreateStep.jsx's "Paste your own script" mode), rather than one Claude invents from a
+// topic. Two stages, both dispatched here (folded into this file rather than a new one, same Vercel
+// Hobby function-cap reason as every other mode already in this file):
+//
+//   stage 'plan'  — reads the whole script ONCE and returns title/description/tags/thumbnail_concepts/
+//                   character_bible (same idea as api/generate-outline.js's own outline call, just
+//                   read from a finished script instead of invented from a topic) PLUS the script
+//                   split into scene-sized chunks. The split must NEVER alter the wording — every
+//                   returned scene must be an exact, verbatim substring of what the user wrote. The
+//                   client re-verifies this in code, never trusting the instruction alone (see
+//                   splitScriptIntoScenes in src/lib/sceneOrchestrator.js): it concatenates every
+//                   returned scene and compares it, whitespace-insensitively, against the original
+//                   script — a mismatch fails loudly instead of silently handing back altered wording.
+//   stage 'beats' — writes ONLY the two image_beats for a batch of already-fixed scene narrations (up
+//                   to 16 at a time, the same MAX_SCENES_PER_CALL cap the outline pipeline's own
+//                   chunking uses). Narration itself is never touched here — the request doesn't even
+//                   ask the model to return it, only to illustrate the exact text it's given.
+//
+// static_background has no per-scene images at all — the client never calls stage 'beats' for it,
+// the plan stage's own scene split is already the finished result (see sceneOrchestrator.js).
+const SPLIT_SCRIPT_VERBATIM_INSTRUCTION = `Do not paraphrase, summarize, shorten, or alter the wording of the provided script in any way. Your only job is to insert scene breaks at natural sentence boundaries and generate the visual image_beats for each resulting scene. The narration text of each scene must be an exact, verbatim substring of the original script — copy it character-for-character.`;
+
+async function splitScriptPlan(req, res, apiKey) {
+  try {
+    let script, language, style, imageProvider, contentType, isStaticBackground, hints, notes, refs, channelCharacters, thumbnailCreativeDirection;
+    try {
+      const body = req.body || {};
+      script = typeof body.script === 'string' ? body.script.trim() : '';
+      // 40000 chars is a generous ceiling — a 25-minute narration (this app's longest supported
+      // target) typically runs well under half that; this exists to keep the Anthropic call's
+      // input/output size sane, not to constrain any realistic script.
+      if (!script || script.length > 40000) return res.status(400).json({ error: 'Invalid script (must be 1-40000 characters)' });
+
+      language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
+      style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
+      imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
+      contentType = typeof body.contentType === 'string' ? body.contentType.trim() : '';
+      isStaticBackground = contentType === 'static_background';
+
+      hints = Array.isArray(body.characterHints)
+        ? body.characterHints
+            .filter((c) => c && typeof c === 'object' && ((typeof c.name === 'string' && c.name.trim()) || (typeof c.details === 'string' && c.details.trim())))
+            .map((c) => ({ name: typeof c.name === 'string' ? c.name.trim() : '', details: typeof c.details === 'string' ? c.details.trim() : '' }))
+        : [];
+      notes = typeof body.generalNotes === 'string' ? body.generalNotes.trim() : '';
+      refs = parseReferencesForBeats(body.references);
+      thumbnailCreativeDirection = typeof body.thumbnailCreativeDirection === 'string' ? body.thumbnailCreativeDirection.trim() : '';
+      channelCharacters = Array.isArray(body.channelCharacters)
+        ? body.channelCharacters
+            .filter((c) => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim() && typeof c.id === 'string' && c.id.trim())
+            .map((c) => ({
+              id: c.id.trim(),
+              name: c.name.trim(),
+              description: typeof c.description === 'string' ? c.description.trim() : '',
+              hasPhoto: c.hasPhoto === true,
+            }))
+        : [];
+    } catch (err) {
+      console.error('[split-script-plan] phase=validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    const providerAwareCharacterNote = imageProvider !== 'pollinations' && !isStaticBackground
+      ? `
+
+The image model has strong built-in world knowledge and will recognize well-known real people and iconic fictional characters by name alone — do NOT write exhaustive physical descriptions for them, it's redundant and may conflict with what the model already renders correctly. For these characters, keep base_description minimal or empty, and use variants ONLY to pin down story-specific appearance choices the model wouldn't automatically infer. For invented/fictional characters with no public recognition, still write a full base_description as before.`
+      : '';
+
+    const referenceContext = refs.length
+      ? `
+
+These reference photos will be available when illustrating individual scenes later, each with a label describing who/what it depicts:
+${refs.map((r) => `- label: "${r.label}"`).join('\n')}
+Keep character_bible consistent with these — if a reference photo's label describes a character, that character's name and variants should align with it.`
+      : '';
+
+    const channelCharacterContext = channelCharacters.length && !isStaticBackground
+      ? `
+
+RECURRING CHANNEL CHARACTERS — these characters already exist on this channel and recur across many of its videos. Whenever one of them genuinely appears in THIS script, you MUST include it in character_bible using the EXACT id and name given here — never invent a new id, never rename it:
+${channelCharacters.map((c) => `- id: "${c.id}", name: "${c.name}"${c.description ? ` — ${c.description}` : ''}${c.hasPhoto ? ' [reference photo available]' : ''}`).join('\n')}
+Characters this script needs that are NOT in the list above are still fine — give them their own fresh ids that don't collide with these.`
+      : '';
+
+    const styleTranslationNote = isStaticBackground
+      ? ''
+      : `\n\nCRITICAL: character descriptions must be expressed in traits that survive translation into the chosen art style (${style}). For highly stylized styles like stick figures: use ONLY features a stick figure can carry — hair shape/color, facial hair, glasses, hats, iconic clothing items or accessories, relative height/build. NEVER use realistic facial anatomy terms for stylized styles.`;
+
+    const hintsContext = hints.length
+      ? `
+
+Known characters (use these details, prioritize them over your own assumptions):
+${hints.map((h) => `- ${h.name || 'Unnamed character'}: ${h.details || '(no physical details given — infer if well-known, otherwise use your judgment)'}`).join('\n')}`
+      : '';
+
+    const characterBibleInstruction = isStaticBackground
+      ? `For the character bible: identify every recurring named person in the script. This exists only to keep names, roles and relationships consistent — there is no visual appearance to describe, keep base_description and variants brief and focused on identity/role/relationship, never physical traits.`
+      : `For the character bible: identify every character that appears more than once across the script — including the narrator/protagonist if the script has one. Create at least 2 variants when the story spans different life stages, time periods, or notable appearance changes, otherwise a single variant is enough. For every real, named, identifiable person, use your own knowledge of their actual physical appearance. Keep base_description and every variant description short and telegraphic — max 12-15 words each, comma-separated traits, never a full sentence.${providerAwareCharacterNote}`;
+
+    const titleInstruction = `Also write a punchy YouTube title for this video (max 70 chars) — it MUST both name the real subject explicitly by its proper name AND carry a real curiosity hook, exactly like: "Fritz Haber: The Chemist Who Fed the World, Then Gassed It" (not a vague label like "The Scientist Whose Invention Fed Billions").`;
+
+    const densityNote = `Aim for scene lengths consistent with this app's usual pacing — roughly 7-8 scenes per minute of spoken narration as a loose reference, not a rigid rule. Never split mid-sentence; every scene break must fall at a natural sentence boundary.`;
+
+    const systemPrompt = `You are a YouTube video producer preparing a script the user already wrote for production.
+
+${SPLIT_SCRIPT_VERBATIM_INSTRUCTION} ${densityNote}
+
+${characterBibleInstruction}${hintsContext}${referenceContext}${channelCharacterContext}${styleTranslationNote}
+
+${titleInstruction}
+
+You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
+
+JSON schema:
+{
+  "title": "see instruction above",
+  "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end",
+  "tags": [15 short SEO tag strings],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator: one strong focal subject, exaggerated emotion, no text in image. If a real, identifiable person or well-known character is central, name them explicitly by proper name — never a generic stand-in." }],
+  "character_bible": [array of objects: { "id": string, "name": string, "base_description": string, "variants": [{ "label": string, "description": string }] }],
+  "scenes": [array of strings — the ENTIRE script split into scene-sized chunks, in original order; concatenating every entry (ignoring surrounding whitespace) must reconstruct the original script EXACTLY, word for word]
+}
+
+Rules:
+- scenes MUST cover the entire script — nothing skipped, nothing added, nothing paraphrased.${
+      thumbnailCreativeDirection ? `\n- Thumbnail creative direction for this channel (apply to every thumbnail_concepts entry): ${thumbnailCreativeDirection}` : ''
+    }
+- Assign each character a stable "id" (e.g. "char_napoleon", lowercase, no spaces).`;
+
+    // Output ≈ the entire script echoed back (verbatim, just re-segmented) plus a modest amount of
+    // metadata — sized off the script's own length rather than a fixed constant, generously (÷3
+    // chars/token is conservative), capped so a pathological input can't request an absurd budget.
+    const approxScriptTokens = Math.ceil(script.length / 3);
+    const maxTokens = Math.min(48000, approxScriptTokens + 4000);
+
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: [
+            { role: 'user', content: `Narration language: ${language}. Here is the complete script:\n\n${script}\n\nRespond with JSON only.` },
+          ],
+        }),
+      });
+    } catch (err) {
+      console.error('[split-script-plan] phase=fetch-anthropic', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not reach the Anthropic API', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    let rawText;
+    try {
+      rawText = await response.text();
+    } catch (err) {
+      console.error('[split-script-plan] phase=read-response-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the Anthropic response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+    if (!response.ok) {
+      console.error('[split-script-plan] phase=anthropic-http-error status=', response.status, 'body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic API error', detail: rawText.slice(0, 300) });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (err) {
+      console.error('[split-script-plan] phase=parse-envelope-json', err?.message, 'raw body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic returned a non-JSON response', detail: rawText.slice(0, 300) });
+    }
+
+    let raw;
+    try {
+      raw = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    } catch (err) {
+      console.error('[split-script-plan] phase=extract-text-blocks', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read Anthropic response content', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    if (data?.stop_reason && data.stop_reason !== 'end_turn') {
+      console.warn(
+        `[split-script-plan] DIAGNOSTIC stop_reason=${data.stop_reason} output_tokens=${data?.usage?.output_tokens} ` +
+          `scriptLen=${script.length} maxTokens=${maxTokens} — response may be truncated`
+      );
+    }
+
+    const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = clean.indexOf('{');
+    const end = clean.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+      console.error('[split-script-plan] phase=locate-json no braces, text=', clean.slice(0, 300));
+      return res.status(502).json({ error: 'Invalid AI response' });
+    }
+
+    let plan;
+    try {
+      plan = JSON.parse(clean.slice(start, end + 1));
+    } catch (e) {
+      console.error('[split-script-plan] phase=parse-plan-json', e?.message, 'stop_reason=', data?.stop_reason, 'text=', clean.slice(0, 400));
+      return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
+    }
+
+    if (!Array.isArray(plan.scenes) || plan.scenes.length === 0) {
+      console.error('[split-script-plan] phase=validate too few scenes:', plan?.scenes?.length, 'stop_reason=', data?.stop_reason);
+      return res.status(502).json({ error: 'AI response missing scenes' });
+    }
+    plan.scenes = plan.scenes.filter((s) => typeof s === 'string' && s.length > 0);
+    if (!plan.scenes.length) return res.status(502).json({ error: 'AI response missing scenes' });
+
+    plan.title = typeof plan.title === 'string' ? plan.title.trim() : '';
+    plan.description = typeof plan.description === 'string' ? plan.description : '';
+    plan.tags = Array.isArray(plan.tags) ? plan.tags : [];
+    plan.thumbnail_concepts = Array.isArray(plan.thumbnail_concepts) ? plan.thumbnail_concepts.slice(0, 3) : [];
+    plan.character_bible = Array.isArray(plan.character_bible) ? plan.character_bible : [];
+
+    return res.status(200).json(plan);
+  } catch (err) {
+    console.error('[split-script-plan] phase=unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
+
+async function splitScriptBeats(req, res, apiKey) {
+  try {
+    let scenes, style, imageProvider, vertical, characterBible, refs;
+    try {
+      const body = req.body || {};
+      scenes = Array.isArray(body.scenes) ? body.scenes.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim()) : [];
+      if (!scenes.length || scenes.length > 16) return res.status(400).json({ error: 'Invalid scenes (must be 1-16)' });
+
+      style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
+      imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
+      vertical = body.format === '9:16';
+      characterBible = parseCharacterBibleForBeats(body.characterBible);
+      refs = parseReferencesForBeats(body.references);
+    } catch (err) {
+      console.error('[split-script-beats] phase=validate-body', err?.message, err?.stack);
+      return res.status(400).json({ error: 'Invalid request body', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    const imagePromptFieldDescription = buildImagePromptFieldDescription(imageProvider, vertical);
+    const referenceSection = buildReferenceSection(refs);
+    const characterAssignmentSection = buildCharacterAssignmentSection(characterBible);
+
+    const sceneCount = scenes.length;
+    const scenesBlock = scenes.map((s, i) => `[scene ${i + 1}] "${s}"`).join('\n\n');
+
+    const systemPrompt = `You are illustrating scenes of a YouTube video whose narration is already final and fixed.
+
+The narration for each scene below has ALREADY been written by someone else and must NEVER be altered, rephrased, shortened, translated, or added to in any way — your only job is to write the two image_beats for each given scene, illustrating what that exact narration describes.
+
+Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.
+
+You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
+
+JSON schema:
+{
+  "scenes": [exactly ${sceneCount} objects, in the SAME order as the scenes listed below: {
+    "image_beats": [exactly 2 objects: {
+      "image_prompt": "${imagePromptFieldDescription}",
+      "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
+      "reference_id": string | null,
+      "character_id": string | null,
+      "variant_label": string | null
+    }]
+  }]
+}
+
+Rules:
+- image_prompt must be visually literal (an image model will draw exactly this), always in English.
+- If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterAssignmentSection}`;
+
+    // Lighter than the default handler's 8000/16-scene budget — this stage never authors narration
+    // (the heaviest part of that budget), only 2 image_beats per scene.
+    const maxTokens = Math.min(12000, 1000 + sceneCount * 500);
+
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: `Write the image_beats for these ${sceneCount} scenes:\n\n${scenesBlock}\n\nRespond with JSON only.` }],
+        }),
+      });
+    } catch (err) {
+      console.error('[split-script-beats] phase=fetch-anthropic', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not reach the Anthropic API', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    let rawText;
+    try {
+      rawText = await response.text();
+    } catch (err) {
+      console.error('[split-script-beats] phase=read-response-body', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read the Anthropic response body', detail: String(err?.message || err).slice(0, 300) });
+    }
+    if (!response.ok) {
+      console.error('[split-script-beats] phase=anthropic-http-error status=', response.status, 'body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic API error', detail: rawText.slice(0, 300) });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (err) {
+      console.error('[split-script-beats] phase=parse-envelope-json', err?.message, 'raw body=', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Anthropic returned a non-JSON response', detail: rawText.slice(0, 300) });
+    }
+
+    let raw;
+    try {
+      raw = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    } catch (err) {
+      console.error('[split-script-beats] phase=extract-text-blocks', err?.message, err?.stack);
+      return res.status(502).json({ error: 'Could not read Anthropic response content', detail: String(err?.message || err).slice(0, 300) });
+    }
+
+    if (data?.stop_reason && data.stop_reason !== 'end_turn') {
+      console.warn(
+        `[split-script-beats] DIAGNOSTIC stop_reason=${data.stop_reason} output_tokens=${data?.usage?.output_tokens} ` +
+          `sceneCount=${sceneCount} — response may be truncated`
+      );
+    }
+
+    const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = clean.indexOf('{');
+    const end = clean.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+      console.error('[split-script-beats] phase=locate-json no braces, text=', clean.slice(0, 300));
+      return res.status(502).json({ error: 'Invalid AI response' });
+    }
+
+    let plan;
+    try {
+      plan = JSON.parse(clean.slice(start, end + 1));
+    } catch (e) {
+      console.error('[split-script-beats] phase=parse-plan-json', e?.message, 'text=', clean.slice(0, 400));
+      return res.status(502).json({ error: 'Could not parse AI JSON', detail: String(e).slice(0, 300) });
+    }
+
+    if (!Array.isArray(plan.scenes) || plan.scenes.length !== sceneCount) {
+      console.error('[split-script-beats] phase=validate scene count mismatch — got', plan?.scenes?.length, 'expected', sceneCount);
+      return res.status(502).json({ error: 'AI response scene count mismatch' });
+    }
+
+    return res.status(200).json(plan);
+  } catch (err) {
+    console.error('[split-script-beats] phase=unexpected', err?.message, err?.stack);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err).slice(0, 300) });
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -264,6 +686,10 @@ export default async function handler(req, res) {
 
   // Final anti-repetition editorial pass — dispatched before any scene-chunk body validation below.
   if (req.body?.mode === 'repetition-audit') return repetitionAudit(req, res, apiKey);
+  // "Paste your own script" mode (CreateStep.jsx) — see the header comment above splitScriptPlan.
+  if (req.body?.mode === 'split-script') {
+    return req.body?.stage === 'beats' ? splitScriptBeats(req, res, apiKey) : splitScriptPlan(req, res, apiKey);
+  }
 
   // Outer safety net: the phase-specific catches below should handle everything, but this
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
@@ -296,23 +722,8 @@ export default async function handler(req, res) {
       contentType = typeof body.contentType === 'string' ? body.contentType.trim() : '';
       isStaticBackground = contentType === 'static_background';
 
-      characterBible = Array.isArray(body.characterBible)
-        ? body.characterBible
-            .filter((c) => c && typeof c === 'object' && typeof c.id === 'string' && c.id)
-            .map((c) => ({
-              id: c.id,
-              name: typeof c.name === 'string' ? c.name : '',
-              variants: Array.isArray(c.variants)
-                ? c.variants.filter((v) => v && typeof v.label === 'string').map((v) => v.label)
-                : [],
-            }))
-        : [];
-
-      refs = Array.isArray(body.references)
-        ? body.references
-            .filter((r) => r && typeof r.id === 'string' && typeof r.label === 'string' && r.label.trim())
-            .map((r) => ({ id: r.id, label: r.label.trim() }))
-        : [];
+      characterBible = parseCharacterBibleForBeats(body.characterBible);
+      refs = parseReferencesForBeats(body.references);
 
       previousTail = typeof body.previousTail === 'string' ? body.previousTail.trim() : '';
       isVeryFirstChunk = !!body.isVeryFirstChunk;
@@ -331,25 +742,8 @@ export default async function handler(req, res) {
 
     // Both sections below are entirely about assigning a reference photo / character appearance to
     // an image_beat — meaningless for static_background, which has no image_beats at all.
-    const referenceSection = !isStaticBackground && refs.length
-      ? `
-
-You have been given these reference photos, each with a label describing who/what they depict and in what context:
-${refs.map((r) => `- id: "${r.id}", label: "${r.label}"`).join('\n')}
-
-For EVERY image beat where the main subject (the person these references depict) is visibly present — as the focal subject, in the background, or partially visible — you MUST set reference_id to the id of the reference whose label best matches that beat's time period, appearance, or context. Do NOT leave reference_id null just because no label is a perfect match: if multiple references exist for the same subject, pick the closest match by context rather than skipping. Only set reference_id to null when the subject is genuinely NOT depicted in that specific beat. When in doubt, default to using the reference photo rather than skipping it.
-
-When reference_id is set, image_prompt MUST be an editing instruction, never a fresh description that ignores the photo: state explicitly to keep the subject's face, hairstyle and distinctive features from the reference photo, and describe ONLY what changes — in the exact form "keep the subject's face, hairstyle and distinctive features from the reference photo; change only: [scene/setting/action]". When reference_id is null, image_prompt works exactly as before (plain descriptive text-to-image).`
-      : '';
-
-    const characterAssignmentSection = !isStaticBackground && characterBible.length
-      ? `
-
-Character bible for this video (already established — do NOT invent new characters, only ever use these exact ids):
-${characterBible.map((c) => `- id: "${c.id}", name: "${c.name}"${c.variants.length ? `, variants: [${c.variants.map((l) => `"${l}"`).join(', ')}]` : ''}`).join('\n')}
-
-For EVERY image beat where one of these characters is visibly present — as the focal subject, in the background, or partially visible — character_id and variant_label are REQUIRED: do NOT leave them null just because no variant is a perfect match, pick the closest one by that beat's narrative context. Only set character_id and variant_label to null when no character_bible character is genuinely depicted in that specific beat. If a beat has both a valid reference_id and a valid character_id for the same character, reference_id (a real photo) takes priority for the final image — character_id and variant_label are still saved as information regardless.`
-      : '';
+    const referenceSection = !isStaticBackground ? buildReferenceSection(refs) : '';
+    const characterAssignmentSection = !isStaticBackground ? buildCharacterAssignmentSection(characterBible) : '';
 
     // static_background still benefits from knowing recurring names — purely so the narration
     // refers to the same person consistently (e.g. always "Maria", not switching to "the woman"
@@ -362,15 +756,7 @@ For EVERY image beat where one of these characters is visibly present — as the
           .join(', ')}.`
       : '';
 
-    // Pollinations (Flux/Kontext) has no real-world knowledge and cannot render legible text —
-    // literal, name-free descriptions and a hard "no text" rule are what keep it on target.
-    // Nano Banana 2 / GPT Image 2 are LLM-native: they recognize named real people and characters
-    // and can render accurate on-screen text, so the instruction leans into both strengths instead
-    // of fighting them.
-    const premiumProvider = imageProvider === 'nanobanana' || imageProvider === 'gptimage';
-    const imagePromptFieldDescription = premiumProvider
-      ? `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Write it as a natural sentence that explicitly names the recognizable character/person by their proper name or title (e.g. "Legolas skateboarding in streetwear", not "a blond elf with pointed ears skateboarding") — trust the model's own knowledge for their appearance. Additionally: if this beat visually represents a specific number, statistic, price, percentage, or short quote mentioned in the narration, include the EXACT text to render on-screen in quotes within the prompt (e.g. a chart labeled "+340%"), and state it must be rendered verbatim, character-for-character accurate — never approximated or altered. Only do this when on-screen text genuinely aids comprehension (data/finance/stats content), not for purely narrative/scenic beats.`
-      : `concrete visual description in English of ONE clear image illustrating a specific visual moment within this narration: one subject, one action, simple composition${vertical ? ', vertical composition' : ''}. Never include text, letters, numbers or signs in the image.`;
+    const imagePromptFieldDescription = buildImagePromptFieldDescription(imageProvider, vertical);
 
     // Tone-matched to each content type's own established narration style (full_pipeline: punchy/
     // conversational; static_background: calm/measured) — same substance either way: a brief recap

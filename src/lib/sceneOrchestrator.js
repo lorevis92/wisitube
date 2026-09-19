@@ -136,6 +136,137 @@ export async function generateAllScenes(outline, context, onProgress, resumeFrom
   return { scenes: allScenes, promisedFollowUp };
 }
 
+// ---- "Paste your own script" mode (CreateStep.jsx) ----
+//
+// Two-call counterpart to generateAllScenes above, for a video whose narration the user wrote
+// themselves rather than one Claude invents from a topic. Split into two client-visible steps
+// (rather than one, like generateAllScenes) because the two calls have genuinely different
+// contracts: splitScriptIntoScenes is a single call over the WHOLE script (it can't be chunked —
+// scene boundaries can only be decided by reading the entire thing at once), while
+// generateBeatsForScript is chunked exactly like generateAllScenes's own per-chapter loop, since
+// each beats-writing call is independent per scene and there's no reason to pay for one giant call.
+
+function whitespaceInsensitive(s) {
+  return (s || '').replace(/\s+/g, '');
+}
+
+async function callSplitScriptPlan(payload) {
+  const res = await fetch('/api/generate-scenes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'split-script', stage: 'plan', ...payload }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Script splitting failed');
+  if (!Array.isArray(data.scenes) || !data.scenes.length) throw new Error('Script splitting returned no scenes');
+  return data;
+}
+
+/**
+ * script: the user's complete, verbatim narration text.
+ * context: { language, style, imageProvider, contentType, characterHints, generalNotes, references,
+ * channelCharacters, thumbnailCreativeDirection } — references are the { id, label } stubs
+ * (channelCharacterReferenceStubs / manual uploads), same shape TitleSelectStep.jsx sends.
+ *
+ * Calls api/generate-scenes.js's split-script 'plan' stage, then — never trusting the instruction
+ * alone (api/generate-scenes.js's SPLIT_SCRIPT_VERBATIM_INSTRUCTION) — verifies in code that every
+ * returned scene, concatenated in order and compared whitespace-insensitively, reconstructs the
+ * original script exactly. Throws a clear, actionable error instead of silently handing back a
+ * script the model altered.
+ *
+ * Returns { title, description, tags, thumbnails, characterBible (raw, NOT yet merged with the
+ * channel's recurring characters — the caller does that, same as it already does for the outline
+ * flow), scenes: [string, ...] } — scenes are narration-only at this point, image_beats come from
+ * generateBeatsForScript below.
+ */
+export async function splitScriptIntoScenes(script, context) {
+  const plan = await withRetry(() =>
+    callSplitScriptPlan({
+      script,
+      language: context.language,
+      style: context.style,
+      imageProvider: context.imageProvider,
+      contentType: context.contentType,
+      characterHints: context.characterHints,
+      generalNotes: context.generalNotes,
+      references: context.references,
+      channelCharacters: context.channelCharacters,
+      thumbnailCreativeDirection: context.thumbnailCreativeDirection,
+    })
+  );
+
+  if (whitespaceInsensitive(plan.scenes.join('')) !== whitespaceInsensitive(script)) {
+    throw new Error(
+      "The AI's scene split didn't exactly reproduce your original script word for word — nothing was generated, so your script is untouched. Please try again."
+    );
+  }
+
+  return {
+    title: plan.title || '',
+    description: plan.description || '',
+    tags: plan.tags || [],
+    thumbnails: plan.thumbnail_concepts || [],
+    characterBible: plan.character_bible || [],
+    scenes: plan.scenes,
+  };
+}
+
+async function callSplitScriptBeats(payload) {
+  const res = await fetch('/api/generate-scenes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'split-script', stage: 'beats', ...payload }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Image beat generation failed');
+  if (!Array.isArray(data.scenes) || data.scenes.length !== payload.scenes.length) throw new Error('Image beat generation returned the wrong number of scenes');
+  return data.scenes;
+}
+
+/**
+ * narrations: the FULL, already-verified array of scene narration strings (splitScriptIntoScenes's
+ * output) — never re-sent to the model for rewriting, only chunked here and handed back exactly as
+ * given, paired with the image_beats each chunk's call returns.
+ * characterBible/references: the MERGED versions (after mergeChannelCharacters — see App.jsx's
+ * handleScriptSubmit), same as generateAllScenes's context.characterBible/references.
+ * context: { style, imageProvider, format }
+ * onProgress(scenesSoFar, totalScenes): same contract as generateAllScenes's own — called after
+ * every successful chunk with the FULL { narration, image_beats } array built so far.
+ * isStaticBackground: no per-scene images for this content type — skips the network call entirely
+ * and returns each scene as { narration } only, same shape buildScenesFromRaw (App.jsx) already
+ * expects for static_background.
+ * Returns [{ narration, image_beats }, ...], full length, in order.
+ */
+export async function generateBeatsForScript(narrations, characterBible, references, context, onProgress, isStaticBackground = false) {
+  const totalScenes = narrations.length;
+  const allScenes = [];
+
+  for (let i = 0; i < narrations.length; i += MAX_SCENES_PER_CALL) {
+    const chunk = narrations.slice(i, i + MAX_SCENES_PER_CALL);
+    if (isStaticBackground) {
+      allScenes.push(...chunk.map((narration) => ({ narration })));
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      const beatsChunk = await withRetry(() =>
+        callSplitScriptBeats({
+          scenes: chunk,
+          style: context.style,
+          imageProvider: context.imageProvider,
+          format: context.format,
+          characterBible,
+          references,
+        })
+      );
+      chunk.forEach((narration, idx) => {
+        allScenes.push({ narration, image_beats: beatsChunk[idx]?.image_beats || [] });
+      });
+    }
+    if (onProgress) onProgress(allScenes.slice(), totalScenes);
+  }
+
+  return allScenes;
+}
+
 async function callGenerateImage(payload, signal) {
   // postJSON (src/lib/httpJson.js) reads the body as text before parsing — a platform-level failure
   // (a maxDuration timeout, a billing/DEPLOYMENT_DISABLED block, an edge error page) returns plain

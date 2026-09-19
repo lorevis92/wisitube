@@ -22,7 +22,7 @@ const CONTENT_TYPES = [
   { value: 'static_background', label: 'Static Background — Language Learning' },
 ];
 
-export default function CreateStep({ settings, setSettings, onTitles, channel, isMobile }) {
+export default function CreateStep({ settings, setSettings, onTitles, onScriptSubmit, channel, isMobile }) {
   const { confirm, dialog: confirmDialog } = useConfirm();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -39,6 +39,10 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
   const otherCharacters = characterHints.slice(1);
 
   const isStaticBackground = (settings.contentType || 'full_pipeline') === 'static_background';
+  // 'topic' (default — Claude writes the narration) vs. 'script' (the user pastes their own complete
+  // narration, verbatim, never rewritten — see App.jsx's handleScriptSubmit/runScriptPlan chain and
+  // api/generate-scenes.js's split-script mode).
+  const isScriptMode = (settings.creationMode || 'topic') === 'script';
 
   const [bgGenPrompt, setBgGenPrompt] = useState('');
   const [bgBusy, setBgBusy] = useState(false);
@@ -267,6 +271,20 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
     }
   }
 
+  // "Paste your own script" mode — no network call here, just a hand-off. The actual split + image
+  // beat generation (a multi-call, potentially slow pipeline) is owned by App.jsx's own
+  // 'generating-scenes' tab/loader, exactly like the topic mode's titles → outline → scenes pipeline
+  // is, so both modes share the same loading/retry/error UI instead of CreateStep growing its own.
+  function submitScript() {
+    const script = (settings.userScript || '').trim();
+    if (script.length < 30) {
+      setError('Paste your complete script first — it looks too short to split into scenes.');
+      return;
+    }
+    setError('');
+    onScriptSubmit(script);
+  }
+
   const fieldGrid = {
     display: 'grid',
     gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr',
@@ -277,14 +295,48 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div style={card}>
-        <div style={label}>1 · What is your video about?</div>
-        <ExpandableTextarea
-          value={settings.topic}
-          onChange={(e) => set('topic', e.target.value)}
-          placeholder='e.g. "Why the Roman Empire never really fell" or "5 psychology tricks stores use on you"'
-          rows={3}
-          style={{ ...inputStyle, marginTop: 10, resize: 'vertical' }}
-        />
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          <button
+            onClick={() => set('creationMode', 'topic')}
+            style={{ ...(!isScriptMode ? btnPrimary : btnGhost), flex: 1, ...mono, textTransform: 'none' }}
+          >
+            Describe your topic
+          </button>
+          <button
+            onClick={() => set('creationMode', 'script')}
+            style={{ ...(isScriptMode ? btnPrimary : btnGhost), flex: 1, ...mono, textTransform: 'none' }}
+          >
+            Paste your own script
+          </button>
+        </div>
+
+        {isScriptMode ? (
+          <>
+            <div style={label}>1 · Paste your complete script</div>
+            <div style={{ fontSize: 12, color: T.textSecondary, margin: '6px 0 10px', fontFamily: FONT.ui, lineHeight: 1.5 }}>
+              Your narration is used exactly as written — Claude only splits it into scenes and illustrates them, it never rewrites,
+              shortens, or adds to a single word of it.
+            </div>
+            <ExpandableTextarea
+              value={settings.userScript || ''}
+              onChange={(e) => set('userScript', e.target.value)}
+              placeholder="Paste your complete narration here, start to finish…"
+              rows={12}
+              style={{ ...inputStyle, resize: 'vertical', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6 }}
+            />
+          </>
+        ) : (
+          <>
+            <div style={label}>1 · What is your video about?</div>
+            <ExpandableTextarea
+              value={settings.topic}
+              onChange={(e) => set('topic', e.target.value)}
+              placeholder='e.g. "Why the Roman Empire never really fell" or "5 psychology tricks stores use on you"'
+              rows={3}
+              style={{ ...inputStyle, marginTop: 10, resize: 'vertical' }}
+            />
+          </>
+        )}
 
         <div style={fieldGrid}>
           <div>
@@ -391,45 +443,47 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
               style={{ width: '100%', marginTop: 10 }}
             />
           </div>
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <div style={label}>Video length</div>
-              {!settings.aiDecidesLength && (
-                <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>
-                  {settings.lengthMinutes || 5} minute{(settings.lengthMinutes || 5) === 1 ? '' : 's'}
-                </span>
-              )}
-            </div>
-            {settings.aiDecidesLength ? (
-              <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.5 }}>
-                The AI will choose a length that fits the topic naturally, avoiding padding or rushed cuts.
+          {!isScriptMode && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <div style={label}>Video length</div>
+                {!settings.aiDecidesLength && (
+                  <span style={{ ...mono, fontSize: 12, color: T.text, fontWeight: 700 }}>
+                    {settings.lengthMinutes || 5} minute{(settings.lengthMinutes || 5) === 1 ? '' : 's'}
+                  </span>
+                )}
               </div>
-            ) : (
-              <>
-                <input
-                  type="range"
-                  min="1"
-                  max="25"
-                  step="1"
-                  value={settings.lengthMinutes || 5}
-                  onChange={(e) => set('lengthMinutes', Number(e.target.value))}
-                  style={{ width: '100%', marginTop: 10 }}
-                />
-                <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
-                  This sets the content density, not an exact runtime — actual video length varies based on how the script naturally
-                  unfolds (typically 1.5-2.5× the target).
+              {settings.aiDecidesLength ? (
+                <div style={{ fontSize: 12, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8, lineHeight: 1.5 }}>
+                  The AI will choose a length that fits the topic naturally, avoiding padding or rushed cuts.
                 </div>
-              </>
-            )}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-              <input
-                type="checkbox"
-                checked={!!settings.aiDecidesLength}
-                onChange={(e) => set('aiDecidesLength', e.target.checked)}
-              />
-              Let AI decide the ideal length
-            </label>
-          </div>
+              ) : (
+                <>
+                  <input
+                    type="range"
+                    min="1"
+                    max="25"
+                    step="1"
+                    value={settings.lengthMinutes || 5}
+                    onChange={(e) => set('lengthMinutes', Number(e.target.value))}
+                    style={{ width: '100%', marginTop: 10 }}
+                  />
+                  <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+                    This sets the content density, not an exact runtime — actual video length varies based on how the script naturally
+                    unfolds (typically 1.5-2.5× the target).
+                  </div>
+                </>
+              )}
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.aiDecidesLength}
+                  onChange={(e) => set('aiDecidesLength', e.target.checked)}
+                />
+                Let AI decide the ideal length
+              </label>
+            </div>
+          )}
           <div>
             <div style={label}>Format</div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
@@ -461,22 +515,24 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
           </div>
         </div>
 
-        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 16 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={
-                (settings.channelIntroEnabled !== undefined ? settings.channelIntroEnabled : channel?.automation_channel_intro) === true
-              }
-              onChange={(e) => set('channelIntroEnabled', e.target.checked)}
-            />
-            Include channel intro at video start
-          </label>
-          <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
-            Pre-filled from this channel's default — override it for just this video here. When enabled, the video
-            opens with a brief welcome that introduces the channel's purpose (using its Niche description).
+        {!isScriptMode && (
+          <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 16 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={
+                  (settings.channelIntroEnabled !== undefined ? settings.channelIntroEnabled : channel?.automation_channel_intro) === true
+                }
+                onChange={(e) => set('channelIntroEnabled', e.target.checked)}
+              />
+              Include channel intro at video start
+            </label>
+            <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6, lineHeight: 1.5 }}>
+              Pre-filled from this channel's default — override it for just this video here. When enabled, the video
+              opens with a brief welcome that introduces the channel's purpose (using its Niche description).
+            </div>
           </div>
-        </div>
+        )}
 
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 24, paddingTop: 16 }}>
           <div style={label}>Video details (optional)</div>
@@ -746,8 +802,12 @@ export default function CreateStep({ settings, setSettings, onTitles, channel, i
         </div>
       )}
 
-      <button onClick={generate} disabled={loading} style={{ ...btnPrimary, padding: '14px 20px', fontSize: 13, opacity: loading ? 0.7 : 1 }}>
-        {loading ? 'Working…' : 'Get title ideas →'}
+      <button
+        onClick={isScriptMode ? submitScript : generate}
+        disabled={loading}
+        style={{ ...btnPrimary, padding: '14px 20px', fontSize: 13, opacity: loading ? 0.7 : 1 }}
+      >
+        {loading ? 'Working…' : isScriptMode ? 'Generate video from script →' : 'Get title ideas →'}
       </button>
 
       {loading && (
