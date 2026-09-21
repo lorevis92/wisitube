@@ -165,8 +165,10 @@ async function callSplitScriptPlan(payload) {
 /**
  * script: the user's complete, verbatim narration text.
  * context: { language, style, imageProvider, contentType, characterHints, generalNotes, references,
- * channelCharacters, thumbnailCreativeDirection } — references are the { id, label } stubs
- * (channelCharacterReferenceStubs / manual uploads), same shape TitleSelectStep.jsx sends.
+ * channelCharacters, thumbnailCreativeDirection, series } — references are the { id, label } stubs
+ * (channelCharacterReferenceStubs / manual uploads), same shape TitleSelectStep.jsx sends. series
+ * (optional) lets a channel's own prompt overrides vary by series/category with no code — see
+ * api/generate-scenes.js's context line.
  *
  * Calls api/generate-scenes.js's split-script 'plan' stage, then — never trusting the instruction
  * alone (api/generate-scenes.js's SPLIT_SCRIPT_VERBATIM_INSTRUCTION) — verifies in code that every
@@ -192,6 +194,7 @@ export async function splitScriptIntoScenes(script, context) {
       references: context.references,
       channelCharacters: context.channelCharacters,
       thumbnailCreativeDirection: context.thumbnailCreativeDirection,
+      series: context.series || null,
     })
   );
 

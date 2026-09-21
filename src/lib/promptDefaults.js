@@ -47,11 +47,13 @@ export const SCHEMA_INSTRUCTIONS_DISPLAY = {
 
   outline: `You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
+Context also includes "Series/category of this video: [series]" when the video came from a suggestion that belongs to one — purely informational, lets a channel's own prompt overrides above vary behavior by series with no code change.
+
 JSON schema:
 {
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end, written to match the chosen angle",
   "tags": [15 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator: one strong focal subject, exaggerated emotion, no text in image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\") — never a generic stand-in like \"a businessman\" or \"a shocked man\"" }],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction says otherwise", "image_prompt": "concrete visual description in English for an AI image generator — follows this channel's own thumbnail creative direction (Thumbnail settings, per video/Short) exactly when one is set; otherwise defaults to one strong focal subject, exaggerated emotion, no text in image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\") — never a generic stand-in like \"a businessman\" or \"a shocked man\"", "header_text": "optional secondary line, UPPERCASE, max 7 words — filled in ONLY when the channel's thumbnail creative direction asks for a header/secondary line, otherwise an empty string" }],
   "character_bible": [array of objects, one per recurring character: { "id": string, "name": string, "base_description": string, "variants": [{ "label": string, "description": string }] }],
   "outline": [array of chapter objects: { "id": string, "title": string, "summary": string, "scene_count": number }],
   "total_scenes": [total scenes for this video, computed from the chosen video length]

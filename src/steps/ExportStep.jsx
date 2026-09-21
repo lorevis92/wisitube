@@ -79,6 +79,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
   const thumbCanvasRef = useRef(null);
   const [thumbIdx, setThumbIdx] = useState(0);
   const [thumbText, setThumbText] = useState(project.thumbnails[0]?.overlay_text || '');
+  const [thumbHeaderText, setThumbHeaderText] = useState(project.thumbnails[0]?.header_text || '');
   const [thumbSeed, setThumbSeed] = useState(7);
   const [thumbBusy, setThumbBusy] = useState(false);
   const [thumbReady, setThumbReady] = useState(false);
@@ -301,6 +302,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         videoId,
         thumbIdx,
         overlayText: thumbText,
+        headerText: thumbHeaderText,
         seed: thumbSeed,
         format: thumbVertical ? '9:16' : '16:9',
         thumbnailDirection: resolveThumbnailDirectionStyle(channel, project),
@@ -646,6 +648,7 @@ export default function ExportStep({ project, setProject, settings, channel, cha
                 onClick={() => {
                   setThumbIdx(i);
                   setThumbText(tc.overlay_text);
+                  setThumbHeaderText(tc.header_text || '');
                   setThumbReady(false);
                 }}
                 style={{
@@ -667,6 +670,12 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
           <input value={thumbText} onChange={(e) => setThumbText(e.target.value)} placeholder="Overlay text" style={{ ...inputStyle, flex: 1, minWidth: 180 }} />
+          <input
+            value={thumbHeaderText}
+            onChange={(e) => setThumbHeaderText(e.target.value)}
+            placeholder="Header text (optional secondary line)"
+            style={{ ...inputStyle, flex: 1, minWidth: 180 }}
+          />
           <button
             onClick={() => {
               setThumbSeed(Math.floor(Math.random() * 999999));

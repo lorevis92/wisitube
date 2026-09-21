@@ -62,6 +62,24 @@ export const STYLES = {
   },
 };
 
+// Resolves a video's (or channel's automation-built) settings object to the style object every
+// image-prompt builder actually consumes — { label, suffix, natural } — whether that's a built-in
+// preset from STYLES above or a channel's own custom style (AutomationStep.jsx's "Custom (defined
+// below)" option, saved on automation_custom_style and snapshotted onto settings.customStyle at
+// generation time — see fullPipelineRecipe.js/staticBackgroundRecipe.js/shortsEngine.js/db.js/
+// App.jsx, every place a video's settings object is built from a channel). A custom style has no
+// separate telegraphic-vs-natural-language distinction — the channel owner wrote one description
+// meant to be used verbatim regardless of provider, so suffix and natural are the same text. Falls
+// back to STYLES.facestick (never throws) for a missing/unknown style key, exactly like every
+// former direct `STYLES[settings.style] || STYLES.facestick` call site this replaces.
+export function resolveStyle(settings) {
+  if (settings?.style === 'custom' && settings?.customStyle?.description) {
+    const description = settings.customStyle.description;
+    return { label: settings.customStyle.label || 'Custom', suffix: description, natural: description };
+  }
+  return STYLES[settings?.style] || STYLES.facestick;
+}
+
 function polliToken() {
   try {
     return localStorage.getItem('wisitube_polli_token') || '';

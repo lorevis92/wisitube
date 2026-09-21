@@ -439,11 +439,48 @@ export async function deleteVideo(id) {
 //   alter table wisitube_channels
 //     add column if not exists automation_schedule_slots jsonb not null default '[]'::jsonb,
 //     add column if not exists automation_last_slot_key text;
+//
+// Required one-time setup for a per-channel custom visual style (AutomationStep.jsx's "Custom
+// (defined below)" style option — see src/lib/pollinations.js's resolveStyle) — { label,
+// description }, description used verbatim in every image prompt when automation_style (or a
+// video's own settings.style) is 'custom':
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_custom_style jsonb not null default '{}'::jsonb;
+//
+// Required one-time setup for the per-channel title guard (AutomationStep.jsx, near "Current
+// initiative") — automation_title_max_chars: 0 = off, otherwise the longest a Content Program
+// Manager suggestion's title may be to be picked automatically; automation_title_no_colon: when
+// true, a suggested title containing ':' is skipped. Neither ever truncates or edits a title — see
+// src/lib/contentProgramManager.js's isCompliantTitle and the recipes' suggestion phase:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_title_max_chars integer not null default 0,
+//     add column if not exists automation_title_no_colon boolean not null default false;
+//
+// Required one-time setup for the three generic thumbnail options added to
+// automation_thumbnail_direction's existing jsonb shape (flavor, keepBadgeClear, references) — no
+// new column, this is the SAME jsonb column normalizeThumbnailDirectionEntry already reads/writes,
+// so no migration is needed for these three specifically; a channel saved before they existed just
+// gets the safe defaults (flavor: '', keepBadgeClear: true, references: []) from that function.
 
 // Normalizes one half (video/short) of automation_thumbnail_direction to always-usable values —
 // shared by fromChannelRow (reading a saved row) and saveChannel (writing one, so a channel that
 // only ever went through updateChannelFields still round-trips a complete shape). Kept in sync with
 // thumbnailEngine.js's own DEFAULT_THUMBNAIL_DIRECTION for position/color/outline/outlineColor.
+// Channel-level reference photos for thumbnail generation (see ChannelDashboardStep.jsx's
+// "Thumbnail settings" and thumbnailEngine.js's generateThumbnail) — { label, path }, path is a
+// Supabase Storage path (uploadMedia, same channel-defaults pseudo-videoId convention as channel
+// characters / the static-background default image). Capped at 6: generous for "one per series
+// plus a default", never a reason to grow unbounded.
+function normalizeThumbnailReferences(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((r) => r && typeof r === 'object' && typeof r.label === 'string' && r.label.trim() && typeof r.path === 'string' && r.path)
+    .map((r) => ({ label: r.label.trim(), path: r.path }))
+    .slice(0, 6);
+}
+
 function normalizeThumbnailDirectionEntry(entry) {
   const e = entry && typeof entry === 'object' ? entry : {};
   return {
@@ -452,12 +489,35 @@ function normalizeThumbnailDirectionEntry(entry) {
     color: typeof e.color === 'string' && e.color ? e.color : '#FFFFFF',
     outline: e.outline !== false,
     outlineColor: typeof e.outlineColor === 'string' && e.outlineColor ? e.outlineColor : '#000000',
+    // '' = use thumbnailEngine.js's own DEFAULT_THUMBNAIL_FLAVOR text, byte-for-byte — never
+    // hard-coded here, this column is the only source of a channel's own flavor text.
+    flavor: typeof e.flavor === 'string' ? e.flavor : '',
+    // Defaults to true (the only default-behavior change in this migration — see thumbnailEngine.js's
+    // premium-provider prompt) rather than false/opt-in: YouTube always paints the duration badge in
+    // that corner, so keeping it clear is the correct behavior for every channel unless they opt out.
+    keepBadgeClear: e.keepBadgeClear !== false,
+    references: normalizeThumbnailReferences(e.references),
   };
 }
 
 function normalizeThumbnailDirection(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   return { video: normalizeThumbnailDirectionEntry(r.video), short: normalizeThumbnailDirectionEntry(r.short) };
+}
+
+// Custom per-channel visual style (AutomationStep.jsx's "Custom (defined below)" style option,
+// src/lib/pollinations.js's resolveStyle) — { label, description }. description is used VERBATIM in
+// every image prompt for this channel (both the Pollinations telegraphic-fragment path and the
+// premium natural-language path — see resolveStyle's own comment for why one field serves both).
+// Always normalized to a complete object (never null) so callers never need to null-check it before
+// reading .label/.description — an empty description is what tells resolveStyle "no custom style
+// defined, fall back to the built-in STYLES".
+function normalizeCustomStyle(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return {
+    label: typeof r.label === 'string' ? r.label : '',
+    description: typeof r.description === 'string' ? r.description : '',
+  };
 }
 
 // Drops anything that isn't a genuine { day: 0-6, time: "HH:MM" } entry — shared by fromChannelRow
@@ -516,6 +576,9 @@ function fromChannelRow(row) {
     automation_voice: row.automation_voice || '',
     automation_speech_speed: row.automation_speech_speed ?? 1.0,
     automation_style: row.automation_style || 'facestick',
+    // Only meaningful when automation_style (or a video's own settings.style) is 'custom' — see
+    // src/lib/pollinations.js's resolveStyle. Always a complete { label, description } object.
+    automation_custom_style: normalizeCustomStyle(row.automation_custom_style),
     automation_language: row.automation_language || 'English',
     automation_format: row.automation_format || '16:9',
     automation_youtube_category: row.automation_youtube_category || '27',
@@ -523,6 +586,10 @@ function fromChannelRow(row) {
     // '' = no active directive — a channel that's never set one gets ordinary Content Program
     // Manager suggestions (see api/program-manager.js's activeDirective handling).
     automation_directive: row.automation_directive || '',
+    // Per-channel title guard (see the migration comment above and
+    // src/lib/contentProgramManager.js's isCompliantTitle) — 0 = no length cap.
+    automation_title_max_chars: row.automation_title_max_chars ?? 0,
+    automation_title_no_colon: !!row.automation_title_no_colon,
     automation_length_minutes: row.automation_length_minutes ?? 5,
     // "Let AI decide the ideal length" for this channel's videos (see AutomationStep.jsx and
     // fullPipelineRecipe.js) — when true, automation_length_minutes is ignored entirely.
@@ -623,11 +690,14 @@ export async function saveChannel(channel) {
     automation_voice: channel.automation_voice || '',
     automation_speech_speed: channel.automation_speech_speed ?? 1.0,
     automation_style: channel.automation_style || 'facestick',
+    automation_custom_style: normalizeCustomStyle(channel.automation_custom_style),
     automation_language: channel.automation_language || 'English',
     automation_format: channel.automation_format || '16:9',
     automation_youtube_category: channel.automation_youtube_category || '27',
     automation_made_for_kids: !!channel.automation_made_for_kids,
     automation_directive: channel.automation_directive || '',
+    automation_title_max_chars: channel.automation_title_max_chars ?? 0,
+    automation_title_no_colon: !!channel.automation_title_no_colon,
     automation_length_minutes: channel.automation_length_minutes ?? 5,
     automation_ai_decides_length: !!channel.automation_ai_decides_length,
     automation_length_cap_enabled: channel.automation_length_cap_enabled ?? true,
@@ -892,6 +962,7 @@ export async function listIncompleteVideos(userId) {
         // for this one button.
         imageProvider: channel.automation_image_provider || 'pollinations',
         style: channel.automation_style || 'facestick',
+        customStyle: channel.automation_custom_style || null,
       });
     }
   }

@@ -31,12 +31,12 @@ import { publishToYoutube } from '../youtubePublishEngine';
 import { buildSrtFromScenes } from '../srtBuilder';
 import { runLocalExport, exportDateString, localExportPreflight } from '../localExport';
 import { withTimeout } from '../asyncTimeout';
-import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
+import { getTopicSuggestions, startTopicSuggestion, isCompliantTitle } from '../contentProgramManager';
 import { createShortRecord, synthesizeShortThumbnailConcept } from '../shortsEngine';
 import { auditScriptRepetition, describeAudit } from '../repetitionAudit';
 import { mergeChannelCharacters, channelCharactersForPrompt, channelCharacterReferenceStubs } from '../channelCharacters';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
-import { STYLES } from '../pollinations';
+import { resolveStyle } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
 // Finds the most recent video on this channel that isn't in a terminal state — published
@@ -250,6 +250,9 @@ function buildAutomationSettings(channel) {
   const voice = channel.automation_voice || (voiceEngine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE);
   return {
     style: channel.automation_style || DEFAULT_STYLE,
+    // Snapshotted so a later resume/regeneration of this video keeps the same look even if the
+    // channel's custom style changes afterward — see resolveStyle (src/lib/pollinations.js).
+    customStyle: channel.automation_custom_style || null,
     language: channel.automation_language || DEFAULT_LANGUAGE,
     format: channel.automation_format || DEFAULT_FORMAT,
     imageProvider: channel.automation_image_provider || 'pollinations',
@@ -528,7 +531,28 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         // new Claude/Trends/YouTube calls at all.
         const { channel: scoredChannel, finalSuggestions } = await getTopicSuggestions(channel, { videos: existingVideos });
         if (!finalSuggestions.length) throw new Error('Content Program Manager returned no suggestions');
-        const picked = finalSuggestions.find((s) => s.priority === 'high') || finalSuggestions[0];
+        const original = finalSuggestions.find((s) => s.priority === 'high') || finalSuggestions[0];
+        // Per-channel title guard (AutomationStep.jsx, near "Current initiative") — never rewrites
+        // or truncates a title, only picks a DIFFERENT already-proposed suggestion when the default
+        // pick doesn't comply. Same "first high-priority, else first" preference as the ungated pick
+        // above, just scoped to the compliant subset first.
+        const guardOn = (Number(channel.automation_title_max_chars) || 0) > 0 || channel.automation_title_no_colon === true;
+        let picked = original;
+        if (guardOn) {
+          const compliant = finalSuggestions.filter((s) => isCompliantTitle(s.title, channel));
+          const guardPick = compliant.find((s) => s.priority === 'high') || compliant[0];
+          if (guardPick) {
+            picked = guardPick;
+          } else {
+            await logStep(
+              channelId,
+              null,
+              'suggestion',
+              'success',
+              `Title guard active (max ${channel.automation_title_max_chars || '—'} chars${channel.automation_title_no_colon ? ', no colon' : ''}) but no suggestion complies — keeping the original pick "${original.title}".`
+            );
+          }
+        }
         // Same mechanism as ChannelDashboardStep.jsx's "Start this video" — removes `picked` from
         // the shared cached list and backfills it, so the dashboard stops showing an idea this
         // automation cycle just committed to as a real video.
@@ -592,6 +616,9 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             topic: suggestion.title,
             title: suggestion.title,
             angle: suggestion.angle || '',
+            // Lets a channel's own prompt overrides vary by series/category with no code — see
+            // api/generate-outline.js's context line.
+            series: suggestion.series || null,
             language: settings.language,
             lengthMinutes: settings.lengthMinutes,
             aiDecidesLength,
@@ -601,7 +628,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             ...(aiDecidesLength && channel.automation_length_cap_enabled
               ? { capMinMinutes: channel.automation_length_cap_min, capMaxMinutes: channel.automation_length_cap_max }
               : {}),
-            style: STYLES[settings.style].label,
+            style: resolveStyle(settings).label,
             imageProvider: settings.imageProvider,
             characterHints: [],
             generalNotes: '',
@@ -686,7 +713,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
           topic: suggestion.title,
           title: plan.title,
           language: settings.language,
-          style: STYLES[settings.style].label,
+          style: resolveStyle(settings).label,
           format: settings.format,
           imageProvider: settings.imageProvider,
           characterBible: plan.characterBible,
@@ -1003,6 +1030,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         videoId,
         thumbIdx: 0,
         overlayText: concept.overlay_text || '',
+        headerText: concept.header_text || '',
         seed: Math.floor(Math.random() * 999999),
         // settings.format is already forced to '9:16' for an isShort video (see the resume check);
         // generateThumbnail also falls back to project.isShort on its own.

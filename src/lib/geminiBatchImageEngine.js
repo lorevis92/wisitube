@@ -193,16 +193,16 @@ async function submitImageBatchChunkWithRetry(items, resolution, onRetry) {
  * every other engine module in this codebase.
  */
 export async function generateAllMediaViaBatch(project, { settings, channelId, videoId, resolution = '0.5K', onProgress, logStep } = {}) {
-  // collectPendingBeatItems -> buildImagePrompt can throw (e.g. settings.style not a key in STYLES,
-  // so STYLES[settings.style].suffix blows up). Without this, that throw would propagate as a bare
-  // "Cannot read properties of undefined" with no hint at the cause.
+  // collectPendingBeatItems -> buildImagePrompt can still throw for other reasons (resolveStyle
+  // itself never throws — it falls back to STYLES.facestick for any missing/unknown settings.style).
+  // Without this, a failure here would propagate as a bare, context-free error with no hint at the cause.
   let chunks;
   try {
     chunks = chunkScenesNeedingImages(project.scenes, BATCH_CHUNK_SCENES)
       .map((chunkSceneIds) => ({ chunkSceneIds, items: collectPendingBeatItems(project, chunkSceneIds, settings) }))
       .filter((c) => c.items.length > 0); // every beat in an empty chunk was already ready by the time we got here
   } catch (err) {
-    const message = `Gemini Batch: could not build the image batches — ${String(err?.message || err)} (a bad channel style setting is the usual cause: settings.style="${settings?.style}" must be a key in STYLES).`;
+    const message = `Gemini Batch: could not build the image batches — ${String(err?.message || err)}.`;
     console.error('[geminiBatchImageEngine] generateAllMediaViaBatch: chunk build failed', err);
     onProgress?.({ kind: 'message', text: message });
     await logStep?.(channelId, videoId, 'media', 'error', message)?.catch(() => {});

@@ -16,6 +16,7 @@ import {
   recordCost,
 } from '../lib/db';
 import { getMediaUrl, uploadMedia } from '../lib/mediaStorage';
+import { DEFAULT_THUMBNAIL_FLAVOR } from '../lib/thumbnailEngine';
 import { deleteVideoAndMedia, estimateVideoArchive, archiveVideoNow } from '../lib/mediaArchival';
 import { createShortRecord } from '../lib/shortsEngine';
 import { runFullPipeline } from '../lib/recipes/fullPipelineRecipe';
@@ -41,7 +42,7 @@ function channelDefaultsPseudoVideoId(channelId) {
 // Mirrors db.js's normalizeThumbnailDirectionEntry defaults — used only to seed local state before
 // a channel has loaded; the loaded channel's own (already-normalized) value takes over from there.
 function DEFAULT_THUMB_DIRECTION_ENTRY() {
-  return { text: '', position: 'center', color: '#FFFFFF', outline: true, outlineColor: '#000000' };
+  return { text: '', position: 'center', color: '#FFFFFF', outline: true, outlineColor: '#000000', flavor: '', keepBadgeClear: true, references: [] };
 }
 
 // Same list as AutomationStep.jsx's own local CONTENT_TYPES const — duplicated rather than shared,
@@ -227,6 +228,13 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   const [thumbSettingsOpen, setThumbSettingsOpen] = useState(false);
   const [thumbDirection, setThumbDirection] = useState({ video: DEFAULT_THUMB_DIRECTION_ENTRY(), short: DEFAULT_THUMB_DIRECTION_ENTRY() });
   const [thumbError, setThumbError] = useState('');
+  // Signed preview URLs for each thumbnail reference photo (see renderThumbKindSection's
+  // references list below) — keyed by Storage path so both kinds (video/short) share one lookup.
+  const [thumbRefUrls, setThumbRefUrls] = useState({});
+  // Which kind ('video' | 'short') currently has a reference-photo upload in flight — disables
+  // both kinds' "+ Add reference photo" buttons rather than tracking per-row busy state, since only
+  // one upload is ever in flight at a time from this UI.
+  const [thumbRefBusyKind, setThumbRefBusyKind] = useState(null);
 
   // Escape closes the "how should this Short publish?" modal (same affordance as ImageLightbox /
   // ProgramManagerChat). No-op while nothing is generating; the modal itself also closes on the
@@ -287,6 +295,32 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
       cancelled = true;
     };
   }, [chars]);
+
+  // Short-lived signed URLs for each thumbnail reference photo (both kinds) — keyed off the
+  // CHANNEL's own persisted automation_thumbnail_direction, not the local thumbDirection working
+  // copy, so this doesn't re-sign on every keystroke of an unrelated field (e.g. the creative
+  // direction textarea, which updates local state before its own blur-save).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const paths = new Set();
+      ['video', 'short'].forEach((kind) =>
+        (channel?.automation_thumbnail_direction?.[kind]?.references || []).forEach((r) => r?.path && paths.add(r.path))
+      );
+      const urls = {};
+      for (const p of paths) {
+        try {
+          urls[p] = await getMediaUrl(p);
+        } catch (err) {
+          console.error('[ChannelDashboardStep] could not sign thumbnail reference photo', p, err);
+        }
+      }
+      if (!cancelled) setThumbRefUrls(urls);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [channel?.automation_thumbnail_direction]);
 
   useEffect(() => {
     let cancelled = false;
@@ -704,6 +738,45 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
     persistThumbDirection({ ...thumbDirection, [kind]: { ...thumbDirection[kind], ...patch } });
   }
 
+  // Uploads a new reference photo and appends it as a fresh { label: '', path } row — the label is
+  // typed in afterward (local-until-blur, same as every other text field here). Same channel-
+  // defaults pseudo-videoId storage convention as the static-background default image / channel
+  // character photos above.
+  async function uploadThumbReferencePhoto(kind, file) {
+    if (!file || !channel) return;
+    setThumbRefBusyKind(kind);
+    setThumbError('');
+    try {
+      const refId = `thumbref-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const path = await uploadMedia(userId, channelDefaultsPseudoVideoId(channelId), 'thumbnail-reference', refId, file);
+      const entry = thumbDirection[kind] || DEFAULT_THUMB_DIRECTION_ENTRY();
+      await persistThumbDirection({
+        ...thumbDirection,
+        [kind]: { ...entry, references: [...(entry.references || []), { label: '', path }] },
+      });
+    } catch (err) {
+      setThumbError('Reference photo upload failed: ' + String(err.message || err));
+    } finally {
+      setThumbRefBusyKind(null);
+    }
+  }
+
+  function updateThumbReferenceLabelLocal(kind, index, label) {
+    setThumbDirection((td) => {
+      const entry = td[kind] || DEFAULT_THUMB_DIRECTION_ENTRY();
+      const references = (entry.references || []).map((r, i) => (i === index ? { ...r, label } : r));
+      return { ...td, [kind]: { ...entry, references } };
+    });
+  }
+
+  function removeThumbReference(kind, index) {
+    const entry = thumbDirection[kind] || DEFAULT_THUMB_DIRECTION_ENTRY();
+    persistThumbDirection({
+      ...thumbDirection,
+      [kind]: { ...entry, references: (entry.references || []).filter((_, i) => i !== index) },
+    });
+  }
+
   // One identical block for "Video thumbnails" and "Short thumbnails" — same fields, same layout.
   function renderThumbKindSection(kind, title) {
     const entry = thumbDirection[kind] || DEFAULT_THUMB_DIRECTION_ENTRY();
@@ -763,6 +836,93 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
                 value={entry.outlineColor}
                 onChange={(e) => updateThumbFieldNow(kind, { outlineColor: e.target.value })}
                 style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+              />
+            </label>
+          )}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>
+            Flavor
+            <InfoHint text="Trailing style phrase appended to every thumbnail image prompt (any provider). Leave blank to use the default shown below." />
+          </div>
+          <ExpandableTextarea
+            value={entry.flavor || ''}
+            onChange={(e) => updateThumbFieldLocal(kind, { flavor: e.target.value })}
+            onBlur={commitThumbText}
+            placeholder={DEFAULT_THUMBNAIL_FLAVOR}
+            rows={2}
+            style={{ ...inputStyle, marginTop: 8, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={entry.keepBadgeClear !== false}
+              onChange={(e) => updateThumbFieldNow(kind, { keepBadgeClear: e.target.checked })}
+            />
+            Keep the duration-badge corner clear
+          </label>
+          <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 4, marginLeft: 24 }}>
+            YouTube draws the duration badge there — only affects premium (AI-baked-text) providers.
+          </div>
+        </div>
+
+        <div style={{ marginTop: 16, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
+          <div style={label}>
+            Reference photos
+            <InfoHint text="Label = series name to use it for that series; 'default' is the fallback. Anchors this channel's thumbnails to a consistent layout/composition." />
+          </div>
+          {(entry.references || []).length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+              {(entry.references || []).map((r, i) => (
+                <div key={r.path || i} style={{ display: 'flex', gap: 10, alignItems: 'center', border: `1px solid ${T.border}`, borderRadius: 4, padding: 8 }}>
+                  {thumbRefUrls[r.path] ? (
+                    <img
+                      src={thumbRefUrls[r.path]}
+                      alt={r.label || 'reference'}
+                      style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 3, border: `1px solid ${T.border}`, flexShrink: 0 }}
+                    />
+                  ) : (
+                    <div
+                      style={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: 3,
+                        border: `1px dashed ${T.border}`,
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
+                  <input
+                    value={r.label}
+                    onChange={(e) => updateThumbReferenceLabelLocal(kind, i, e.target.value)}
+                    onBlur={commitThumbText}
+                    placeholder="Label, e.g. 'default' or a series name"
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                  <button onClick={() => removeThumbReference(kind, i)} style={{ ...btnGhost, padding: '6px 10px', fontSize: 10 }}>
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {(entry.references || []).length < 6 && (
+            <label style={{ ...btnGhost, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', marginTop: 10, opacity: thumbRefBusyKind ? 0.6 : 1 }}>
+              {thumbRefBusyKind === kind ? 'Uploading…' : '+ Add reference photo'}
+              <input
+                type="file"
+                accept="image/*"
+                disabled={!!thumbRefBusyKind}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  uploadThumbReferencePhoto(kind, f);
+                }}
+                style={{ display: 'none' }}
               />
             </label>
           )}

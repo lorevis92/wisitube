@@ -19,7 +19,7 @@
 //                                                   this into a logStep(..., 'retrying', ...) row,
 //                                                   the interactive UI just ignores it (no dedicated
 //                                                   handling in StoryboardStep.jsx yet)
-import { STYLES, loadImage, decodeAudio } from './pollinations';
+import { resolveStyle, loadImage, decodeAudio } from './pollinations';
 import { generateSpeech, onLoadProgress, isModelWarm } from './tts';
 import { acquireWakeLock, releaseWakeLock } from './wakeLock';
 import { recordImageTime, recordAudioTime } from './estimator';
@@ -117,9 +117,9 @@ export function buildImagePrompt(beat, { project, settings }) {
 
   // settings.style can be absent — an auto-generated Short opened manually in Storyboard carries a
   // settings blob that older Shorts built without every field (see shortsEngine.js), and App.jsx
-  // swaps the whole settings object for the record's blob on open. Same 'facestick' default the
-  // recipes use, rather than dereferencing STYLES[undefined].
-  const style = STYLES[settings?.style] || STYLES.facestick;
+  // swaps the whole settings object for the record's blob on open. resolveStyle already falls back
+  // to 'facestick' for a missing/unknown key (or resolves settings.customStyle for 'custom').
+  const style = resolveStyle(settings);
   const provider = settings.imageProvider || 'pollinations';
 
   if (provider === 'pollinations') {

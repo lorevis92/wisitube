@@ -42,6 +42,20 @@ async function postJSON(url, body) {
 
 const normalizeTitle = (t) => (t || '').toLowerCase().trim();
 
+// Per-channel, generic title guard (AutomationStep.jsx, near "Current initiative") — never
+// rewrites or truncates a title, only says whether an already-proposed one is usable as-is. Both
+// checks are opt-in per field: automation_title_max_chars === 0 means no length limit,
+// automation_title_no_colon === false means colons are fine. Used by the recipes' suggestion phase
+// to pick a different, already-compliant suggestion instead of the default "first high-priority"
+// one — see fullPipelineRecipe.js/staticBackgroundRecipe.js.
+export function isCompliantTitle(title, channel) {
+  const t = String(title || '');
+  const maxChars = Number(channel?.automation_title_max_chars) || 0;
+  if (maxChars > 0 && t.length > maxChars) return false;
+  if (channel?.automation_title_no_colon === true && t.includes(':')) return false;
+  return true;
+}
+
 export function isTopicCacheFresh(channel) {
   if (!channel?.topic_scoring_cached_at) return false;
   return Date.now() - new Date(channel.topic_scoring_cached_at).getTime() < CACHE_TTL_MS;

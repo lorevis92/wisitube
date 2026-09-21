@@ -121,6 +121,8 @@ const BLUR_SAVED_COLUMNS = [
   'automation_length_cap_min',
   'automation_length_cap_max',
   'automation_directive',
+  'automation_title_max_chars',
+  'automation_custom_style',
 ];
 
 function statusColor(status) {
@@ -1200,20 +1202,70 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     </div>
                   )}
 
-                  <div>
+                  <div style={c.automation_style === 'custom' ? { gridColumn: '1 / -1' } : undefined}>
                     <div style={label}>Visual style</div>
                     <select
                       value={c.automation_style || 'facestick'}
                       disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_style: e.target.value })}
-                      style={{ ...inputStyle, marginTop: 6 }}
+                      style={{ ...inputStyle, marginTop: 6, maxWidth: c.automation_style === 'custom' ? 320 : undefined }}
                     >
                       {Object.entries(STYLES).map(([id, s]) => (
                         <option key={id} value={id}>
                           {s.label}
                         </option>
                       ))}
+                      <option value="custom">Custom (defined below)</option>
                     </select>
+
+                    {c.automation_style === 'custom' && (
+                      <div style={{ marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
+                        <input
+                          value={c.automation_custom_style?.label || ''}
+                          disabled={running}
+                          onChange={(e) =>
+                            updateLocalField(c.id, { automation_custom_style: { ...c.automation_custom_style, label: e.target.value } })
+                          }
+                          onBlur={() => persistChannel(c.id)}
+                          placeholder="Style name, e.g. 'Retro pixel art'"
+                          style={{ ...inputStyle, marginBottom: 8 }}
+                        />
+                        <ExpandableTextarea
+                          value={c.automation_custom_style?.description || ''}
+                          disabled={running}
+                          onChange={(e) =>
+                            updateLocalField(c.id, { automation_custom_style: { ...c.automation_custom_style, description: e.target.value } })
+                          }
+                          onBlur={() => persistChannel(c.id)}
+                          placeholder="Describe the visual style — used verbatim in every image prompt for this channel, for every image provider."
+                          rows={3}
+                          style={{ ...inputStyle, resize: 'vertical' }}
+                        />
+                        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui }}>Start from preset</span>
+                          <select
+                            value=""
+                            disabled={running}
+                            onChange={(e) => {
+                              const presetKey = e.target.value;
+                              e.target.value = '';
+                              if (!presetKey) return;
+                              updateAndSaveImmediately(c.id, {
+                                automation_custom_style: { ...c.automation_custom_style, description: STYLES[presetKey].natural },
+                              });
+                            }}
+                            style={{ ...inputStyle, width: 'auto', padding: '6px 10px', fontSize: 12 }}
+                          >
+                            <option value="">— Select a preset to copy —</option>
+                            {Object.entries(STYLES).map(([id, s]) => (
+                              <option key={id} value={id}>
+                                {s.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1443,6 +1495,37 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     rows={2}
                     style={{ ...inputStyle, marginTop: 6, resize: 'vertical' }}
                   />
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <div style={label}>
+                    Title guard (optional)
+                    <InfoHint text="Never rewrites or truncates a title — when on, the suggestion phase picks a different already-proposed suggestion that complies instead of the default pick, or keeps the default and logs it if none comply." />
+                  </div>
+                  <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                      Max title length
+                      <input
+                        type="number"
+                        min="0"
+                        value={c.automation_title_max_chars || 0}
+                        disabled={running}
+                        onChange={(e) => updateLocalField(c.id, { automation_title_max_chars: Math.max(0, Number(e.target.value) || 0) })}
+                        onBlur={() => persistChannel(c.id)}
+                        style={{ ...inputStyle, width: 80 }}
+                      />
+                      <span style={{ fontSize: 11, color: T.textMuted }}>chars (0 = off)</span>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+                      <input
+                        type="checkbox"
+                        checked={c.automation_title_no_colon === true}
+                        disabled={running}
+                        onChange={(e) => updateAndSaveImmediately(c.id, { automation_title_no_colon: e.target.checked })}
+                      />
+                      No colon in title
+                    </label>
+                  </div>
                 </div>
                 </>
                 )}

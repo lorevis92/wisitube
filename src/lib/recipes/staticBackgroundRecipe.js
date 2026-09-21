@@ -34,11 +34,11 @@ const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 const YOUTUBE_PUBLISH_TIMEOUT_MS = 25 * 60 * 1000;
-import { getTopicSuggestions, startTopicSuggestion } from '../contentProgramManager';
+import { getTopicSuggestions, startTopicSuggestion, isCompliantTitle } from '../contentProgramManager';
 import { createShortRecord } from '../shortsEngine';
 import { runFullPipeline } from './fullPipelineRecipe';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
-import { STYLES } from '../pollinations';
+import { resolveStyle } from '../pollinations';
 import { MINIMAX_VOICES } from '../voiceProviders';
 
 async function totalCostForVideo(channelId, videoId) {
@@ -153,6 +153,9 @@ function buildAutomationSettings(channel) {
   const voice = channel.automation_voice || (voiceEngine === 'minimax' ? MINIMAX_VOICES[0].id : DEFAULT_KOKORO_VOICE);
   return {
     style: channel.automation_style || DEFAULT_STYLE,
+    // Snapshotted so a later resume/regeneration of this video's thumbnail keeps the same look even
+    // if the channel's custom style changes afterward — see resolveStyle (src/lib/pollinations.js).
+    customStyle: channel.automation_custom_style || null,
     language: channel.automation_language || DEFAULT_LANGUAGE,
     format: channel.automation_format || DEFAULT_FORMAT,
     // Still relevant here even though there's no per-scene image generation — the thumbnail phase
@@ -331,7 +334,27 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       // Claude/Trends/YouTube calls at all.
       const { channel: scoredChannel, finalSuggestions } = await getTopicSuggestions(channel, { videos: existingVideos });
       if (!finalSuggestions.length) throw new Error('Content Program Manager returned no suggestions');
-      const picked = finalSuggestions.find((s) => s.priority === 'high') || finalSuggestions[0];
+      const original = finalSuggestions.find((s) => s.priority === 'high') || finalSuggestions[0];
+      // Per-channel title guard — see fullPipelineRecipe.js's identical suggestion-phase logic for
+      // the full reasoning (same isCompliantTitle helper, same "first high-priority, else first"
+      // preference scoped to the compliant subset).
+      const guardOn = (Number(channel.automation_title_max_chars) || 0) > 0 || channel.automation_title_no_colon === true;
+      let picked = original;
+      if (guardOn) {
+        const compliant = finalSuggestions.filter((s) => isCompliantTitle(s.title, channel));
+        const guardPick = compliant.find((s) => s.priority === 'high') || compliant[0];
+        if (guardPick) {
+          picked = guardPick;
+        } else {
+          await logStep(
+            channelId,
+            null,
+            'suggestion',
+            'success',
+            `Title guard active (max ${channel.automation_title_max_chars || '—'} chars${channel.automation_title_no_colon ? ', no colon' : ''}) but no suggestion complies — keeping the original pick "${original.title}".`
+          );
+        }
+      }
       // Same mechanism as ChannelDashboardStep.jsx's "Start this video" — removes `picked` from the
       // shared cached list and backfills it, so the dashboard stops showing an idea this automation
       // cycle just committed to as a real video.
@@ -386,6 +409,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           topic: suggestion.title,
           title: suggestion.title,
           angle: suggestion.angle || '',
+          series: suggestion.series || null,
           language: settings.language,
           lengthMinutes: settings.lengthMinutes,
           aiDecidesLength,
@@ -393,7 +417,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           ...(aiDecidesLength && channel.automation_length_cap_enabled
             ? { capMinMinutes: channel.automation_length_cap_min, capMaxMinutes: channel.automation_length_cap_max }
             : {}),
-          style: STYLES[settings.style].label,
+          style: resolveStyle(settings).label,
           imageProvider: settings.imageProvider,
           characterHints: [],
           generalNotes: '',
@@ -480,7 +504,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         topic: suggestion.title,
         title: plan.title,
         language: settings.language,
-        style: STYLES[settings.style].label,
+        style: resolveStyle(settings).label,
         format: settings.format,
         imageProvider: settings.imageProvider,
         contentType: 'static_background',
@@ -624,6 +648,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
         videoId,
         thumbIdx: 0,
         overlayText: concept.overlay_text || '',
+        headerText: concept.header_text || '',
         seed: Math.floor(Math.random() * 999999),
         // static_background videos are always 16:9; a Short on such a channel is delegated to
         // runFullPipeline, so this recipe only ever renders horizontal thumbnails. Passed for parity.

@@ -13,11 +13,12 @@
 // ends at producing the pixels — where that Blob's bytes end up (Storage backup, later YouTube
 // thumbnail upload via youtubePublishEngine.js) is the caller's concern, same separation of
 // concerns mediaGenerationEngine.js draws between "generate" and "back up."
-import { STYLES, loadImage } from './pollinations';
+import { resolveStyle, loadImage } from './pollinations';
 import { generateImage } from './sceneOrchestrator';
 import { buildTelegraphicPrompt, buildNaturalLanguagePrompt } from './promptBuilders';
 import { recordCost } from './db';
 import { withTimeout } from './asyncTimeout';
+import { downloadMediaAsBlob } from './mediaStorage';
 
 // Neither generateImage (called directly here, not via mediaGenerationEngine's wrapped path) nor
 // loadImage has a timeout of its own — a stalled provider response or a hung image download would
@@ -83,14 +84,30 @@ const FORMAT_SPEC = {
 };
 
 // Fallback used whenever a caller doesn't resolve a channel's own thumbnail direction (or the
-// channel has none saved yet) — keeps the pre-existing look (centered, white text, black outline).
-const DEFAULT_THUMBNAIL_DIRECTION = { position: 'center', color: '#FFFFFF', outline: true, outlineColor: '#000000' };
+// channel has none saved yet) — keeps the pre-existing look (centered, white text, black outline,
+// the default flavor text, badge corner kept clear, no reference photo).
+const DEFAULT_THUMBNAIL_DIRECTION = {
+  position: 'center',
+  color: '#FFFFFF',
+  outline: true,
+  outlineColor: '#000000',
+  flavor: '',
+  keepBadgeClear: true,
+  references: [],
+};
+
+// The thumbnail "flavor" suffix every prompt used to carry as a fixed, hard-coded string — now a
+// per-channel override (automation_thumbnail_direction.{video,short}.flavor), with this as the
+// fallback for a channel that's never set one. Applied byte-for-byte identically to how the old
+// hard-coded suffix was, so an empty flavor is genuinely indistinguishable from before this change.
+export const DEFAULT_THUMBNAIL_FLAVOR = 'YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching';
 
 // Picks the right half (video vs Short) of a channel's saved automation_thumbnail_direction for
 // this project, normalized to always-usable values — see ChannelDashboardStep.jsx's "Thumbnail
 // settings" section and db.js's fromChannelRow for where this is authored/normalized. Used by every
 // caller of generateThumbnail (ExportStep.jsx, the automation recipes) so there's exactly one place
-// that picks video-vs-short and falls back to sane defaults.
+// that picks video-vs-short and falls back to sane defaults. Kept in sync with db.js's own
+// normalizeThumbnailDirectionEntry for every field.
 export function resolveThumbnailDirectionStyle(channel, project) {
   const kind = project?.isShort ? 'short' : 'video';
   const entry = channel?.automation_thumbnail_direction?.[kind];
@@ -100,8 +117,47 @@ export function resolveThumbnailDirectionStyle(channel, project) {
     color: typeof entry.color === 'string' && entry.color ? entry.color : DEFAULT_THUMBNAIL_DIRECTION.color,
     outline: entry.outline !== false,
     outlineColor: typeof entry.outlineColor === 'string' && entry.outlineColor ? entry.outlineColor : DEFAULT_THUMBNAIL_DIRECTION.outlineColor,
+    flavor: typeof entry.flavor === 'string' ? entry.flavor : '',
+    keepBadgeClear: entry.keepBadgeClear !== false,
+    references: Array.isArray(entry.references)
+      ? entry.references.filter((r) => r && typeof r.label === 'string' && r.label && typeof r.path === 'string' && r.path).slice(0, 6)
+      : [],
   };
 }
+
+// Picks the reference photo (if any) generateThumbnail should anchor this video's thumbnail to —
+// the one whose label matches project.series (case-insensitive, trimmed), else the one labeled
+// 'default', else none. A channel with no references configured, or none matching, returns null —
+// generateThumbnail then behaves exactly as before this feature existed.
+function pickThumbnailReference(references, series) {
+  const list = Array.isArray(references) ? references : [];
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const seriesNorm = norm(series);
+  if (seriesNorm) {
+    const bySeries = list.find((r) => norm(r.label) === seriesNorm);
+    if (bySeries) return bySeries;
+  }
+  return list.find((r) => norm(r.label) === 'default') || null;
+}
+
+function blobToDataUri(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Appended to the final prompt (any provider) whenever a reference photo was resolved for this
+// thumbnail — see pickThumbnailReference above.
+const REFERENCE_MATCH_INSTRUCTION =
+  'Match the layout, composition, colour system and typography of the reference image exactly; change only the subject and the texts.';
+
+// Bottom-right corner where YouTube always paints the video-duration badge over a thumbnail —
+// appended to the premium-provider prompt unless the channel opted out (keepBadgeClear: false).
+const KEEP_BADGE_CLEAR_INSTRUCTION =
+  'Keep the bottom-right corner (25% of the width x 20% of the height) completely empty: no text, no important detail. Never overlap text with the main subject.';
 
 // Explicit `format` opt wins; otherwise a Short is always vertical, otherwise the video's own
 // settings.format, defaulting to horizontal.
@@ -118,24 +174,27 @@ function resolveThumbnailFormat({ format, project, settings }) {
 // Takes the effective provider (already translated from 'nanobanana-batch' to 'nanobanana' by the
 // caller — see generateThumbnail below) rather than reading settings.imageProvider itself, so
 // there's exactly one place that translation happens, not two.
-function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt, thumbnailDirection) {
+function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt, thumbnailDirection, headerText) {
+  // Position/color/outline/flavor/keepBadgeClear mirror the channel's own thumbnail-direction
+  // settings (see resolveThumbnailDirectionStyle) — computed once, up front, since flavor applies
+  // to every provider's prompt below, not just the premium-provider branch.
+  const dir = { ...DEFAULT_THUMBNAIL_DIRECTION, ...thumbnailDirection };
   const orientation = fmt === '9:16' ? ' vertical 9:16 portrait composition,' : '';
-  const flavoredPrompt = `${concept.image_prompt},${orientation} YouTube thumbnail style, bold colors, high contrast, dramatic, eye catching`;
+  const flavoredPrompt = `${concept.image_prompt},${orientation} ${dir.flavor || DEFAULT_THUMBNAIL_FLAVOR}`;
   // settings.style can be missing entirely — e.g. an auto-generated Short's settings blob only
   // carries format/imageProvider (see shortsEngine.js), and App.jsx replaces the whole settings
-  // object with the video record's blob on open. Fall back to the same default the recipes use
-  // (DEFAULT_STYLE = 'facestick') rather than dereferencing STYLES[undefined].
-  const style = STYLES[settings?.style] || STYLES.facestick;
+  // object with the video record's blob on open. resolveStyle already falls back to 'facestick'
+  // for a missing/unknown key (or resolves settings.customStyle for 'custom').
+  const style = resolveStyle(settings);
   if (effectiveProvider === 'pollinations') {
     return buildTelegraphicPrompt({ scenePrompt: flavoredPrompt, styleSuffix: style.suffix });
   }
   // Premium providers bake the overlay text directly into the generated image instead of the
   // canvas overlay pollinations gets below — an explicit typography instruction steers them toward
   // something that reads like a real YouTube thumbnail rather than a generic caption. Position and
-  // color/outline mirror the channel's own thumbnail-direction settings (see
-  // resolveThumbnailDirectionStyle) — unlike the Pollinations canvas overlay, this is only ever a
-  // strong preference the image model can ignore, never a guarantee.
-  const dir = { ...DEFAULT_THUMBNAIL_DIRECTION, ...thumbnailDirection };
+  // color/outline mirror the channel's own thumbnail-direction settings — unlike the Pollinations
+  // canvas overlay, this is only ever a strong preference the image model can ignore, never a
+  // guarantee.
   const positionPhrase =
     dir.position === 'top-left'
       ? 'in the top-left area of the frame, left-aligned'
@@ -145,8 +204,15 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt,
   const colorPhrase = dir.outline
     ? `filled in ${dir.color} with a bold ${dir.outlineColor} outline/drop shadow for readability`
     : `filled in ${dir.color}, no outline`;
-  const textInstruction = `Include the exact text '${overlayText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, ${colorPhrase}, positioned ${positionPhrase}, sized large and impactful like professional YouTube thumbnails. This exact position is a strong preference, not a hard guarantee. The text must be spelled exactly as given, no alterations.`;
-  return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}`, styleDescription: style.natural });
+  // headerText (api/generate-outline.js's/api/generate-scenes.js's optional thumbnail_concepts
+  // field, ExportStep.jsx's second editable field) asks for a SECOND line of text at the channel's
+  // configured position, with the main overlay_text enlarged near the subject instead — omitted
+  // entirely (single-text behavior, byte-for-byte as before) when no header is set.
+  const textInstruction = headerText
+    ? `Render TWO separate pieces of text directly in the image, both as bold, high-contrast YouTube thumbnail typography, thick sans-serif font, ${colorPhrase}: the main text '${overlayText}' much larger, positioned near the main subject; and the secondary header text '${headerText}' as medium-large text, positioned ${positionPhrase}. This exact position for the header is a strong preference, not a hard guarantee. Both texts must be spelled exactly as given, character-for-character, no alterations, no other text anywhere in the image.`
+    : `Include the exact text '${overlayText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, ${colorPhrase}, positioned ${positionPhrase}, sized large and impactful like professional YouTube thumbnails. This exact position is a strong preference, not a hard guarantee. The text must be spelled exactly as given, no alterations.`;
+  const badgeClearNote = dir.keepBadgeClear ? ` ${KEEP_BADGE_CLEAR_INSTRUCTION}` : '';
+  return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}${badgeClearNote}`, styleDescription: style.natural });
 }
 
 /**
@@ -164,7 +230,7 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt,
  */
 export async function generateThumbnail(
   project,
-  { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed, format, thumbnailDirection } = {}
+  { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', headerText = '', seed, format, thumbnailDirection } = {}
 ) {
   // Every caller is SUPPOSED to hand us a real concept (the recipe checks plan.thumbnails[0], the
   // recipe's Short path backfills a synthetic one, ExportStep reads project.thumbnails). This is a
@@ -188,15 +254,33 @@ export async function generateThumbnail(
   // the api/generate-image.js fix — would now reject it outright instead of silently downgrading.
   const effectiveThumbnailProvider = provider === 'nanobanana-batch' ? 'nanobanana' : provider;
 
+  // Channel-configured reference photo for this thumbnail (see resolveThumbnailDirectionStyle /
+  // pickThumbnailReference above) — matched by project.series, falling back to a 'default'-labeled
+  // one, or none. Downloaded here (not carried in `thumbnailDirection` itself, which only ever holds
+  // the { label, path } pointer) so a caller never pays the Storage round-trip unless a reference
+  // actually applies to THIS video.
+  const dir = { ...DEFAULT_THUMBNAIL_DIRECTION, ...thumbnailDirection };
+  const reference = pickThumbnailReference(dir.references, project?.series);
+  let referenceImages = [];
+  if (reference) {
+    try {
+      referenceImages = [await blobToDataUri(await downloadMediaAsBlob(reference.path))];
+    } catch (err) {
+      console.error('[thumbnailEngine] failed to load thumbnail reference photo, generating without it', reference.path, err);
+    }
+  }
+  const basePrompt = thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider, fmt, thumbnailDirection, headerText);
+  const prompt = referenceImages.length ? `${basePrompt} ${REFERENCE_MATCH_INSTRUCTION}` : basePrompt;
+
   // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already uses
   // for every scene beat — routes nanobanana/gptimage through fal.ai instead of always hitting
   // Pollinations regardless of the provider chosen for the rest of the video.
   const { imageUrl, costUsd } = await withTimeout(
     (signal) =>
       generateImage(
-        thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider, fmt, thumbnailDirection),
+        prompt,
         effectiveThumbnailProvider,
-        [],
+        referenceImages,
         { width: spec.genW, height: spec.genH, seed, quality: 'medium' },
         signal
       ),
@@ -228,9 +312,8 @@ export async function generateThumbnail(
     await document.fonts.ready;
     // The canvas overlay is the one path where the channel's position/color/outline choice is
     // GUARANTEED (unlike the premium-provider prompt above, which can only ask for it) — read
-    // straight from the resolved per-channel style, never a fixed value.
-    const dir = { ...DEFAULT_THUMBNAIL_DIRECTION, ...thumbnailDirection };
-
+    // straight from the resolved per-channel style (`dir`, computed above), never a fixed value.
+    // headerText is deliberately NOT drawn here — the Pollinations canvas path is unchanged.
     const text = (overlayText || '').toUpperCase();
     const words = text.split(/\s+/).filter(Boolean);
     const lines =

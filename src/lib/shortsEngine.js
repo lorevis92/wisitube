@@ -12,7 +12,7 @@
 // so every path that later touches it (the recipe's format/anomalous-interruption handling, the
 // Content Program Manager's anti-repetition filter) knows what it is.
 import { createId, saveVideo } from './db';
-import { STYLES } from './pollinations';
+import { resolveStyle } from './pollinations';
 
 // Last-resort thumbnail concept for a Short whose script generation returned none (Claude
 // occasionally omits thumbnail_concepts from the short-script JSON despite the schema — now an
@@ -33,6 +33,10 @@ export function synthesizeShortThumbnailConcept({ title = '', topic = '' } = {})
   return {
     overlay_text: overlayText,
     image_prompt: `${subject}, vertical 9:16 portrait composition, one strong focal subject filling the frame, exaggerated emotion, high contrast, dramatic lighting, eye-catching, no text in the image`,
+    // Shorts never use the optional secondary header line (see api/generate-outline.js's
+    // thumbnail_concepts schema / thumbnailEngine.js's generateThumbnail) — always empty, never
+    // undefined, so this object's shape matches a model-authored concept's exactly.
+    header_text: '',
   };
 }
 
@@ -90,7 +94,7 @@ export async function createShortRecord(parent, channel, { logStep } = {}) {
   if (!parent?.youtubeVideoId) throw new Error('parent video has no youtubeVideoId — cannot build a Short that links to it');
 
   const styleKey = channel.automation_image_provider ? channel.automation_style || 'facestick' : 'facestick';
-  const styleLabel = (STYLES[styleKey] || STYLES.facestick).label;
+  const styleLabel = resolveStyle({ style: styleKey, customStyle: channel.automation_custom_style }).label;
 
   const res = await fetch('/api/generate-outline', {
     method: 'POST',
@@ -156,12 +160,15 @@ export async function createShortRecord(parent, channel, { logStep } = {}) {
     // The recipe ignores this and rebuilds settings from the channel (buildAutomationSettings), but
     // it's what App.jsx loads into `settings` state when the Short is opened manually in
     // Storyboard/Export — so it must be COMPLETE, not just format/provider, or downstream code that
-    // reads settings.style / settings.voice / settings.language (e.g. thumbnailEngine's
-    // STYLES[settings.style]) dereferences undefined. Mirrors the channel's automation defaults.
+    // reads settings.style / settings.voice / settings.language runs off missing fields. Mirrors the
+    // channel's automation defaults.
     settings: {
       format: '9:16',
       imageProvider: channel.automation_image_provider || 'pollinations',
       style: channel.automation_style || 'facestick',
+      // Snapshotted so a later resume/regeneration of this Short keeps the same look even if the
+      // channel's custom style changes afterward — see resolveStyle (src/lib/pollinations.js).
+      customStyle: channel.automation_custom_style || null,
       language: channel.automation_language || 'English',
       voiceEngine: channel.automation_voice_engine || 'kokoro',
       voice: channel.automation_voice || 'af_heart',

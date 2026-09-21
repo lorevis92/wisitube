@@ -356,12 +356,29 @@ export default function CreateStep({ settings, setSettings, onTitles, onScriptSu
           {!isStaticBackground && (
             <div>
               <div style={label}>Visual style</div>
-              <select value={settings.style} onChange={(e) => set('style', e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
+              <select
+                value={settings.style}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'custom') {
+                    // Snapshotted now (not just style: 'custom') so this video's look survives even
+                    // if the channel's custom style is edited or cleared later — see resolveStyle
+                    // (src/lib/pollinations.js).
+                    setSettings((s) => ({ ...s, style: 'custom', customStyle: channel?.automation_custom_style || null }));
+                  } else {
+                    set('style', val);
+                  }
+                }}
+                style={{ ...inputStyle, marginTop: 8 }}
+              >
                 {Object.entries(STYLES).map(([id, s]) => (
                   <option key={id} value={id}>
                     {s.label}
                   </option>
                 ))}
+                {channel?.automation_custom_style?.description && (
+                  <option value="custom">Custom ({channel.automation_custom_style.label || 'Custom'})</option>
+                )}
               </select>
             </div>
           )}

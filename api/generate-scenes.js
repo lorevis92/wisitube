@@ -335,7 +335,7 @@ const SPLIT_SCRIPT_VERBATIM_INSTRUCTION = `Do not paraphrase, summarize, shorten
 
 async function splitScriptPlan(req, res, apiKey) {
   try {
-    let script, language, style, imageProvider, contentType, isStaticBackground, hints, notes, refs, channelCharacters, thumbnailCreativeDirection;
+    let script, series, language, style, imageProvider, contentType, isStaticBackground, hints, notes, refs, channelCharacters, thumbnailCreativeDirection;
     try {
       const body = req.body || {};
       script = typeof body.script === 'string' ? body.script.trim() : '';
@@ -344,6 +344,9 @@ async function splitScriptPlan(req, res, apiKey) {
       // input/output size sane, not to constrain any realistic script.
       if (!script || script.length > 40000) return res.status(400).json({ error: 'Invalid script (must be 1-40000 characters)' });
 
+      // Optional — same series/category context api/generate-outline.js's outline call accepts, see
+      // its own comment for the full reasoning.
+      series = typeof body.series === 'string' ? body.series.trim() : '';
       language = typeof body.language === 'string' && body.language.trim() ? body.language.trim() : 'English';
       style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : 'facestick';
       imageProvider = ['pollinations', 'nanobanana', 'gptimage'].includes(body.imageProvider) ? body.imageProvider : 'pollinations';
@@ -414,7 +417,11 @@ ${hints.map((h) => `- ${h.name || 'Unnamed character'}: ${h.details || '(no phys
 
     const densityNote = `Aim for scene lengths consistent with this app's usual pacing — roughly 7-8 scenes per minute of spoken narration as a loose reference, not a rigid rule. Never split mid-sentence; every scene break must fall at a natural sentence boundary.`;
 
-    const systemPrompt = `You are a YouTube video producer preparing a script the user already wrote for production.
+    // Optional — same series/category context api/generate-outline.js's outline call injects, see
+    // its own comment for the full reasoning.
+    const seriesNote = series ? `\nSeries/category of this video: ${series}` : '';
+
+    const systemPrompt = `You are a YouTube video producer preparing a script the user already wrote for production.${seriesNote}
 
 ${SPLIT_SCRIPT_VERBATIM_INSTRUCTION} ${densityNote}
 
@@ -429,7 +436,7 @@ JSON schema:
   "title": "see instruction above",
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end",
   "tags": [15 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator: one strong focal subject, exaggerated emotion, no text in image. If a real, identifiable person or well-known character is central, name them explicitly by proper name — never a generic stand-in." }],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise", "image_prompt": "concrete visual description in English for an AI image generator. If a thumbnail creative direction for this channel is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject, exaggerated emotion. No text in image. If a real, identifiable person or well-known character is central, name them explicitly by proper name — never a generic stand-in.", "header_text": "optional secondary line, UPPERCASE, max 7 words; fill it ONLY if the channel's thumbnail creative direction asks for a header/secondary line, otherwise empty string" }],
   "character_bible": [array of objects: { "id": string, "name": string, "base_description": string, "variants": [{ "label": string, "description": string }] }],
   "scenes": [array of strings — the ENTIRE script split into scene-sized chunks, in original order; concatenating every entry (ignoring surrounding whitespace) must reconstruct the original script EXACTLY, word for word]
 }
@@ -526,7 +533,9 @@ Rules:
     plan.title = typeof plan.title === 'string' ? plan.title.trim() : '';
     plan.description = typeof plan.description === 'string' ? plan.description : '';
     plan.tags = Array.isArray(plan.tags) ? plan.tags : [];
-    plan.thumbnail_concepts = Array.isArray(plan.thumbnail_concepts) ? plan.thumbnail_concepts.slice(0, 3) : [];
+    plan.thumbnail_concepts = Array.isArray(plan.thumbnail_concepts)
+      ? plan.thumbnail_concepts.slice(0, 3).map((c) => ({ ...c, header_text: typeof c?.header_text === 'string' ? c.header_text.trim() : '' }))
+      : [];
     plan.character_bible = Array.isArray(plan.character_bible) ? plan.character_bible : [];
 
     return res.status(200).json(plan);

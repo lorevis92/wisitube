@@ -285,7 +285,7 @@ ${characterBible
   "title": "punchy Short title, max 90 chars, curiosity-driven",
   "description": "2-3 sentence YouTube description written to tease the full video (the app appends the full-video link and #Shorts itself — do NOT add them)",
   "tags": [8-12 short SEO tag strings],
-  "thumbnail_concepts": [EXACTLY 3 objects, never fewer: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator, framed as a vertical 9:16 portrait: one strong focal subject filling the frame, exaggerated emotion, high contrast, no text in the image. If a real, identifiable person or a well-known named character is central to this Short, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
+  "thumbnail_concepts": [EXACTLY 3 objects, never fewer: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise", "image_prompt": "concrete visual description in English for an AI image generator, framed as a vertical 9:16 portrait. If a thumbnail creative direction for this channel's Shorts is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject filling the frame, exaggerated emotion, high contrast. No text in the image. If a real, identifiable person or a well-known named character is central to this Short, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
   "character_bible": [the SAME array you were given above, unchanged, or [] if none was given],
   "scenes": [between 6 and 10 objects: {
     "narration": "what the voiceover says for this scene — 1-2 very short sentences, max 150 characters, written in ${language}, no dashes as punctuation",
@@ -431,13 +431,17 @@ export default async function handler(req, res) {
   // guarantees we never let an uncaught exception fall through to a platform-level 502.
   try {
     // Phase 1: validate and sanitize the request body.
-    let topic, title, angle, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
+    let topic, title, angle, series, language, lengthMinutes, style, imageProvider, hints, notes, refs, totalScenes, creativeOverride;
     let aiDecidesLength, capMinMinutes, capMaxMinutes, contentType, isStaticBackground, channelIntroEnabled, niche, channelCharacters, thumbnailCreativeDirection;
     try {
       const body = req.body || {};
       topic = typeof body.topic === 'string' ? body.topic.trim() : '';
       title = typeof body.title === 'string' ? body.title.trim() : '';
       angle = typeof body.angle === 'string' ? body.angle.trim() : '';
+      // Optional — the Content Program Manager suggestion's series/category, when this video came
+      // from one (see src/lib/contentProgramManager.js). Lets a channel's own prompt_overrides vary
+      // behavior by series with no code change (the `context` block below turns it into one line).
+      series = typeof body.series === 'string' ? body.series.trim() : '';
       if (!topic || topic.length > 500) return res.status(400).json({ error: 'Invalid topic' });
       if (!title) return res.status(400).json({ error: 'Invalid title' });
 
@@ -609,11 +613,17 @@ Characters this video needs that are NOT in the list above are still fine — gi
       ? `\n\nFor the first chapter: before diving into the story's hook, open with a brief, warm welcome (2-3 sentences) that identifies what this channel does, based on this description: "${niche}". Weave this naturally into the opening — it should feel like a genuine, friendly introduction, not a boilerplate disclaimer. If the niche description implies a language-learning purpose, frame it naturally (e.g. "told in clear, natural English so you can enjoy the story while practicing your listening"). Then transition smoothly into the hook.`
       : '';
 
+    // Optional — only present when this video came from a Content Program Manager suggestion that
+    // belongs to a series (see src/lib/contentProgramManager.js). Purely informational context: a
+    // channel's own prompt_overrides can reference it to vary tone/structure by series, but nothing
+    // here treats it as a hard rule on its own.
+    const seriesNote = series ? `\nSeries/category of this video: ${series}` : '';
+
     // Facts about THIS specific video (title, angle, length, visual style) — always injected
     // regardless of which creative direction is active (default or a channel's override), since an
     // override changes HOW to write, never WHAT video this is.
     const context = `Video title: "${title}"
-Narrative angle: ${angle || '(none specified — infer a coherent angle from the title itself)'}
+Narrative angle: ${angle || '(none specified — infer a coherent angle from the title itself)'}${seriesNote}
 ${lengthInstruction}${styleTranslationNote}${channelIntroNote}`;
 
     // total_scenes is either the fixed target (forced onto the response later regardless of what
@@ -634,7 +644,7 @@ JSON schema:
 {
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end, written to match the chosen angle",
   "tags": [15 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text max 4 words UPPERCASE", "image_prompt": "concrete visual description in English for an AI image generator: one strong focal subject, exaggerated emotion, no text in image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise", "image_prompt": "concrete visual description in English for an AI image generator. If a thumbnail creative direction for this channel is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject, exaggerated emotion. No text in the image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"", "header_text": "optional secondary line, UPPERCASE, max 7 words; fill it ONLY if the channel's thumbnail creative direction asks for a header/secondary line, otherwise empty string" }],
   "character_bible": [array of objects, one per recurring character: { "id": string, "name": string, "base_description": "distinctive traits that NEVER change: face shape, build, defining features — max 12-15 words, telegraphic comma-separated fragments, NOT a full sentence", "variants": [{ "label": "e.g. Young Napoleon, 1790s", "description": "traits specific to this era/stage: hair, clothing, age markers — max 12-15 words, telegraphic comma-separated fragments, NOT a full sentence" }] }],
   "outline": [array of chapter objects: { "id": string, "title": "chapter name", "summary": "2-3 sentences on what happens in this chapter and how it connects to the previous/next one", "scene_count": number }],
   "total_scenes": ${totalScenesSchemaValue}
@@ -771,6 +781,15 @@ Rules:
       }
     } else {
       plan.total_scenes = totalScenes;
+    }
+    // header_text is optional from the model's side — guarantee it's always a real string on the
+    // way out so no downstream consumer (App.jsx/the recipes/ExportStep.jsx) needs its own
+    // undefined-tolerant fallback.
+    if (Array.isArray(plan.thumbnail_concepts)) {
+      plan.thumbnail_concepts = plan.thumbnail_concepts.map((c) => ({
+        ...c,
+        header_text: typeof c?.header_text === 'string' ? c.header_text.trim() : '',
+      }));
     }
     return res.status(200).json(plan);
   } catch (err) {

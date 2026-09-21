@@ -15,7 +15,7 @@ import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost, btnPrimary } from './theme';
 import { createId, saveVideo, persistVideoMediaProgress, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
-import { STYLES } from './lib/pollinations';
+import { resolveStyle } from './lib/pollinations';
 import { generateAllScenes, splitScriptIntoScenes, generateBeatsForScript } from './lib/sceneOrchestrator';
 import { auditScriptRepetition, describeAudit } from './lib/repetitionAudit';
 import { useConfirm } from './components/useConfirm';
@@ -422,7 +422,7 @@ export default function App() {
       topic: settings.topic,
       title: plan.title,
       language: settings.language,
-      style: STYLES[settings.style].label,
+      style: resolveStyle(settings).label,
       format: settings.format,
       imageProvider: settings.imageProvider,
       contentType: settings.contentType,
@@ -643,9 +643,10 @@ export default function App() {
 
       const scriptContext = {
         language: settings.language,
-        style: STYLES[settings.style].label,
+        style: resolveStyle(settings).label,
         imageProvider: settings.imageProvider,
         contentType: settings.contentType,
+        series: settings.series || null,
         characterHints: (settings.characterHints || [])
           .filter((c) => c && (c.name?.trim() || c.details?.trim()))
           .map((c) => ({ name: (c.name || '').trim(), details: (c.details || '').trim() })),
@@ -741,7 +742,7 @@ export default function App() {
   // a normal video" starts at the setProject call below.
   async function runScriptBeatsGeneration(plan, id, createdAtVal, generation, channelIdVal) {
     const context = {
-      style: STYLES[settings.style].label,
+      style: resolveStyle(settings).label,
       imageProvider: settings.imageProvider,
       format: settings.format,
     };
