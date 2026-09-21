@@ -102,19 +102,6 @@ export function groupWordsIntoBlocks(entries, maxSeconds = CAPTION_BLOCK_SECONDS
   return blocks;
 }
 
-function easeOutBack(x) {
-  const c1 = 1.70158;
-  const c3 = c1 + 1;
-  return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
-}
-
-// Pops in at 1.3x and settles to the 1.15x resting emphasis size within ~150ms, with a slight
-// elastic dip below 1.15x on the way there for a bit of energy.
-function wordPopScale(elapsedMs) {
-  const t = Math.min(1, Math.max(0, elapsedMs / 150));
-  return 1.15 + 0.15 * (1 - easeOutBack(t));
-}
-
 // Splits a narration into the word groups shown during each of the scene's two image beats — the
 // first Math.ceil(n/2) words during beat 1, the rest during beat 2. For 1-2 total words this
 // already degenerates naturally into "everything in beat 1, nothing in beat 2" rather than an
@@ -125,18 +112,13 @@ export function splitNarrationHalves(narration) {
   return [words.slice(0, cut), words.slice(cut)];
 }
 
-function drawSubtitle(ctx, W, H, words, localTime, duration) {
+function drawSubtitle(ctx, W, H, words) {
   if (!words.length) return;
 
   const fontSize = Math.round(H * 0.038);
   ctx.font = `700 ${fontSize}px Syne, sans-serif`;
   ctx.textBaseline = 'bottom';
   ctx.lineWidth = Math.max(3, fontSize * 0.16);
-
-  const timings = computeWordTimings(words, duration);
-  const clampedTime = Math.min(Math.max(localTime, 0), duration);
-  let activeIdx = timings.findIndex((t) => clampedTime >= t.start && clampedTime < t.end);
-  if (activeIdx === -1 && clampedTime >= duration) activeIdx = words.length - 1;
 
   const maxWidth = W * 0.86;
   const lineGroups = wrapWordIndices(ctx, words, maxWidth).slice(0, 3);
@@ -155,25 +137,10 @@ function drawSubtitle(ctx, W, H, words, localTime, duration) {
       const word = words[wordIdx];
       const wWidth = widths[k];
 
-      if (wordIdx === activeIdx) {
-        const elapsedMs = Math.max(0, (clampedTime - timings[wordIdx].start) * 1000);
-        const scale = wordPopScale(elapsedMs);
-        const cx = x + wWidth / 2;
-        ctx.save();
-        ctx.translate(cx, y);
-        ctx.scale(scale, scale);
-        ctx.translate(-cx, -y);
-        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-        ctx.strokeText(word, x, y);
-        ctx.fillStyle = '#E8352A';
-        ctx.fillText(word, x, y);
-        ctx.restore();
-      } else {
-        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-        ctx.strokeText(word, x, y);
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillText(word, x, y);
-      }
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.strokeText(word, x, y);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText(word, x, y);
       x += wWidth + spaceWidth;
     });
   });
@@ -355,9 +322,9 @@ export function drawFrame(ctx, items, t, { W, H, subtitles = false, staticBackgr
     drawScene(ctx, W, H, prev, prev.duration, 1 - local / FADE);
   }
   if (subtitles) {
-    const { half, inSecondBeat, beatLocal } = sceneBeatState(it, local);
+    const { inSecondBeat } = sceneBeatState(it, local);
     const [firstHalfWords, secondHalfWords] = splitNarrationHalves(it.narration);
-    drawSubtitle(ctx, W, H, inSecondBeat ? secondHalfWords : firstHalfWords, beatLocal, half);
+    drawSubtitle(ctx, W, H, inSecondBeat ? secondHalfWords : firstHalfWords);
   }
 
   return idx;
