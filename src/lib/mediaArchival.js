@@ -20,7 +20,7 @@
 // A video whose media has been archived can't be opened in Storyboard/Editor/Export — App.jsx's
 // handleResume detects project.mediaArchived and shows a "go watch it on YouTube" notice instead of
 // feeding an empty scenes array into the editor.
-import { listChannels, listVideosByChannel, loadVideo, saveVideo, updateVideoFields, deleteVideo, logAutomationStep } from './db';
+import { listChannels, listVideosByChannel, loadVideo, saveExistingVideo, updateVideoFields, deleteVideo, logAutomationStep } from './db';
 import { listVideoMediaFiles, removeMediaFiles, ARCHIVABLE_MEDIA_KINDS } from './mediaStorage';
 
 export const ARCHIVE_AFTER_DAYS = 5;
@@ -222,7 +222,7 @@ export async function archiveVideoNow(userId, videoId) {
   const bytes = files.reduce((a, f) => a + f.size, 0);
   await removeMediaFiles(files.map((f) => f.path));
 
-  await saveVideo({
+  await saveExistingVideo({
     id: fresh.id,
     channelId: fresh.channelId,
     createdAt: fresh.createdAt,
@@ -306,7 +306,7 @@ export async function runMediaCleanup(userId, { dryRun = true, onProgress, log =
       }
 
       // eslint-disable-next-line no-await-in-loop
-      await saveVideo({
+      await saveExistingVideo({
         id: fresh.id,
         channelId: fresh.channelId,
         createdAt: fresh.createdAt,

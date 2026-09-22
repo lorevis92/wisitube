@@ -142,6 +142,9 @@ function statusColor(status) {
   // upload itself succeeded so it's not a red 'error', but it's not a clean green 'success' either:
   // most often a custom thumbnail that never made it, which needs a manual retry from ExportStep.
   if (status === 'published_with_issues') return T.yellow;
+  // The user deleted this video mid-run (db.js's VideoDeletedError) — the run correctly stopped and
+  // never recreated it, so this isn't a failure of the run itself, just informational; not red.
+  if (status === 'video_deleted') return T.textMuted;
   if (status === 'skipped') return T.textMuted;
   return T.green;
 }

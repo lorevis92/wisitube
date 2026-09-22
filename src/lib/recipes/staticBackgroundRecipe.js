@@ -15,7 +15,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, loadVideo, updateVideoFields, listVideosByChannel, getCostsByChannel } from '../db';
+import { createId, saveVideo, saveExistingVideo, loadVideo, updateVideoFields, listVideosByChannel, getCostsByChannel } from '../db';
 import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -221,8 +221,14 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
   let createdAt = Date.now();
   const report = (step, message) => onProgress?.({ step, message, videoId, project });
 
-  const persist = () =>
-    saveVideo({
+  // See fullPipelineRecipe.js's identical flag for the full reasoning — set true the moment this run
+  // has confirmed the video's row genuinely exists (resumed = just loaded it, or the video-record
+  // phase's own first persist() just created it), after which persist() switches from saveVideo
+  // (upsert) to saveExistingVideo (update-only, never recreates a row the user deleted mid-run).
+  let videoKnownToExist = false;
+
+  const persist = async () => {
+    const record = {
       id: videoId,
       channelId,
       createdAt,
@@ -231,12 +237,26 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
       settings,
       ...project,
       displayTitle: plan?.title || suggestion?.title,
-    });
+    };
+    if (videoKnownToExist) return saveExistingVideo(record);
+    const saved = await saveVideo(record);
+    videoKnownToExist = true;
+    return saved;
+  };
 
   // ---- Resume check ----
   // See fullPipelineRecipe.js's identical block for the full reasoning — duplicated rather than
   // shared, same controlled-duplication convention already used between these two files.
   const resumable = targetVideoId ? await loadVideo(targetVideoId) : await findResumableVideo(channelId);
+
+  // See fullPipelineRecipe.js's identical check for the full reasoning — an explicit target that no
+  // longer resolves means the video was deleted; fail clearly instead of silently falling through to
+  // "nothing to resume, start a brand-new video" and creating an unrelated one.
+  if (targetVideoId && !resumable) {
+    const message = 'Video was deleted by the user — stopping this run.';
+    await logStep(channelId, targetVideoId, 'resume', 'video_deleted', message);
+    return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reasonLogged: true, reason: message };
+  }
 
   // A companion Short is a full_pipeline-shaped video (image beats, 9:16) even when its channel is
   // static_background — this recipe can't produce it. Hand it straight to the full pipeline (which
@@ -246,6 +266,7 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     return runFullPipeline(channel, { targetVideoId: resumable.id, userId, logStep, onProgress });
   }
 
+  if (resumable) videoKnownToExist = true; // just loaded it — it demonstrably exists right now
   let resumePhase = 'suggestion';
   const wasResumed = !!resumable;
   // See fullPipelineRecipe.js's identical block for the full reasoning. resumedFromNormalBatchWait

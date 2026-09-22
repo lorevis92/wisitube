@@ -13,7 +13,7 @@ import AutomationMirrorStep, { INCOMPLETE_POLL_MS } from './steps/AutomationMirr
 import FullScreenLoader from './components/FullScreenLoader';
 import AuthScreen from './components/AuthScreen';
 import { T, FONT, mono, card, btnGhost, btnPrimary } from './theme';
-import { createId, saveVideo, persistVideoMediaProgress, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
+import { createId, saveVideo, saveExistingVideo, persistVideoMediaProgress, saveYoutubeConnection, getSchedulerSettings, loadChannel, listIncompleteVideos } from './lib/db';
 import { startScheduler, stopSchedulerTimer, applyProgressToRun } from './lib/automationScheduler';
 import { resolveStyle } from './lib/pollinations';
 import { generateAllScenes, splitScriptIntoScenes, generateBeatsForScript } from './lib/sceneOrchestrator';
@@ -354,7 +354,13 @@ export default function App() {
       // merge-persist so the editor autosave's snapshot can't wipe images another writer just saved.
       // Unlike idb-keyval's local writes, this goes over the network and can genuinely fail (auth,
       // connectivity, RLS) — surface it instead of an unhandled promise rejection.
-      const save = (project.pendingImageBatches || []).length > 0 ? persistVideoMediaProgress : saveVideo;
+      //
+      // saveExistingVideo (never saveVideo) for the plain branch: this effect only ever runs once
+      // `project`/`projectId` are set, which only happens after the video was already created or
+      // resumed — so every autosave here is genuinely an update, never a first creation. Using
+      // saveVideo's upsert would otherwise silently recreate the row under the same id if the user
+      // deleted it (from another tab, or the channel dashboard) while this one stayed open.
+      const save = (project.pendingImageBatches || []).length > 0 ? persistVideoMediaProgress : saveExistingVideo;
       save(record).catch((err) => console.error('[autosave] save failed', err));
     }, 800);
     return () => clearTimeout(timer);

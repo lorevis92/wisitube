@@ -446,8 +446,11 @@ export async function runAutomationCycle({ userId, dryRun = true, onUpdate, onPr
       console.warn('[run-cycle-debug] runAutomationCycle() channel try/catch caught an exception', channel?.id, err);
       console.error('[automationEngine] channel cycle failed', channel?.id, err);
       // A billing failure keeps its distinct status at the cycle level too, so the history table
-      // shows "💳 credit exhausted" in amber rather than another generic red 'error' row.
-      const status = isCreditExhaustedMessage(err?.message) ? 'credit_exhausted' : 'error';
+      // shows "💳 credit exhausted" in amber rather than another generic red 'error' row. Same
+      // treatment for a video the user deleted mid-run (db.js's VideoDeletedError, recognized via
+      // its videoDeleted marker rather than an instanceof check across the module boundary) — this
+      // was never a real failure of the run, so it doesn't belong in red either.
+      const status = isCreditExhaustedMessage(err?.message) ? 'credit_exhausted' : err?.videoDeleted ? 'video_deleted' : 'error';
       await logStep(channel?.id, null, 'cycle', status, String(err?.message || err));
       report('error');
     }

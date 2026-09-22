@@ -17,7 +17,7 @@
 // Every phase logs exactly once via the injected logStep(channelId, videoId, step, status,
 // message) — 'success' on completion, 'error' right before re-throwing — and a failure in any
 // phase stops the whole recipe immediately: later phases never run against an incomplete video.
-import { createId, saveVideo, persistVideoMediaProgress, loadVideo, updateVideoFields, listVideosByChannel, getCostsByChannel } from '../db';
+import { createId, saveVideo, saveExistingVideo, persistVideoMediaProgress, loadVideo, updateVideoFields, listVideosByChannel, getCostsByChannel } from '../db';
 import { uploadMedia, downloadMediaAsBlob } from '../mediaStorage';
 import { generateAllScenes } from '../sceneOrchestrator';
 import { generateAllMedia } from '../mediaGenerationEngine';
@@ -319,6 +319,15 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   let createdAt = Date.now();
   const report = (step, message) => onProgress?.({ step, message, videoId, project });
 
+  // Set true the moment this run has confirmed the video's row genuinely exists — right after the
+  // resume check below (a resumed video was just loaded, so it obviously exists) or right after the
+  // video-record phase's own first persist() creates a brand-new one. From that point on, persist()
+  // switches from saveVideo (upsert — fine for the ONE genuine "create" write) to saveExistingVideo
+  // (update-only — see db.js). Without this, a video deleted by the user partway through a long run
+  // (a Gemini Batch wait, a slow render) got silently recreated under the same id by the very next
+  // saveVideo call, which is exactly the bug this flag closes.
+  let videoKnownToExist = false;
+
   // Shared by every persist() call in this function, whether resuming or starting fresh — reads
   // whatever videoId/project/plan/suggestion/createdAt are in scope at call time.
   const videoRecord = () => ({
@@ -331,7 +340,12 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
     ...project,
     displayTitle: plan?.title || suggestion?.title,
   });
-  const persist = () => saveVideo(videoRecord());
+  const persist = async () => {
+    if (videoKnownToExist) return saveExistingVideo(videoRecord());
+    const saved = await saveVideo(videoRecord());
+    videoKnownToExist = true;
+    return saved;
+  };
 
   // Media-phase persist: goes through persistVideoMediaProgress so a concurrent writer (a manual
   // "Check for updates", the editor autosave, another overlapping resume) that already downloaded
@@ -372,6 +386,17 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
   // which of the phase blocks below actually run: 'suggestion' means "nothing usable saved yet, run
   // everything" — a brand-new (non-resumed) video takes that exact same path by default below.
   const resumable = targetVideoId ? await loadVideo(targetVideoId) : await findResumableVideo(channelId);
+  // An explicit target (AutomationMirrorStep.jsx's "Resume now" / "Check for updates" / "Publish
+  // now") that no longer resolves means the video was deleted — most likely right before this call,
+  // or the click itself was on stale UI. Fail clearly instead of silently falling through to the
+  // "nothing to resume, start a brand-new video" path below, which would otherwise create an
+  // entirely different, unrelated video under a fresh id in response to a request to resume THIS one.
+  if (targetVideoId && !resumable) {
+    const message = 'Video was deleted by the user — stopping this run.';
+    await logStep(channelId, targetVideoId, 'resume', 'video_deleted', message);
+    return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reasonLogged: true, reason: message };
+  }
+  if (resumable) videoKnownToExist = true; // just loaded it — it demonstrably exists right now
   let resumePhase = 'suggestion';
   const wasResumed = !!resumable;
   // wasResumed alone is too blunt to gate auto-publish on (see the YouTube phase): it's true for the

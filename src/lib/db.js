@@ -126,9 +126,50 @@ async function upsertVideoRow(video) {
   return fromVideoRow(data);
 }
 
+// Thrown by updateExistingVideoRow (and everything built on it — updateVideoFields,
+// persistVideoMediaProgress, saveExistingVideo) when a video's row no longer exists: the user
+// deleted it (see deleteVideo below) while a run that had already confirmed it exists — created it
+// moments ago, or resumed/loaded it — was still in progress. Callers MUST NOT fall back to a plain
+// upsert on this error, which is exactly how the video used to get silently resurrected under the
+// same id; they should stop whatever they were doing instead. `videoDeleted: true` lets a caller
+// recognize this without an instanceof check across a module boundary if that's ever more convenient.
+export class VideoDeletedError extends Error {
+  constructor(videoId) {
+    super(`Video ${videoId} was deleted by the user — stopping this run.`);
+    this.name = 'VideoDeletedError';
+    this.videoId = videoId;
+    this.videoDeleted = true;
+  }
+}
+
+// Writes `video` as an UPDATE to its existing row — never an insert. `.update()` on a row that no
+// longer exists affects zero rows (no error from Postgres either way), which is exactly the signal
+// used here to detect "this video was deleted" and raise VideoDeletedError instead of the caller
+// ever falling back to upsertVideoRow and recreating it. Use this (via saveExistingVideo,
+// updateVideoFields, or persistVideoMediaProgress) for every write to a video from the point some
+// caller has already confirmed the row exists — upsertVideoRow/saveVideo stay reserved for the one
+// genuine "create a brand-new video record" write per video's lifetime.
+async function updateExistingVideoRow(video) {
+  const data = unwrap(await supabase.from('wisitube_videos').update(videoRowFrom(video)).eq('id', video.id).select().maybeSingle());
+  if (!data) throw new VideoDeletedError(video.id);
+  return fromVideoRow(data);
+}
+
 export async function saveVideo(video) {
   if (!video?.id) return upsertVideoRow(video); // no id to serialize on (shouldn't happen — callers always set one)
   return chainVideoWrite(video.id, () => upsertVideoRow(video));
+}
+
+/**
+ * Same shape/contract as saveVideo, but NEVER creates a row — see updateExistingVideoRow above for
+ * why. Use this instead of saveVideo for every write to a video that a long-running caller (a
+ * recipe's persist(), the editor autosave, a chunked-generation partial save) already knows exists,
+ * so a deletion racing in partway through that run gets a clean VideoDeletedError instead of quietly
+ * resurrecting the row under the same id.
+ */
+export async function saveExistingVideo(video) {
+  if (!video?.id) throw new Error('saveExistingVideo: no id');
+  return chainVideoWrite(video.id, () => updateExistingVideoRow(video));
 }
 
 /**
@@ -138,14 +179,16 @@ export async function saveVideo(video) {
  * only overlays `patch`'s keys onto it, so a concurrent writer's other changes to the same row
  * survive. Serialized through the same per-video write chain as every other write. Use this — not
  * saveVideo({ ...someOldCopy, field }) — whenever you only mean to change a named field or two.
- * Returns the merged, persisted record.
+ * Returns the merged, persisted record. Throws VideoDeletedError (not a plain Error) when the video
+ * was deleted — either caught between the read below and the write (updateExistingVideoRow's own
+ * zero-rows-affected check), or already gone before this call even started.
  */
 export async function updateVideoFields(videoId, patch) {
   if (!videoId) throw new Error('updateVideoFields: no videoId');
   return chainVideoWrite(videoId, async () => {
     const fresh = await loadVideo(videoId);
-    if (!fresh) throw new Error(`updateVideoFields: video ${videoId} not found`);
-    return upsertVideoRow({ ...fresh, ...patch });
+    if (!fresh) throw new VideoDeletedError(videoId);
+    return updateExistingVideoRow({ ...fresh, ...patch });
   });
 }
 
@@ -224,12 +267,17 @@ const VIDEO_DOWNSTREAM_FIELDS = [
  * manual resume — any two of which can overlap while Gemini Batch jobs are running). Returns the
  * merged, persisted record — callers should adopt it as their new working copy so their own
  * "is everything ready?" check runs against the freshest state, not their stale one.
+ *
+ * Only ever called for a video already past its 'video-record' creation phase (media generation
+ * can't start before scenes exist, which can't exist before the record does) — so unlike saveVideo,
+ * a missing row here can only mean the video was deleted mid-run, never "not created yet". Throws
+ * VideoDeletedError in that case instead of the old behavior of silently recreating it via upsert.
  */
 export async function persistVideoMediaProgress(video) {
   if (!video?.id) return upsertVideoRow(video);
   return chainVideoWrite(video.id, async () => {
     const fresh = await loadVideo(video.id);
-    if (!fresh) return upsertVideoRow(video); // not in the DB yet — nothing to merge against
+    if (!fresh) throw new VideoDeletedError(video.id);
 
     const merged = {
       ...video,
@@ -246,7 +294,9 @@ export async function persistVideoMediaProgress(video) {
     merged.promisedFollowUp = fresh.promisedFollowUp;
     merged.promiseFulfilled = fresh.promiseFulfilled;
 
-    return upsertVideoRow(merged);
+    // update, not upsert — closes the (narrow) race between the loadVideo above and this write: if
+    // the video was deleted in that window, this raises VideoDeletedError instead of recreating it.
+    return updateExistingVideoRow(merged);
   });
 }
 
@@ -978,7 +1028,7 @@ export async function listIncompleteVideos(userId) {
 export async function resetStuckVideo(id) {
   const video = await loadVideo(id);
   if (!video) return null;
-  return saveVideo({ ...video, resumeAttempts: 0, stuckError: null });
+  return saveExistingVideo({ ...video, resumeAttempts: 0, stuckError: null });
 }
 
 // "Reset upload flag" — clears project.youtubeUploadStarted on a video that has it set but never
@@ -991,7 +1041,7 @@ export async function clearYoutubeUploadFlag(id) {
   const video = await loadVideo(id);
   if (!video) return null;
   const { youtubeUploadStarted, ...rest } = video;
-  return saveVideo(rest);
+  return saveExistingVideo(rest);
 }
 
 // Every video, across every one of this user's channels, whose YouTube listing thumbnail has been
