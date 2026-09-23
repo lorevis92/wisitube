@@ -66,16 +66,114 @@ const YOUTUBE_CATEGORIES = [
 ];
 
 // Mon-first ordering, matching "Publish on these days" below — values are JS Date.getDay() numbers
-// (0=Sun…6=Sat), same convention automation_publish_days already uses.
+// (0=Sun…6=Sat), same convention automation_publish_days already uses. Display order only — storage
+// is always the raw 0-6 value, never this array's position.
 const SCHEDULE_SLOT_DAYS = [
-  { value: 1, label: 'Monday' },
-  { value: 2, label: 'Tuesday' },
-  { value: 3, label: 'Wednesday' },
-  { value: 4, label: 'Thursday' },
-  { value: 5, label: 'Friday' },
-  { value: 6, label: 'Saturday' },
-  { value: 0, label: 'Sunday' },
+  { value: 1, label: 'Monday', short: 'Mon' },
+  { value: 2, label: 'Tuesday', short: 'Tue' },
+  { value: 3, label: 'Wednesday', short: 'Wed' },
+  { value: 4, label: 'Thursday', short: 'Thu' },
+  { value: 5, label: 'Friday', short: 'Fri' },
+  { value: 6, label: 'Saturday', short: 'Sat' },
+  { value: 0, label: 'Sunday', short: 'Sun' },
 ];
+
+// Chronological compare for "HH:MM" strings — plain string comparison already sorts these correctly
+// (zero-padded, fixed-width, no am/pm), but a named helper reads clearer at every call site than a
+// bare a.localeCompare(b)/a < b repeated three times.
+function compareTimes(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// One small day+time box in the "Publishing schedule" 7-box row (AutomationStep.jsx's per-channel
+// settings) — its own component (not an inline map callback) because it needs its own hover state
+// for the times tooltip, same reasoning as InfoHint.jsx's own hover/tap popover.
+function ScheduleDayBox({ shortLabel, fullLabel, times, disabled, onClick }) {
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const hasSlots = times.length > 0;
+  return (
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setHoverOpen(true)}
+      onMouseLeave={() => setHoverOpen(false)}
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        title={fullLabel}
+        style={{
+          width: '100%',
+          padding: '8px 4px',
+          borderRadius: 4,
+          border: `1px solid ${hasSlots ? T.primaryBorder : T.border}`,
+          background: hasSlots ? T.primaryLight : '#FFFFFF',
+          color: hasSlots ? T.primary : T.textSecondary,
+          fontFamily: FONT.ui,
+          fontSize: 11,
+          fontWeight: 700,
+          textTransform: 'uppercase',
+          letterSpacing: '0.03em',
+          cursor: disabled ? 'default' : 'pointer',
+          opacity: disabled ? 0.6 : 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 4,
+        }}
+      >
+        {shortLabel}
+        {hasSlots && (
+          <span
+            style={{
+              ...mono,
+              fontSize: 10,
+              fontWeight: 700,
+              color: '#FFFFFF',
+              background: T.primary,
+              borderRadius: 8,
+              minWidth: 16,
+              height: 16,
+              padding: '0 4px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {times.length}
+          </span>
+        )}
+      </button>
+      {hoverOpen && hasSlots && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '110%',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 50,
+            background: '#FFFFFF',
+            border: `1px solid ${T.border}`,
+            borderRadius: 4,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.14)',
+            padding: '6px 10px',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+          }}
+        >
+          <div style={{ ...mono, fontSize: 10, fontWeight: 700, color: T.textMuted, marginBottom: 4, textTransform: 'uppercase' }}>
+            {fullLabel}
+          </div>
+          {times.map((t) => (
+            <div key={t} style={{ ...mono, fontSize: 12, color: T.text }}>
+              {t}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const LOG_POLL_MS = 1500;
 
@@ -157,6 +255,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   // summary line below for what's visible without expanding). Not persisted: every page load starts
   // fully collapsed again, same simple default as everywhere else "closed by default" is used here.
   const [expandedChannels, setExpandedChannels] = useState({});
+  // Which channel's "Publishing schedule" day-management panel is open, if any — { channelId, day }
+  // (day: 0=Sun…6=Sat) or null. Global (not per-channel) on purpose: only one day panel is ever open
+  // at a time across every channel, so opening one elsewhere closes whatever was open before it.
+  const [scheduleDayOpen, setScheduleDayOpen] = useState(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null); // { channelId, channelName, index, total, status }
   const [logItems, setLogItems] = useState([]);
@@ -1035,76 +1137,127 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     // Explicit day+time slots — non-empty entirely replaces the global interval
                     // panel's "check every N hours/days" for this one channel (automationScheduler.js's
                     // tick() excludes any channel with slots from that interval-driven call and instead
-                    // starts a cycle for it the moment local time matches one of these). Always stored
-                    // as concrete { day, time } entries, never an "every day" marker — selecting "Every
-                    // day" below is a write-time action that fans out into 7 same-time slots (one per
-                    // day) so the scheduler's own matching logic never needs a second concept.
-                    const slots = Array.isArray(c.automation_schedule_slots) ? c.automation_schedule_slots : [];
-                    const saveSlots = (next) => updateAndSaveImmediately(c.id, { automation_schedule_slots: next });
-                    const addSlot = () => saveSlots([...slots, { day: 1, time: '09:00' }]);
-                    const removeSlot = (idx) => saveSlots(slots.filter((_, i) => i !== idx));
-                    const setSlotDay = (idx, value) => {
-                      if (value === 'all') {
-                        const time = slots[idx].time;
-                        const expanded = [0, 1, 2, 3, 4, 5, 6].map((d) => ({ day: d, time }));
-                        saveSlots([...slots.slice(0, idx), ...expanded, ...slots.slice(idx + 1)]);
-                      } else {
-                        saveSlots(slots.map((s, i) => (i === idx ? { ...s, day: Number(value) } : s)));
+                    // starts a cycle for it the moment local time matches one of these).
+                    //
+                    // Always kept sorted by day then time on every write (never insertion order) — the
+                    // 7-box row and the day panel below both just read this array in order, so the
+                    // canonical order lives in the stored data itself rather than being re-derived by
+                    // every reader.
+                    const rawSlots = Array.isArray(c.automation_schedule_slots) ? c.automation_schedule_slots : [];
+                    const saveSlots = (next) =>
+                      updateAndSaveImmediately(c.id, {
+                        automation_schedule_slots: [...next].sort((a, b) => a.day - b.day || compareTimes(a.time, b.time)),
+                      });
+                    const slotsForDay = (day) => rawSlots.filter((s) => s.day === day).sort((a, b) => compareTimes(a.time, b.time));
+
+                    const addTime = (day) => {
+                      // Default to the first :00 hour not already used on this day, so repeated
+                      // clicks add distinct times instead of piling up identical ones.
+                      const used = new Set(slotsForDay(day).map((s) => s.time));
+                      let time = '09:00';
+                      for (let h = 0; h < 24; h++) {
+                        const candidate = `${String(h).padStart(2, '0')}:00`;
+                        if (!used.has(candidate)) {
+                          time = candidate;
+                          break;
+                        }
                       }
+                      saveSlots([...rawSlots, { day, time }]);
                     };
-                    const setSlotTime = (idx, value) => saveSlots(slots.map((s, i) => (i === idx ? { ...s, time: value } : s)));
+                    const removeSlot = (day, time) => saveSlots(rawSlots.filter((s) => !(s.day === day && s.time === time)));
+                    const updateSlotTime = (day, oldTime, newTime) =>
+                      saveSlots(rawSlots.map((s) => (s.day === day && s.time === oldTime ? { ...s, time: newTime } : s)));
+                    // Sets this exact time on every one of the 7 days — drops any pre-existing slot at
+                    // this same time first (on any day, including this one) so re-adding it can never
+                    // create a duplicate, then adds exactly one fresh entry per day.
+                    const copyToAllDays = (time) => {
+                      const kept = rawSlots.filter((s) => s.time !== time);
+                      saveSlots([...kept, ...[0, 1, 2, 3, 4, 5, 6].map((d) => ({ day: d, time }))]);
+                    };
+
+                    const openDay = scheduleDayOpen?.channelId === c.id ? scheduleDayOpen.day : null;
+                    const openDayMeta = openDay !== null ? SCHEDULE_SLOT_DAYS.find((d) => d.value === openDay) : null;
+                    const openDaySlots = openDay !== null ? slotsForDay(openDay) : [];
+                    const totalSlots = rawSlots.length;
 
                     return (
                       <div style={{ gridColumn: '1 / -1' }}>
                         <div style={label}>
                           Publishing schedule
-                          <InfoHint text="Exact day+time slots that start a real cycle for this channel — leave empty to keep using the global interval + Publish on these days above. Once you add a slot, the interval is ignored entirely for this channel." />
+                          <InfoHint text="Exact day+time slots that start a real cycle for this channel — leave every day empty to keep using the global interval + Publish on these days above. Once you add a slot, the interval is ignored entirely for this channel. Click a day to add or edit its times." />
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-                          {slots.map((slot, idx) => (
-                            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              <select
-                                value={String(slot.day)}
-                                disabled={running}
-                                onChange={(e) => setSlotDay(idx, e.target.value)}
-                                style={{ ...inputStyle, width: 140 }}
-                              >
-                                <option value="all">Every day</option>
-                                {SCHEDULE_SLOT_DAYS.map((d) => (
-                                  <option key={d.value} value={d.value}>
-                                    {d.label}
-                                  </option>
-                                ))}
-                              </select>
-                              <input
-                                type="time"
-                                value={slot.time || '09:00'}
-                                disabled={running}
-                                onChange={(e) => setSlotTime(idx, e.target.value)}
-                                style={{ ...inputStyle, width: 110 }}
-                              />
-                              <button
-                                onClick={() => removeSlot(idx)}
-                                disabled={running}
-                                title="Remove this slot"
-                                style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
-                              >
-                                🗑
-                              </button>
-                            </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginTop: 8 }}>
+                          {SCHEDULE_SLOT_DAYS.map((d) => (
+                            <ScheduleDayBox
+                              key={d.value}
+                              shortLabel={d.short}
+                              fullLabel={d.label}
+                              times={slotsForDay(d.value).map((s) => s.time)}
+                              disabled={running}
+                              onClick={() => setScheduleDayOpen(openDay === d.value ? null : { channelId: c.id, day: d.value })}
+                            />
                           ))}
                         </div>
-                        <button
-                          onClick={addSlot}
-                          disabled={running}
-                          style={{ ...btnGhost, marginTop: 8, padding: '6px 12px', fontSize: 11 }}
-                        >
-                          + Add time slot
-                        </button>
-                        {slots.length > 0 && (
-                          <div style={{ fontSize: 10, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6 }}>
-                            This channel follows {slots.length} slot{slots.length === 1 ? '' : 's'} above instead of the global interval — Publish
-                            on these days no longer applies while any slot is configured.
+
+                        {openDayMeta && (
+                          <div style={{ marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 4, padding: 12 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontFamily: FONT.ui, fontSize: 12, fontWeight: 700, color: T.text }}>{openDayMeta.label}</span>
+                              <button
+                                onClick={() => setScheduleDayOpen(null)}
+                                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: T.textMuted, fontSize: 14 }}
+                              >
+                                ✕
+                              </button>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+                              {openDaySlots.length === 0 && (
+                                <div style={{ fontSize: 11, color: T.textMuted, fontFamily: FONT.ui }}>No times set for this day yet.</div>
+                              )}
+                              {openDaySlots.map((slot) => (
+                                <div key={slot.time} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                  <input
+                                    type="time"
+                                    value={slot.time}
+                                    disabled={running}
+                                    onChange={(e) => updateSlotTime(openDay, slot.time, e.target.value)}
+                                    style={{ ...inputStyle, width: 110 }}
+                                  />
+                                  <button
+                                    onClick={() => copyToAllDays(slot.time)}
+                                    disabled={running}
+                                    title="Copy this time to all other days"
+                                    style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
+                                  >
+                                    📋 Copy to all days
+                                  </button>
+                                  <button
+                                    onClick={() => removeSlot(openDay, slot.time)}
+                                    disabled={running}
+                                    title="Remove this time"
+                                    style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
+                                  >
+                                    🗑
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+
+                            <button
+                              onClick={() => addTime(openDay)}
+                              disabled={running}
+                              style={{ ...btnGhost, marginTop: 10, padding: '6px 12px', fontSize: 11 }}
+                            >
+                              + Add time
+                            </button>
+                          </div>
+                        )}
+
+                        {totalSlots > 0 && (
+                          <div style={{ fontSize: 10, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8 }}>
+                            This channel follows {totalSlots} slot{totalSlots === 1 ? '' : 's'} above instead of the global interval — Publish on
+                            these days no longer applies while any slot is configured.
                           </div>
                         )}
                       </div>
