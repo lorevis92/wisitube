@@ -285,7 +285,7 @@ ${characterBible
   "title": "punchy Short title, max 90 chars, curiosity-driven",
   "description": "2-3 sentence YouTube description written to tease the full video (the app appends the full-video link and #Shorts itself — do NOT add them)",
   "tags": [8-12 short SEO tag strings],
-  "thumbnail_concepts": [EXACTLY 3 objects, never fewer: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise", "image_prompt": "concrete visual description in English for an AI image generator, framed as a vertical 9:16 portrait. If a thumbnail creative direction for this channel's Shorts is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject filling the frame, exaggerated emotion, high contrast. No text in the image. If a real, identifiable person or a well-known named character is central to this Short, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
+  "thumbnail_concepts": [EXACTLY 3 objects, never fewer: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise — this is the ONLY text that will appear on the thumbnail, so it must say one thing clearly rather than spreading an idea across multiple phrases", "image_prompt": "concrete visual description in English for an AI image generator, framed as a vertical 9:16 portrait. If a thumbnail creative direction for this channel's Shorts is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject filling the frame, exaggerated emotion, high contrast. No text in the image. If a real, identifiable person or a well-known named character is central to this Short, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
   "character_bible": [the SAME array you were given above, unchanged, or [] if none was given],
   "scenes": [between 6 and 10 objects: {
     "narration": "what the voiceover says for this scene — 1-2 very short sentences, max 150 characters, written in ${language}, no dashes as punctuation",
@@ -644,7 +644,7 @@ JSON schema:
 {
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end, written to match the chosen angle",
   "tags": [15 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise", "image_prompt": "concrete visual description in English for an AI image generator. If a thumbnail creative direction for this channel is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject, exaggerated emotion. No text in the image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"", "header_text": "optional secondary line, UPPERCASE, max 7 words; fill it ONLY if the channel's thumbnail creative direction asks for a header/secondary line, otherwise empty string" }],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise — this is the ONLY text that will appear on the thumbnail, so it must say one thing clearly rather than spreading an idea across multiple phrases", "image_prompt": "concrete visual description in English for an AI image generator. If a thumbnail creative direction for this channel is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject, exaggerated emotion. No text in the image. If a real, identifiable person or a well-known named character is central to this video, that focal subject MUST be named explicitly by their proper name (e.g. \\"Elon Musk with a shocked expression, plunging red stock-market graphs behind him\\") — never a generic stand-in like \\"a businessman\\" or \\"a shocked man\\"" }],
   "character_bible": [array of objects, one per recurring character: { "id": string, "name": string, "base_description": "distinctive traits that NEVER change: face shape, build, defining features — max 12-15 words, telegraphic comma-separated fragments, NOT a full sentence", "variants": [{ "label": "e.g. Young Napoleon, 1790s", "description": "traits specific to this era/stage: hair, clothing, age markers — max 12-15 words, telegraphic comma-separated fragments, NOT a full sentence" }] }],
   "outline": [array of chapter objects: { "id": string, "title": "chapter name", "summary": "2-3 sentences on what happens in this chapter and how it connects to the previous/next one", "scene_count": number }],
   "total_scenes": ${totalScenesSchemaValue}
@@ -781,15 +781,6 @@ Rules:
       }
     } else {
       plan.total_scenes = totalScenes;
-    }
-    // header_text is optional from the model's side — guarantee it's always a real string on the
-    // way out so no downstream consumer (App.jsx/the recipes/ExportStep.jsx) needs its own
-    // undefined-tolerant fallback.
-    if (Array.isArray(plan.thumbnail_concepts)) {
-      plan.thumbnail_concepts = plan.thumbnail_concepts.map((c) => ({
-        ...c,
-        header_text: typeof c?.header_text === 'string' ? c.header_text.trim() : '',
-      }));
     }
     return res.status(200).json(plan);
   } catch (err) {

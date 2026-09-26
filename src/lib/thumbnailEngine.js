@@ -91,12 +91,6 @@ const DEFAULT_THUMBNAIL_DIRECTION = {
   color: '#FFFFFF',
   outline: true,
   outlineColor: '#000000',
-  // Secondary (header_text) line's own independent color/outline — see thumbnailPrompt's two-text
-  // branch. Same defaults as the primary line's own, so an unconfigured channel's two-line
-  // thumbnails still render in a single consistent white-on-black look.
-  headerColor: '#FFFFFF',
-  headerOutline: true,
-  headerOutlineColor: '#000000',
   flavor: '',
   keepBadgeClear: true,
   references: [],
@@ -123,12 +117,6 @@ export function resolveThumbnailDirectionStyle(channel, project) {
     color: typeof entry.color === 'string' && entry.color ? entry.color : DEFAULT_THUMBNAIL_DIRECTION.color,
     outline: entry.outline !== false,
     outlineColor: typeof entry.outlineColor === 'string' && entry.outlineColor ? entry.outlineColor : DEFAULT_THUMBNAIL_DIRECTION.outlineColor,
-    headerColor: typeof entry.headerColor === 'string' && entry.headerColor ? entry.headerColor : DEFAULT_THUMBNAIL_DIRECTION.headerColor,
-    headerOutline: entry.headerOutline !== false,
-    headerOutlineColor:
-      typeof entry.headerOutlineColor === 'string' && entry.headerOutlineColor
-        ? entry.headerOutlineColor
-        : DEFAULT_THUMBNAIL_DIRECTION.headerOutlineColor,
     flavor: typeof entry.flavor === 'string' ? entry.flavor : '',
     keepBadgeClear: entry.keepBadgeClear !== false,
     references: Array.isArray(entry.references)
@@ -186,7 +174,7 @@ function resolveThumbnailFormat({ format, project, settings }) {
 // Takes the effective provider (already translated from 'nanobanana-batch' to 'nanobanana' by the
 // caller — see generateThumbnail below) rather than reading settings.imageProvider itself, so
 // there's exactly one place that translation happens, not two.
-function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt, thumbnailDirection, headerText) {
+function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt, thumbnailDirection) {
   // Position/color/outline/flavor/keepBadgeClear mirror the channel's own thumbnail-direction
   // settings (see resolveThumbnailDirectionStyle) — computed once, up front, since flavor applies
   // to every provider's prompt below, not just the premium-provider branch.
@@ -216,20 +204,10 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt,
   const colorPhrase = dir.outline
     ? `filled in ${dir.color} with a bold ${dir.outlineColor} outline/drop shadow for readability`
     : `filled in ${dir.color}, no outline`;
-  // headerText (api/generate-outline.js's/api/generate-scenes.js's optional thumbnail_concepts
-  // field, ExportStep.jsx's second editable field) asks for a SECOND line of text at the channel's
-  // configured position, with the main overlay_text enlarged near the subject instead — omitted
-  // entirely (single-text behavior, byte-for-byte as before) when no header is set. Each line gets
-  // its OWN color/outline (dir.color/dir.outlineColor for the primary line, dir.headerColor/
-  // dir.headerOutlineColor for the secondary one) so a two-line thumbnail can read as a real visual
-  // hierarchy in colour as well as size — e.g. a bold red hook up top, a calmer white subject name
-  // below, or the reverse, whatever the channel configures.
-  const headerColorPhrase = dir.headerOutline
-    ? `filled in ${dir.headerColor} with a bold ${dir.headerOutlineColor} outline/drop shadow for readability`
-    : `filled in ${dir.headerColor}, no outline`;
-  const textInstruction = headerText
-    ? `Render TWO separate pieces of text directly in the image as a clear two-line visual hierarchy, both bold, high-contrast YouTube thumbnail typography, thick sans-serif font: the primary text '${overlayText}' MUCH LARGER than the other line, ${colorPhrase}, positioned near the main subject; and the secondary text '${headerText}' NOTICEABLY SMALLER than the primary line, ${headerColorPhrase}, positioned ${positionPhrase}. This exact position for the secondary line is a strong preference, not a hard guarantee — the size difference and each line's own color are not, they must both be respected exactly. Both texts must be spelled exactly as given, character-for-character, no alterations, no other text anywhere in the image.`
-    : `Include the exact text '${overlayText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, ${colorPhrase}, positioned ${positionPhrase}, sized large and impactful like professional YouTube thumbnails. This exact position is a strong preference, not a hard guarantee. The text must be spelled exactly as given, no alterations.`;
+  // Exactly ONE piece of text, never two — a second line (however styled) tends to just restate the
+  // same idea in different words instead of landing one thing clearly, so this is deliberately never
+  // conditional on anything from the concept or the channel's settings.
+  const textInstruction = `Include EXACTLY ONE piece of text rendered directly in the image — the exact text '${overlayText}', as bold, high-contrast YouTube thumbnail typography, thick sans-serif font, ${colorPhrase}, positioned ${positionPhrase}, sized large and impactful like professional YouTube thumbnails. This exact position is a strong preference, not a hard guarantee. The text must be spelled exactly as given, no alterations. Do not render any other text, caption, subtitle, or second line anywhere in the image — one clear piece of text only.`;
   const badgeClearNote = dir.keepBadgeClear ? ` ${KEEP_BADGE_CLEAR_INSTRUCTION}` : '';
   return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}${badgeClearNote}`, styleDescription: style.natural });
 }
@@ -249,7 +227,7 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt,
  */
 export async function generateThumbnail(
   project,
-  { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', headerText = '', seed, format, thumbnailDirection } = {}
+  { settings, channelId, userId, videoId, thumbIdx = 0, overlayText = '', seed, format, thumbnailDirection } = {}
 ) {
   // Every caller is SUPPOSED to hand us a real concept (the recipe checks plan.thumbnails[0], the
   // recipe's Short path backfills a synthetic one, ExportStep reads project.thumbnails). This is a
@@ -288,7 +266,7 @@ export async function generateThumbnail(
       console.error('[thumbnailEngine] failed to load thumbnail reference photo, generating without it', reference.path, err);
     }
   }
-  const basePrompt = thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider, fmt, thumbnailDirection, headerText);
+  const basePrompt = thumbnailPrompt(concept, overlayText, settings, effectiveThumbnailProvider, fmt, thumbnailDirection);
   const prompt = referenceImages.length ? `${basePrompt} ${REFERENCE_MATCH_INSTRUCTION}` : basePrompt;
 
   // Same unified gateway (and the same server-side FAL_KEY auth) StoryboardStep.jsx already uses
@@ -332,7 +310,6 @@ export async function generateThumbnail(
     // The canvas overlay is the one path where the channel's position/color/outline choice is
     // GUARANTEED (unlike the premium-provider prompt above, which can only ask for it) — read
     // straight from the resolved per-channel style (`dir`, computed above), never a fixed value.
-    // headerText is deliberately NOT drawn here — the Pollinations canvas path is unchanged.
     const text = (overlayText || '').toUpperCase();
     const words = text.split(/\s+/).filter(Boolean);
     const lines =

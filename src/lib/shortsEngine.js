@@ -33,10 +33,6 @@ export function synthesizeShortThumbnailConcept({ title = '', topic = '' } = {})
   return {
     overlay_text: overlayText,
     image_prompt: `${subject}, vertical 9:16 portrait composition, one strong focal subject filling the frame, exaggerated emotion, high contrast, dramatic lighting, eye-catching, no text in the image`,
-    // Shorts never use the optional secondary header line (see api/generate-outline.js's
-    // thumbnail_concepts schema / thumbnailEngine.js's generateThumbnail) — always empty, never
-    // undefined, so this object's shape matches a model-authored concept's exactly.
-    header_text: '',
   };
 }
 

@@ -48,9 +48,6 @@ function DEFAULT_THUMB_DIRECTION_ENTRY() {
     color: '#FFFFFF',
     outline: true,
     outlineColor: '#000000',
-    headerColor: '#FFFFFF',
-    headerOutline: true,
-    headerOutlineColor: '#000000',
     flavor: '',
     keepBadgeClear: true,
     references: [],
@@ -826,74 +823,31 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           </select>
         </div>
 
-        <div style={{ marginTop: 12 }}>
-          <div style={label}>
-            Primary text color
-            <InfoHint text="Colors the main overlay text — the larger of the two lines when a header/secondary line is also set (see below)." />
-          </div>
-          <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        <div style={{ marginTop: 12, display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+            Text color
+            <input
+              type="color"
+              value={entry.color}
+              onChange={(e) => updateThumbFieldNow(kind, { color: e.target.value })}
+              style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
+            />
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
+            <input type="checkbox" checked={entry.outline !== false} onChange={(e) => updateThumbFieldNow(kind, { outline: e.target.checked })} />
+            Outline
+          </label>
+          {entry.outline !== false && (
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-              Text color
+              Outline color
               <input
                 type="color"
-                value={entry.color}
-                onChange={(e) => updateThumbFieldNow(kind, { color: e.target.value })}
+                value={entry.outlineColor}
+                onChange={(e) => updateThumbFieldNow(kind, { outlineColor: e.target.value })}
                 style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
               />
             </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-              <input type="checkbox" checked={entry.outline !== false} onChange={(e) => updateThumbFieldNow(kind, { outline: e.target.checked })} />
-              Outline
-            </label>
-            {entry.outline !== false && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-                Outline color
-                <input
-                  type="color"
-                  value={entry.outlineColor}
-                  onChange={(e) => updateThumbFieldNow(kind, { outlineColor: e.target.value })}
-                  style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
-                />
-              </label>
-            )}
-          </div>
-        </div>
-
-        <div style={{ marginTop: 12 }}>
-          <div style={label}>
-            Header (secondary) text color
-            <InfoHint text="Colors the optional second line (header_text) — rendered noticeably smaller than the primary text, e.g. a hook up top and the subject's name below, or the reverse. Only used on premium providers (Nano Banana / GPT Image); only appears when the channel's thumbnail creative direction asks the model for one." />
-          </div>
-          <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-              Text color
-              <input
-                type="color"
-                value={entry.headerColor}
-                onChange={(e) => updateThumbFieldNow(kind, { headerColor: e.target.value })}
-                style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
-              />
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-              <input
-                type="checkbox"
-                checked={entry.headerOutline !== false}
-                onChange={(e) => updateThumbFieldNow(kind, { headerOutline: e.target.checked })}
-              />
-              Outline
-            </label>
-            {entry.headerOutline !== false && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: FONT.ui, color: T.text }}>
-                Outline color
-                <input
-                  type="color"
-                  value={entry.headerOutlineColor}
-                  onChange={(e) => updateThumbFieldNow(kind, { headerOutlineColor: e.target.value })}
-                  style={{ width: 32, height: 26, padding: 0, border: `1px solid ${T.border}`, borderRadius: 4, cursor: 'pointer' }}
-                />
-              </label>
-            )}
-          </div>
+          )}
         </div>
 
         <div style={{ marginTop: 12 }}>

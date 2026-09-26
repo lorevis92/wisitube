@@ -1055,7 +1055,6 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
         videoId,
         thumbIdx: 0,
         overlayText: concept.overlay_text || '',
-        headerText: concept.header_text || '',
         seed: Math.floor(Math.random() * 999999),
         // settings.format is already forced to '9:16' for an isShort video (see the resume check);
         // generateThumbnail also falls back to project.isShort on its own.

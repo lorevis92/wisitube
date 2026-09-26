@@ -436,7 +436,7 @@ JSON schema:
   "title": "see instruction above",
   "description": "SEO-optimized YouTube description, 3-5 sentences, includes a hook line and 3 relevant hashtags at the end",
   "tags": [15 short SEO tag strings],
-  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise", "image_prompt": "concrete visual description in English for an AI image generator. If a thumbnail creative direction for this channel is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject, exaggerated emotion. No text in image. If a real, identifiable person or well-known character is central, name them explicitly by proper name — never a generic stand-in.", "header_text": "optional secondary line, UPPERCASE, max 7 words; fill it ONLY if the channel's thumbnail creative direction asks for a header/secondary line, otherwise empty string" }],
+  "thumbnail_concepts": [3 objects: { "overlay_text": "punchy text, max 4 words UPPERCASE unless the channel's thumbnail creative direction below says otherwise — this is the ONLY text that will appear on the thumbnail, so it must say one thing clearly rather than spreading an idea across multiple phrases", "image_prompt": "concrete visual description in English for an AI image generator. If a thumbnail creative direction for this channel is provided in the rules below, follow it exactly for subject, composition and tone; otherwise default to: one strong focal subject, exaggerated emotion. No text in image. If a real, identifiable person or well-known character is central, name them explicitly by proper name — never a generic stand-in." }],
   "character_bible": [array of objects: { "id": string, "name": string, "base_description": string, "variants": [{ "label": string, "description": string }] }],
   "scenes": [array of strings — the ENTIRE script split into scene-sized chunks, in original order; concatenating every entry (ignoring surrounding whitespace) must reconstruct the original script EXACTLY, word for word]
 }
@@ -533,9 +533,7 @@ Rules:
     plan.title = typeof plan.title === 'string' ? plan.title.trim() : '';
     plan.description = typeof plan.description === 'string' ? plan.description : '';
     plan.tags = Array.isArray(plan.tags) ? plan.tags : [];
-    plan.thumbnail_concepts = Array.isArray(plan.thumbnail_concepts)
-      ? plan.thumbnail_concepts.slice(0, 3).map((c) => ({ ...c, header_text: typeof c?.header_text === 'string' ? c.header_text.trim() : '' }))
-      : [];
+    plan.thumbnail_concepts = Array.isArray(plan.thumbnail_concepts) ? plan.thumbnail_concepts.slice(0, 3) : [];
     plan.character_bible = Array.isArray(plan.character_bible) ? plan.character_bible : [];
 
     return res.status(200).json(plan);
