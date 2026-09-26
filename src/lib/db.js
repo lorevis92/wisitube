@@ -513,6 +513,13 @@ export async function deleteVideo(id) {
 // new column, this is the SAME jsonb column normalizeThumbnailDirectionEntry already reads/writes,
 // so no migration is needed for these three specifically; a channel saved before they existed just
 // gets the safe defaults (flavor: '', keepBadgeClear: true, references: []) from that function.
+//
+// Same story for the header (secondary) text's own independent color/outline — headerColor,
+// headerOutline, headerOutlineColor — added to the same jsonb entry alongside color/outline/
+// outlineColor (which now specifically mean the PRIMARY/overlay text's own color, not "the" text
+// color — see thumbnailEngine.js's thumbnailPrompt). No migration needed; a channel saved before
+// these existed gets the same defaults the primary text always had (white, black outline), so an
+// unconfigured channel's premium-provider thumbnails render byte-for-byte as before.
 
 // Normalizes one half (video/short) of automation_thumbnail_direction to always-usable values —
 // shared by fromChannelRow (reading a saved row) and saveChannel (writing one, so a channel that
@@ -536,9 +543,20 @@ function normalizeThumbnailDirectionEntry(entry) {
   return {
     text: typeof e.text === 'string' ? e.text : '',
     position: ['top-left', 'top-center', 'center'].includes(e.position) ? e.position : 'center',
+    // color/outline/outlineColor style the PRIMARY (overlay_text) line — the larger of the two,
+    // always the one anchored near the main subject. See headerColor/headerOutline/
+    // headerOutlineColor just below for the secondary (header_text) line's own independent styling.
     color: typeof e.color === 'string' && e.color ? e.color : '#FFFFFF',
     outline: e.outline !== false,
     outlineColor: typeof e.outlineColor === 'string' && e.outlineColor ? e.outlineColor : '#000000',
+    // Same shape as color/outline/outlineColor above, but for the smaller, secondary header_text
+    // line — independent so the two lines of a two-line thumbnail can read as a real visual
+    // hierarchy (e.g. a bold red hook up top, a calmer white subject name below). Defaults match the
+    // primary line's own defaults, so a channel that's never touched these renders identically to
+    // before this field existed.
+    headerColor: typeof e.headerColor === 'string' && e.headerColor ? e.headerColor : '#FFFFFF',
+    headerOutline: e.headerOutline !== false,
+    headerOutlineColor: typeof e.headerOutlineColor === 'string' && e.headerOutlineColor ? e.headerOutlineColor : '#000000',
     // '' = use thumbnailEngine.js's own DEFAULT_THUMBNAIL_FLAVOR text, byte-for-byte — never
     // hard-coded here, this column is the only source of a channel's own flavor text.
     flavor: typeof e.flavor === 'string' ? e.flavor : '',

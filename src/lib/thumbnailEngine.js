@@ -91,6 +91,12 @@ const DEFAULT_THUMBNAIL_DIRECTION = {
   color: '#FFFFFF',
   outline: true,
   outlineColor: '#000000',
+  // Secondary (header_text) line's own independent color/outline — see thumbnailPrompt's two-text
+  // branch. Same defaults as the primary line's own, so an unconfigured channel's two-line
+  // thumbnails still render in a single consistent white-on-black look.
+  headerColor: '#FFFFFF',
+  headerOutline: true,
+  headerOutlineColor: '#000000',
   flavor: '',
   keepBadgeClear: true,
   references: [],
@@ -117,6 +123,12 @@ export function resolveThumbnailDirectionStyle(channel, project) {
     color: typeof entry.color === 'string' && entry.color ? entry.color : DEFAULT_THUMBNAIL_DIRECTION.color,
     outline: entry.outline !== false,
     outlineColor: typeof entry.outlineColor === 'string' && entry.outlineColor ? entry.outlineColor : DEFAULT_THUMBNAIL_DIRECTION.outlineColor,
+    headerColor: typeof entry.headerColor === 'string' && entry.headerColor ? entry.headerColor : DEFAULT_THUMBNAIL_DIRECTION.headerColor,
+    headerOutline: entry.headerOutline !== false,
+    headerOutlineColor:
+      typeof entry.headerOutlineColor === 'string' && entry.headerOutlineColor
+        ? entry.headerOutlineColor
+        : DEFAULT_THUMBNAIL_DIRECTION.headerOutlineColor,
     flavor: typeof entry.flavor === 'string' ? entry.flavor : '',
     keepBadgeClear: entry.keepBadgeClear !== false,
     references: Array.isArray(entry.references)
@@ -207,9 +219,16 @@ function thumbnailPrompt(concept, overlayText, settings, effectiveProvider, fmt,
   // headerText (api/generate-outline.js's/api/generate-scenes.js's optional thumbnail_concepts
   // field, ExportStep.jsx's second editable field) asks for a SECOND line of text at the channel's
   // configured position, with the main overlay_text enlarged near the subject instead — omitted
-  // entirely (single-text behavior, byte-for-byte as before) when no header is set.
+  // entirely (single-text behavior, byte-for-byte as before) when no header is set. Each line gets
+  // its OWN color/outline (dir.color/dir.outlineColor for the primary line, dir.headerColor/
+  // dir.headerOutlineColor for the secondary one) so a two-line thumbnail can read as a real visual
+  // hierarchy in colour as well as size — e.g. a bold red hook up top, a calmer white subject name
+  // below, or the reverse, whatever the channel configures.
+  const headerColorPhrase = dir.headerOutline
+    ? `filled in ${dir.headerColor} with a bold ${dir.headerOutlineColor} outline/drop shadow for readability`
+    : `filled in ${dir.headerColor}, no outline`;
   const textInstruction = headerText
-    ? `Render TWO separate pieces of text directly in the image, both as bold, high-contrast YouTube thumbnail typography, thick sans-serif font, ${colorPhrase}: the main text '${overlayText}' much larger, positioned near the main subject; and the secondary header text '${headerText}' as medium-large text, positioned ${positionPhrase}. This exact position for the header is a strong preference, not a hard guarantee. Both texts must be spelled exactly as given, character-for-character, no alterations, no other text anywhere in the image.`
+    ? `Render TWO separate pieces of text directly in the image as a clear two-line visual hierarchy, both bold, high-contrast YouTube thumbnail typography, thick sans-serif font: the primary text '${overlayText}' MUCH LARGER than the other line, ${colorPhrase}, positioned near the main subject; and the secondary text '${headerText}' NOTICEABLY SMALLER than the primary line, ${headerColorPhrase}, positioned ${positionPhrase}. This exact position for the secondary line is a strong preference, not a hard guarantee — the size difference and each line's own color are not, they must both be respected exactly. Both texts must be spelled exactly as given, character-for-character, no alterations, no other text anywhere in the image.`
     : `Include the exact text '${overlayText}' rendered directly in the image as bold, high-contrast YouTube thumbnail typography — thick sans-serif font, ${colorPhrase}, positioned ${positionPhrase}, sized large and impactful like professional YouTube thumbnails. This exact position is a strong preference, not a hard guarantee. The text must be spelled exactly as given, no alterations.`;
   const badgeClearNote = dir.keepBadgeClear ? ` ${KEEP_BADGE_CLEAR_INSTRUCTION}` : '';
   return buildNaturalLanguagePrompt({ scenePrompt: `${flavoredPrompt}. ${textInstruction}${badgeClearNote}`, styleDescription: style.natural });
