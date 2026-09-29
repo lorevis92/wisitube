@@ -38,6 +38,9 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           // actually starts (StoryboardStep.jsx's confirm dialog), so there's no unattended-spend
           // risk a cap would need to guard against.
           aiDecidesLength: settings.aiDecidesLength === true,
+          // Same per-channel pacing default automation uses (AutomationStep.jsx's "Scenes per
+          // minute") — only actually applied server-side for a full_pipeline, fixed-length video.
+          scenesPerMinute: channel?.automation_scenes_per_minute || 12,
           style: resolveStyle(settings).label,
           imageProvider: settings.imageProvider,
           contentType: settings.contentType,

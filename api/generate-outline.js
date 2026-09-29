@@ -489,7 +489,18 @@ export default async function handler(req, res) {
         lengthMinutes = Number(body.lengthMinutes);
         if (!Number.isFinite(lengthMinutes) || lengthMinutes <= 0) lengthMinutes = 1;
         lengthMinutes = Math.min(25, Math.max(1, lengthMinutes));
-        totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
+        // Per-channel pacing control (AutomationStep.jsx's "Scenes per minute", db.js's
+        // automation_scenes_per_minute) — indirectly controls how often the rendered video's image
+        // changes, since videoRenderEngine.js/engine.js always split each scene's real duration
+        // evenly between its 2 image beats and never read this value themselves. 12 is both the
+        // default for a channel that's never touched the field AND the fallback for any caller
+        // (older cached client code, a manual/legacy request) that doesn't send it at all — same
+        // number this formula hardcoded before the field existed, so an absent value never changes
+        // behavior.
+        let scenesPerMinute = Number(body.scenesPerMinute);
+        if (!Number.isFinite(scenesPerMinute) || scenesPerMinute <= 0) scenesPerMinute = 12;
+        scenesPerMinute = Math.min(60, Math.max(2, scenesPerMinute));
+        totalScenes = Math.max(6, Math.round(lengthMinutes * scenesPerMinute));
       }
       hints = Array.isArray(body.characterHints)
         ? body.characterHints

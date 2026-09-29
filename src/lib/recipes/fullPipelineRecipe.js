@@ -266,6 +266,11 @@ function buildAutomationSettings(channel) {
     voice,
     speechSpeed: Number(channel.automation_speech_speed) || 1.0,
     lengthMinutes: Number(channel.automation_length_minutes) || 5,
+    // Only actually used server-side for a full_pipeline, fixed-length video (api/generate-outline.js
+    // ignores it entirely when aiDecidesLength or content_type 'static_background') — see
+    // AutomationStep.jsx's "Scenes per minute" field. 12 matches the value that was hardcoded before
+    // this field existed, so a channel that's never touched it gets identical pacing to before.
+    scenesPerMinute: Number(channel.automation_scenes_per_minute) || 12,
   };
 }
 
@@ -668,6 +673,7 @@ export async function runFullPipeline(channel, { userId, onProgress, logStep, ta
             series: suggestion.series || null,
             language: settings.language,
             lengthMinutes: settings.lengthMinutes,
+            scenesPerMinute: settings.scenesPerMinute,
             aiDecidesLength,
             // Only actually sent (and only meaningful server-side) when both AI-decides-length AND
             // the channel's own safety-cap toggle are on — disabling the cap means these are simply

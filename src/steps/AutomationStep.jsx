@@ -191,6 +191,7 @@ const BLUR_SAVED_COLUMNS = [
   'automation_length_minutes',
   'automation_length_cap_min',
   'automation_length_cap_max',
+  'automation_scenes_per_minute',
   'automation_directive',
   'automation_title_max_chars',
   'automation_custom_style',
@@ -1006,6 +1007,23 @@ export default function AutomationStep({ userId, isMobile, onSchedulerEnabledCha
                       />
                       Let AI decide the ideal length
                     </label>
+                  </div>
+
+                  <div>
+                    <div style={label}>
+                      Scenes per minute
+                      <InfoHint text="Higher = faster image changes, lower = slower. This is approximate — actual pacing also depends on how much text the AI writes per scene. Only applies to full_pipeline videos with a fixed target length (ignored when 'Let AI decide the ideal length' is on). Each scene always shows exactly 2 images, split evenly — this controls how many scenes (and therefore roughly how many seconds per image) the video ends up with." />
+                    </div>
+                    <input
+                      type="number"
+                      min="1"
+                      step="0.5"
+                      value={c.automation_scenes_per_minute ?? 12}
+                      disabled={c.automation_ai_decides_length}
+                      onChange={(e) => updateLocalField(c.id, { automation_scenes_per_minute: Number(e.target.value) })}
+                      onBlur={() => persistChannel(c.id)}
+                      style={{ ...inputStyle, marginTop: 6, width: 90, opacity: c.automation_ai_decides_length ? 0.5 : 1 }}
+                    />
                   </div>
 
                   {c.automation_ai_decides_length && (

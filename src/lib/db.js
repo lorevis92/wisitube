@@ -520,6 +520,13 @@ export async function deleteVideo(id) {
 // second line left to style. normalizeThumbnailDirectionEntry below no longer reads or returns
 // those keys; any channel row still carrying them from that period just has them ignored and
 // dropped on its next save.
+//
+// Required one-time setup for per-channel scene density (image-change pacing) on full_pipeline,
+// fixed-length videos — see AutomationStep.jsx's "Scenes per minute" and api/generate-outline.js's
+// totalScenes formula:
+//
+//   alter table wisitube_channels
+//     add column if not exists automation_scenes_per_minute numeric(4,1) not null default 12.0;
 
 // Normalizes one half (video/short) of automation_thumbnail_direction to always-usable values —
 // shared by fromChannelRow (reading a saved row) and saveChannel (writing one, so a channel that
@@ -660,6 +667,14 @@ function fromChannelRow(row) {
     automation_length_cap_enabled: row.automation_length_cap_enabled ?? true,
     automation_length_cap_min: row.automation_length_cap_min ?? 2,
     automation_length_cap_max: row.automation_length_cap_max ?? 45,
+    // Scenes/minute target fed into api/generate-outline.js's totalScenes formula for full_pipeline,
+    // fixed-length videos only (see the migration comment above) — 12.0 is the same value that
+    // formula hardcoded before this field existed, so a channel that's never touched this gets
+    // identical pacing to before, no regression. Each scene always has exactly 2 image beats split
+    // evenly (engine.js's sceneBeatState, unrelated to this field), so this is an approximate,
+    // indirect control over image-change frequency: actual scene duration still depends on how much
+    // narration text the model writes per scene.
+    automation_scenes_per_minute: row.automation_scenes_per_minute ?? 12,
     // Default background/text style for content_type 'static_background' videos on this channel
     // (see ChannelDashboardStep.jsx) — seeded into a new video's own project.staticBackground/
     // staticTextStyle once (StoryboardStep.jsx), then freely overridable per video from there.
@@ -760,6 +775,7 @@ export async function saveChannel(channel) {
     automation_length_cap_enabled: channel.automation_length_cap_enabled ?? true,
     automation_length_cap_min: channel.automation_length_cap_min ?? 2,
     automation_length_cap_max: channel.automation_length_cap_max ?? 45,
+    automation_scenes_per_minute: channel.automation_scenes_per_minute ?? 12,
     automation_static_bg_color: channel.automation_static_bg_color || '#111111',
     automation_static_bg_image_path: channel.automation_static_bg_image_path || null,
     automation_static_text_color: channel.automation_static_text_color || '#FFFFFF',
