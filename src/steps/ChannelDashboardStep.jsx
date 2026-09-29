@@ -500,16 +500,20 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
   }
 
   // Fetches (or, within the 24h cache window, simply reads) the shared Content Program Manager
-  // result — see src/lib/contentProgramManager.js. A refinement note always forces a fresh pass
-  // (it needs new reasoning), everything else respects the cache as-is.
-  async function fetchSuggestions(refinementText) {
+  // result — see src/lib/contentProgramManager.js. A refinement note always forces a fresh pass (it
+  // needs new reasoning); forceRefresh explicitly forces one too — needed for the "Refresh
+  // suggestions" button below, whose whole point is "the user explicitly asked for this right now,"
+  // not "read the cache if it's still within 24h." Without it, clicking Refresh inside that window
+  // silently short-circuited to getTopicSuggestions' own cache-hit branch (no network call, no
+  // error, no visible change) — indistinguishable from the button doing nothing at all.
+  async function fetchSuggestions(refinementText, forceRefresh = false) {
     if (!channel) return;
     setSuggestionsLoading(true);
     setSuggestionsError('');
     try {
       const { channel: updated } = await getTopicSuggestions(channel, {
         videos,
-        forceRefresh: !!refinementText,
+        forceRefresh: forceRefresh || !!refinementText,
         refinementText: refinementText || '',
       });
       setChannel(updated);
@@ -2035,7 +2039,11 @@ export default function ChannelDashboardStep({ channelId, userId, onResume, onNe
           <button onClick={() => setShowProgramManagerChat(true)} style={btnGhost}>
             💬 Talk to your Content Manager
           </button>
-          <button onClick={() => fetchSuggestions('')} disabled={suggestionsLoading} style={{ ...btnPrimary, opacity: suggestionsLoading ? 0.6 : 1 }}>
+          <button
+            onClick={() => fetchSuggestions('', true)}
+            disabled={suggestionsLoading}
+            style={{ ...btnPrimary, opacity: suggestionsLoading ? 0.6 : 1 }}
+          >
             {suggestionsLoading ? 'Working…' : channel?.topic_scoring_cache ? 'Refresh suggestions' : 'Suggest next videos'}
           </button>
         </div>
