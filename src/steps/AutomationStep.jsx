@@ -1,8 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { listChannels, updateChannelFields, listAutomationLog, getSchedulerSettings, saveSchedulerSettings } from '../lib/db';
-import { runAutomationCycle } from '../lib/automationEngine';
-import { runManagedCycle, requestStop, applyProgressToRun, forceUnlock } from '../lib/automationScheduler';
+import { requestStop, forceUnlock } from '../lib/automationScheduler';
 import { PROVIDER_LABELS } from '../lib/imageProviders';
 import { VOICE_ENGINE_LABELS, MINIMAX_VOICES } from '../lib/voiceProviders';
 import { KOKORO_VOICES } from '../lib/tts';
@@ -18,11 +17,6 @@ import {
 } from '../lib/localExport';
 
 const SCHEDULER_POLL_MS = 15000;
-const INTERVAL_UNITS = [
-  { value: 'minutes', label: 'minutes' },
-  { value: 'hours', label: 'hours' },
-  { value: 'days', label: 'days' },
-];
 
 // Same fallback CreateStep.jsx uses when switching engines — keeps automation_voice pointing at a
 // voice that's actually valid for whichever automation_voice_engine ends up selected.
@@ -65,9 +59,9 @@ const YOUTUBE_CATEGORIES = [
   { id: '29', label: 'Nonprofits & Activism' },
 ];
 
-// Mon-first ordering, matching "Publish on these days" below — values are JS Date.getDay() numbers
-// (0=Sun…6=Sat), same convention automation_publish_days already uses. Display order only — storage
-// is always the raw 0-6 value, never this array's position.
+// Mon-first display ordering — values are JS Date.getDay() numbers (0=Sun…6=Sat), same convention
+// the older automation_publish_days fallback (no UI anymore, see below) used. Display order only —
+// storage is always the raw 0-6 value, never this array's position.
 const SCHEDULE_SLOT_DAYS = [
   { value: 1, label: 'Monday', short: 'Mon' },
   { value: 2, label: 'Tuesday', short: 'Tue' },
@@ -175,8 +169,6 @@ function ScheduleDayBox({ shortLabel, fullLabel, times, disabled, onClick }) {
   );
 }
 
-const LOG_POLL_MS = 1500;
-
 function timeAgo(ts) {
   if (!ts) return '';
   const sec = Math.floor((Date.now() - ts) / 1000);
@@ -188,25 +180,6 @@ function timeAgo(ts) {
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
 }
-
-// Same buckets as timeAgo, forward-looking — used for the scheduling panel's "Next check" line.
-function timeUntil(ts) {
-  const sec = Math.floor((ts - Date.now()) / 1000);
-  if (sec <= 0) return 'any moment now';
-  const min = Math.floor(sec / 60);
-  if (min < 1) return `in ${sec}s`;
-  if (min < 60) return `in ${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `in ${hr}h ${min % 60}m`;
-  const day = Math.floor(hr / 24);
-  return `in ${day}d ${hr % 24}h`;
-}
-
-// Same mapping as automationScheduler.js's own UNIT_MS — duplicated rather than imported since this
-// is only needed here to compute a display estimate ("Next check: ..."), not to drive the actual
-// timer, same small-stable-constant duplication already used elsewhere in this codebase (e.g.
-// YOUTUBE_LANGUAGE_CODES in ExportStep.jsx/fullPipelineRecipe.js).
-const UNIT_MS = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
 
 // The columns this form's typed number/text fields own (edited locally, saved on blur via
 // persistChannel). Everything else here saves immediately via updateAndSaveImmediately with its own
@@ -247,7 +220,7 @@ function statusColor(status) {
   return T.green;
 }
 
-export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedulerEnabledChange }) {
+export default function AutomationStep({ userId, isMobile, onSchedulerEnabledChange }) {
   const { confirm, notify, dialog: confirmDialog } = useConfirm();
   const [channels, setChannels] = useState(null); // null = still loading
   // Per-channel collapse state, keyed by channel id — closed (falsy/missing) by default so a page
@@ -259,23 +232,15 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   // (day: 0=Sun…6=Sat) or null. Global (not per-channel) on purpose: only one day panel is ever open
   // at a time across every channel, so opening one elsewhere closes whatever was open before it.
   const [scheduleDayOpen, setScheduleDayOpen] = useState(null);
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(null); // { channelId, channelName, index, total, status }
   const [logItems, setLogItems] = useState([]);
   const [logLoading, setLogLoading] = useState(false);
   const [historyFilter, setHistoryFilter] = useState(''); // '' = all channels
-  // shouldStop() is polled synchronously by the engine between channels — a plain state variable
-  // would be stale inside that closure, so the kill switch has to be a ref.
-  const stopRequestedRef = useRef(false);
-  const pollRef = useRef(null);
 
   // "Automatic scheduling" panel — see src/lib/automationScheduler.js. null while still loading.
   const [schedulerSettings, setSchedulerSettings] = useState(null);
-  // Detected via a lightweight, always-on poll (independent of whether THIS component instance
-  // started a run) — a real cycle can be in flight because the scheduler's own timer started it
-  // while the user was on a completely different tab, and the "Stop" button below still needs to
-  // work for that case (see stopCycle), so `running` alone (only true for a run THIS instance
-  // started) isn't enough to drive the Run/Stop buttons.
+  // Detected via a lightweight, always-on poll — a real cycle can be in flight because a channel's
+  // own Publishing schedule slot started it while the user was on a completely different tab, so the
+  // "Stop" button and the "cycle running" indicator below both need this rather than any local state.
   const [schedulerCycleRunning, setSchedulerCycleRunning] = useState(false);
 
   // Gemini Batch API isolated test panel (api/gemini-batch.js) — entirely separate from the
@@ -366,9 +331,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
   useEffect(() => {
     loadChannels();
     loadLog('');
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -378,9 +340,9 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       .catch((err) => console.error('[AutomationStep] failed to load scheduler settings', err));
   }, []);
 
-  // Independent of `running` — polls whether ANY real cycle is currently in flight, including one
-  // the scheduler started while this component wasn't even mounted, so the Run/Stop buttons below
-  // (and the message explaining why Run is disabled) stay accurate regardless of who's driving it.
+  // Polls whether ANY real cycle is currently in flight, including one a channel's own Publishing
+  // schedule slot started while this component wasn't even mounted, so the Stop button and the
+  // "cycle running" indicator below stay accurate regardless of who's driving it.
   useEffect(() => {
     let cancelled = false;
     async function poll() {
@@ -388,14 +350,9 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
         const s = await getSchedulerSettings();
         if (cancelled) return;
         setSchedulerCycleRunning(s.currentlyRunning);
-        // Keeps currentRunStartedAt/lastRunStartedAt fresh too, not just the enabled/interval
-        // fields loaded once on mount above — the "cycle currently running" indicator's elapsed-time
-        // display and the Force unlock button below both need currentRunStartedAt to stay live while
-        // a cycle (or a stuck lock) sits there for a while, and "Next check" needs lastRunStartedAt
-        // to stay current even when a cycle was started by the scheduler's own tick (or a manual run
-        // from a different tab) rather than this component's own "Run now"/"Run real cycle" click,
-        // which refreshes it directly the moment runManagedCycle resolves (see runCycle) — this poll
-        // is the fallback for every OTHER trigger path.
+        // Keeps currentRunStartedAt fresh too, not just the enabled flag loaded once on mount above —
+        // the "cycle currently running" indicator's elapsed-time display and the Force unlock button
+        // below both need it to stay live while a cycle (or a stuck lock) sits there for a while.
         setSchedulerSettings((prev) =>
           prev
             ? { ...prev, currentlyRunning: s.currentlyRunning, currentRunStartedAt: s.currentRunStartedAt, lastRunStartedAt: s.lastRunStartedAt }
@@ -446,7 +403,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
   function onHistoryFilterChange(value) {
     setHistoryFilter(value);
-    if (!running) loadLog(value);
+    loadLog(value);
   }
 
   function updateLocalField(channelId, patch) {
@@ -497,118 +454,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
   function toggleChannelExpanded(channelId) {
     setExpandedChannels((prev) => ({ ...prev, [channelId]: !prev[channelId] }));
-  }
-
-  // Turns automationEngine.js's { channelId, channelName, step, message, videoId, project } events
-  // into the shape App.jsx's currentAutomationRun / AutomationMirrorStep.jsx expect — delegates to
-  // the shared helper (src/lib/automationScheduler.js) so App.jsx's scheduler wiring feeds the exact
-  // same mirror shape from its own, separate trigger path. Kept as a functional update (reads prev)
-  // so a channel switch mid-cycle resets the rolling log instead of mixing lines from two different
-  // channels together.
-  function applyProgressToGlobalRun(evt) {
-    onRunUpdate?.((prev) => applyProgressToRun(prev, evt));
-  }
-
-  async function runCycle(dryRun) {
-    console.warn('[run-cycle-debug] runCycle() called', { dryRun, running, channelsLen: channels?.length, schedulerCycleRunning });
-    if (running || !channels || channels.length === 0) {
-      console.warn('[run-cycle-debug] runCycle() bailing out — running/channels guard', { running, channelsLen: channels?.length });
-      return;
-    }
-    if (!dryRun && schedulerCycleRunning) {
-      console.warn('[run-cycle-debug] runCycle() bailing out SILENTLY — schedulerCycleRunning guard fired (no alert, no log row!)', { schedulerCycleRunning });
-      return; // Run button below is disabled for this too — belt and suspenders
-    }
-    console.warn('[run-cycle-debug] runCycle() guards passed, proceeding');
-    stopRequestedRef.current = false;
-    setRunning(true);
-    setProgress(null);
-    pollRef.current = setInterval(() => loadLog(historyFilter), LOG_POLL_MS);
-    // Only a real cycle goes through the shared lock (runManagedCycle) — dry runs never touch
-    // currently_running, so they always "start" trivially and this stays true for them.
-    let didStart = true;
-    try {
-      if (dryRun) {
-        await runAutomationCycle({
-          userId,
-          dryRun: true,
-          onUpdate: (p) => setProgress(p),
-          onProgress: applyProgressToGlobalRun,
-          shouldStop: () => stopRequestedRef.current,
-        });
-      } else {
-        console.warn('[run-cycle-debug] about to call runManagedCycle()');
-        const result = await runManagedCycle({
-          userId,
-          onUpdate: (p) => setProgress(p),
-          onProgress: applyProgressToGlobalRun,
-        });
-        console.warn('[run-cycle-debug] runManagedCycle() returned', result);
-        didStart = result.started;
-        if (!result.started) await notify({ title: 'Could not start a cycle', body: result.reason });
-        // The 15s poll effect above only merges currentlyRunning/currentRunStartedAt, not
-        // lastRunStartedAt — without this, "Next check" would keep showing a countdown computed
-        // from the PREVIOUS run's lastRunStartedAt right after this one just wrote a new one
-        // (started successfully) or left it untouched (blocked), instead of reflecting reality
-        // immediately.
-        try {
-          setSchedulerSettings(await getSchedulerSettings());
-        } catch (err) {
-          console.error('[AutomationStep] failed to refresh scheduler settings after a cycle attempt', err);
-        }
-      }
-    } catch (err) {
-      console.warn('[run-cycle-debug] runCycle() caught an exception — SILENTLY, only console.error below, no user-visible feedback', err);
-      console.error(`[AutomationStep] ${dryRun ? 'dry-run' : 'real'} cycle failed`, err);
-    } finally {
-      console.warn('[run-cycle-debug] runCycle() finally block — didStart:', didStart);
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      setRunning(false);
-      loadLog(historyFilter);
-      loadChannels(); // pick up automation_daily_upload_count/spend touched by the cycle
-      // Only clear the mirror for a run that actually started under THIS click — a blocked attempt
-      // (didStart === false) never touched onProgress, so clearing here would wipe out whatever
-      // genuinely still-in-progress run (e.g. the scheduler's own) blocked this one in the first place.
-      if (didStart) onRunUpdate?.(null);
-    }
-  }
-
-  function runDryRun() {
-    runCycle(true);
-  }
-
-  async function runRealCycle() {
-    const enabled = (channels || []).filter((c) => c.automation_enabled);
-    const localFolderChannels = enabled.filter((c) => c.automation_export_mode === 'local_folder');
-    const youtubeChannels = enabled.filter((c) => c.automation_export_mode !== 'local_folder');
-
-    let msg = 'This will generate real content';
-    if (youtubeChannels.length) msg += ' and publish it to YouTube';
-    if (localFolderChannels.length) {
-      const names = localFolderChannels.map((c) => c.name || 'a channel').join(', ');
-      msg +=
-        `. ${localFolderChannels.length} channel${localFolderChannels.length === 1 ? '' : 's'} ` +
-        `(${names}) ${localFolderChannels.length === 1 ? 'is' : 'are'} set to LOCAL FOLDER export — ` +
-        'those videos are written to your chosen folder, not uploaded. Make sure you\'ve granted folder ' +
-        'access this session ("Choose export folder") first';
-    }
-    msg += '.';
-
-    const ok = await confirm({ title: 'Run a real automation cycle?', body: msg, confirmLabel: 'Run cycle' });
-    if (!ok) return;
-    runCycle(false);
-  }
-
-  function stopCycle() {
-    // Sets both, since either could be the one actually running: stopRequestedRef covers a dry run
-    // (dry runs never touch the shared lock/flag below); requestStop() covers a real cycle running
-    // under the shared lock, whether the scheduler's own timer or a manual "Run real cycle" click
-    // started it — a single "Stop" click always works regardless of which one is in flight.
-    stopRequestedRef.current = true;
-    requestStop();
   }
 
   function channelName(id) {
@@ -736,9 +581,8 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       <div>
         <div style={{ fontFamily: FONT.display, fontSize: 26, color: T.text }}>Automation</div>
         <div style={{ fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary, marginTop: 6, lineHeight: 1.6, maxWidth: 640 }}>
-          Configure per-channel automation below. Dry-run shows exactly what a cycle would do for every enabled channel with no generation,
-          spend, or publishing. Real cycle actually does it — generates a real video and publishes it to YouTube for every eligible channel.
-          Run it manually below, or turn on unattended background mode so it runs on its own while this tab stays open.
+          Configure per-channel automation below, including each channel's own Publishing schedule (day+time slots). Turn on unattended
+          background mode so the scheduler starts a real cycle for a channel the moment its own slot comes up, while this tab stays open.
         </div>
       </div>
 
@@ -746,10 +590,9 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       <div style={card}>
         <div style={label}>Automatic scheduling</div>
         <div style={{ fontFamily: FONT.ui, fontSize: 12, color: T.textSecondary, marginTop: 8, lineHeight: 1.6, maxWidth: 620 }}>
-          Runs a real (non-dry-run) cycle on its own, on the interval below — only while this browser tab stays open, same as every other
-          background process in this app. Off by default. A channel with its own Publishing schedule slots configured (see that channel's
-          settings below) ignores the interval entirely and follows its own day+time calendar instead — but this toggle still has to stay on,
-          since both mechanisms share the same background heartbeat.
+          Single on/off switch for unattended background automation — only while this browser tab stays open, same as every other
+          background process in this app. Off by default. While on, every channel's own Publishing schedule (day+time slots, configured
+          per channel below) is checked every minute, and a real cycle starts automatically for a channel the moment one of its slots comes up.
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, fontSize: 13, fontFamily: FONT.ui, color: T.text }}>
@@ -761,75 +604,17 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
           🔴 Enable unattended background mode
         </label>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, fontFamily: FONT.ui, color: T.text }}>Check every</span>
-          <input
-            type="number"
-            min="1"
-            value={schedulerSettings?.intervalValue ?? 6}
-            onChange={(e) => saveSchedulerPatch({ intervalValue: Math.max(1, Math.round(Number(e.target.value)) || 1) })}
-            style={{ ...inputStyle, width: 80 }}
-          />
-          <select
-            value={schedulerSettings?.intervalUnit || 'hours'}
-            onChange={(e) => saveSchedulerPatch({ intervalUnit: e.target.value })}
-            style={{ ...inputStyle, width: 140 }}
-          >
-            {INTERVAL_UNITS.map((u) => (
-              <option key={u.value} value={u.value}>
-                {u.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ marginTop: 14 }}>
-          {schedulerCycleRunning ? (
+        {schedulerCycleRunning && (
+          <div style={{ marginTop: 12, ...mono, fontSize: 11, color: T.yellow, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            ⏳ A cycle is currently running in the background
+            {schedulerSettings?.currentRunStartedAt ? ` — locked ${timeAgo(schedulerSettings.currentRunStartedAt)}` : ''}.
             <button
-              disabled
-              title="Another cycle (started by the scheduler or a manual run, in this tab or another) is already using the shared lock"
-              style={{ ...btnGhost, opacity: 0.6, cursor: 'default' }}
+              onClick={forceUnlockScheduler}
+              title="Only use this if you're certain no cycle is genuinely running right now — otherwise this risks a concurrent double-run"
+              style={{ ...btnGhost, padding: '4px 10px', fontSize: 10, color: T.primary, borderColor: T.primaryBorder }}
             >
-              ⏳ Cycle already running
+              🔓 Force unlock
             </button>
-          ) : (
-            <button
-              onClick={runRealCycle}
-              disabled={running || channels.length === 0}
-              style={{ ...btnPrimary, opacity: running || channels.length === 0 ? 0.6 : 1 }}
-            >
-              ▶ Run now
-            </button>
-          )}
-        </div>
-
-        {schedulerSettings && (
-          <div style={{ marginTop: 12, ...mono, fontSize: 11, color: T.textSecondary, display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span>Last run: {schedulerSettings.lastRunStartedAt ? timeAgo(schedulerSettings.lastRunStartedAt) : 'never'}</span>
-            {schedulerSettings.enabled && (
-              <span>
-                Next check:{' '}
-                {schedulerSettings.lastRunStartedAt
-                  ? timeUntil(
-                      schedulerSettings.lastRunStartedAt +
-                        Math.max(1, Number(schedulerSettings.intervalValue) || 1) * (UNIT_MS[schedulerSettings.intervalUnit] || UNIT_MS.hours)
-                    )
-                  : 'any moment now'}
-              </span>
-            )}
-            {schedulerCycleRunning && !running && (
-              <span style={{ color: T.yellow, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                ⏳ A cycle is currently running in the background
-                {schedulerSettings.currentRunStartedAt ? ` — locked ${timeAgo(schedulerSettings.currentRunStartedAt)}` : ''}.
-                <button
-                  onClick={forceUnlockScheduler}
-                  title="Only use this if you're certain no cycle is genuinely running right now — otherwise this risks a concurrent double-run"
-                  style={{ ...btnGhost, padding: '4px 10px', fontSize: 10, color: T.primary, borderColor: T.primaryBorder }}
-                >
-                  🔓 Force unlock
-                </button>
-              </span>
-            )}
           </div>
         )}
       </div>
@@ -837,45 +622,12 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
       <div style={card}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <div style={label}>Channels</div>
-          {running || schedulerCycleRunning ? (
-            <button onClick={stopCycle} style={{ ...btnGhost, padding: '12px 22px', fontSize: 13, color: T.primary, borderColor: T.primaryBorder }}>
+          {schedulerCycleRunning && (
+            <button onClick={requestStop} style={{ ...btnGhost, padding: '12px 22px', fontSize: 13, color: T.primary, borderColor: T.primaryBorder }}>
               🛑 Stop
             </button>
-          ) : (
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <button
-                onClick={runDryRun}
-                disabled={channels.length === 0}
-                style={{ ...btnGhost, padding: '12px 22px', fontSize: 13, opacity: channels.length === 0 ? 0.6 : 1 }}
-              >
-                ▶ Run dry-run cycle
-              </button>
-              <button
-                onClick={runRealCycle}
-                disabled={channels.length === 0}
-                title="Generates real content and publishes to YouTube — real spend, real uploads"
-                style={{
-                  ...btnPrimary,
-                  padding: '12px 22px',
-                  fontSize: 13,
-                  border: `2px solid ${T.primary}`,
-                  boxShadow: `0 0 0 1px ${T.primary}`,
-                  opacity: channels.length === 0 ? 0.6 : 1,
-                }}
-              >
-                ▶▶ Run real cycle
-              </button>
-            </div>
           )}
         </div>
-
-        {running && (
-          <div style={{ marginTop: 12, ...mono, fontSize: 12, color: T.textSecondary }}>
-            {progress
-              ? `Channel ${progress.index + 1}/${progress.total}: ${progress.channelName} — ${progress.status}`
-              : 'Starting…'}
-          </div>
-        )}
 
         {channels.length === 0 ? (
           <div style={{ marginTop: 14, fontFamily: FONT.ui, fontSize: 13, color: T.textSecondary }}>
@@ -948,7 +700,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     </div>
                     <select
                       value={c.automation_export_mode || 'youtube'}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_export_mode: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6, maxWidth: 320 }}
                     >
@@ -1010,7 +761,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                         <input
                           type="checkbox"
                           checked={c.automation_auto_publish !== false}
-                          disabled={running}
                           onChange={(e) => updateAndSaveImmediately(c.id, { automation_auto_publish: e.target.checked })}
                         />
                         Auto-publish to YouTube
@@ -1036,7 +786,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       <input
                         type="checkbox"
                         checked={!!c.automation_enabled}
-                        disabled={running}
                         onChange={(e) => updateAndSaveImmediately(c.id, { automation_enabled: e.target.checked })}
                       />
                       Enabled
@@ -1055,7 +804,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Content type</div>
                     <select
                       value={c.content_type || ''}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { content_type: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
@@ -1077,7 +825,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       type="number"
                       min="0"
                       value={c.automation_videos_per_day}
-                      disabled={running}
                       onChange={(e) => updateLocalField(c.id, { automation_videos_per_day: Number(e.target.value) })}
                       onBlur={() => persistChannel(c.id)}
                       style={{ ...inputStyle, marginTop: 6 }}
@@ -1085,59 +832,14 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                   </div>
 
                   {(() => {
-                    // JS Date.getDay(): 0=Sun … 6=Sat. Shown Mon-first, stored as those numbers.
-                    const DAYS = [
-                      { n: 1, dl: 'Mon' },
-                      { n: 2, dl: 'Tue' },
-                      { n: 3, dl: 'Wed' },
-                      { n: 4, dl: 'Thu' },
-                      { n: 5, dl: 'Fri' },
-                      { n: 6, dl: 'Sat' },
-                      { n: 0, dl: 'Sun' },
-                    ];
-                    const selected = Array.isArray(c.automation_publish_days) ? c.automation_publish_days : [0, 1, 2, 3, 4, 5, 6];
-                    const hasSlots = Array.isArray(c.automation_schedule_slots) && c.automation_schedule_slots.length > 0;
-                    const toggle = (n) => {
-                      const next = selected.includes(n) ? selected.filter((d) => d !== n) : [...selected, n];
-                      updateAndSaveImmediately(c.id, { automation_publish_days: next.sort((a, b) => a - b) });
-                    };
-                    return (
-                      <div style={{ gridColumn: '1 / -1', opacity: hasSlots ? 0.5 : 1 }}>
-                        <div style={label}>
-                          Publish on these days
-                          <InfoHint text="Days of the week automation is allowed to work on this channel at all — on any other day, the channel is skipped entirely for the cycle. Ignored once this channel has any Publishing schedule slot configured below." />
-                        </div>
-                        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
-                          {DAYS.map(({ n, dl }) => (
-                            <label
-                              key={n}
-                              style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontFamily: FONT.ui, color: T.textSecondary }}
-                            >
-                              <input type="checkbox" checked={selected.includes(n)} disabled={running || hasSlots} onChange={() => toggle(n)} />
-                              {dl}
-                            </label>
-                          ))}
-                        </div>
-                        {hasSlots ? (
-                          <div style={{ fontSize: 10, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 6 }}>
-                            Ignored — this channel follows its Publishing schedule slots below instead.
-                          </div>
-                        ) : (
-                          selected.length === 0 && (
-                            <div style={{ fontSize: 10, color: T.yellow, fontFamily: FONT.ui, marginTop: 6 }}>
-                              No days selected — this channel won't publish at all.
-                            </div>
-                          )
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {(() => {
-                    // Explicit day+time slots — non-empty entirely replaces the global interval
-                    // panel's "check every N hours/days" for this one channel (automationScheduler.js's
-                    // tick() excludes any channel with slots from that interval-driven call and instead
-                    // starts a cycle for it the moment local time matches one of these).
+                    // Explicit day+time slots — every channel's automation now runs exclusively off
+                    // these (automationScheduler.js's tick() checks them every minute and starts a
+                    // cycle for a channel the moment local time matches one of its own slots). The
+                    // older global-interval + per-channel "Publish on these days" model this replaced
+                    // still exists as a silent fallback in the code (automationScheduler.js's tick()/
+                    // automationEngine.js's canRunChannelToday) for a channel with zero slots
+                    // configured, but has no UI here anymore — every channel is expected to have its
+                    // own Publishing schedule below.
                     //
                     // Always kept sorted by day then time on every write (never insertion order) — the
                     // 7-box row and the day panel below both just read this array in order, so the
@@ -1184,7 +886,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       <div style={{ gridColumn: '1 / -1' }}>
                         <div style={label}>
                           Publishing schedule
-                          <InfoHint text="Exact day+time slots that start a real cycle for this channel — leave every day empty to keep using the global interval + Publish on these days above. Once you add a slot, the interval is ignored entirely for this channel. Click a day to add or edit its times." />
+                          <InfoHint text="Exact day+time slots that start a real cycle for this channel — the only thing that drives automation for it while unattended background mode is on. Click a day to add or edit its times." />
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginTop: 8 }}>
                           {SCHEDULE_SLOT_DAYS.map((d) => (
@@ -1193,7 +895,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                               shortLabel={d.short}
                               fullLabel={d.label}
                               times={slotsForDay(d.value).map((s) => s.time)}
-                              disabled={running}
                               onClick={() => setScheduleDayOpen(openDay === d.value ? null : { channelId: c.id, day: d.value })}
                             />
                           ))}
@@ -1220,13 +921,11 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                                   <input
                                     type="time"
                                     value={slot.time}
-                                    disabled={running}
                                     onChange={(e) => updateSlotTime(openDay, slot.time, e.target.value)}
                                     style={{ ...inputStyle, width: 110 }}
                                   />
                                   <button
                                     onClick={() => copyToAllDays(slot.time)}
-                                    disabled={running}
                                     title="Copy this time to all other days"
                                     style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
                                   >
@@ -1234,7 +933,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                                   </button>
                                   <button
                                     onClick={() => removeSlot(openDay, slot.time)}
-                                    disabled={running}
                                     title="Remove this time"
                                     style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}
                                   >
@@ -1246,7 +944,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
 
                             <button
                               onClick={() => addTime(openDay)}
-                              disabled={running}
                               style={{ ...btnGhost, marginTop: 10, padding: '6px 12px', fontSize: 11 }}
                             >
                               + Add time
@@ -1254,10 +951,10 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                           </div>
                         )}
 
-                        {totalSlots > 0 && (
-                          <div style={{ fontSize: 10, color: T.textSecondary, fontFamily: FONT.ui, marginTop: 8 }}>
-                            This channel follows {totalSlots} slot{totalSlots === 1 ? '' : 's'} above instead of the global interval — Publish on
-                            these days no longer applies while any slot is configured.
+                        {totalSlots === 0 && (
+                          <div style={{ fontSize: 10, color: T.yellow, fontFamily: FONT.ui, marginTop: 8 }}>
+                            No slots configured — this channel won't be picked up by unattended background mode at all until you add at
+                            least one.
                           </div>
                         )}
                       </div>
@@ -1274,7 +971,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       min="0"
                       step="0.5"
                       value={c.automation_daily_budget_usd}
-                      disabled={running}
                       onChange={(e) => updateLocalField(c.id, { automation_daily_budget_usd: Number(e.target.value) })}
                       onBlur={() => persistChannel(c.id)}
                       style={{ ...inputStyle, marginTop: 6 }}
@@ -1287,7 +983,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       type="number"
                       min="1"
                       value={c.automation_length_minutes}
-                      disabled={running || c.automation_ai_decides_length}
+                      disabled={c.automation_ai_decides_length}
                       onChange={(e) => updateLocalField(c.id, { automation_length_minutes: Number(e.target.value) })}
                       onBlur={() => persistChannel(c.id)}
                       style={{ ...inputStyle, marginTop: 6, opacity: c.automation_ai_decides_length ? 0.5 : 1 }}
@@ -1306,7 +1002,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       <input
                         type="checkbox"
                         checked={!!c.automation_ai_decides_length}
-                        disabled={running}
                         onChange={(e) => updateAndSaveImmediately(c.id, { automation_ai_decides_length: e.target.checked })}
                       />
                       Let AI decide the ideal length
@@ -1319,7 +1014,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                         <input
                           type="checkbox"
                           checked={c.automation_length_cap_enabled ?? true}
-                          disabled={running}
                           onChange={(e) => updateAndSaveImmediately(c.id, { automation_length_cap_enabled: e.target.checked })}
                         />
                         Enable safety cap
@@ -1331,7 +1025,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                             type="number"
                             min="1"
                             value={c.automation_length_cap_min ?? 2}
-                            disabled={running || !c.automation_length_cap_enabled}
+                            disabled={!c.automation_length_cap_enabled}
                             onChange={(e) => updateLocalField(c.id, { automation_length_cap_min: Number(e.target.value) })}
                             onBlur={() => persistChannel(c.id)}
                             style={{ ...inputStyle, marginTop: 4, width: 90, opacity: c.automation_length_cap_enabled ? 1 : 0.5 }}
@@ -1343,7 +1037,7 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                             type="number"
                             min="1"
                             value={c.automation_length_cap_max ?? 45}
-                            disabled={running || !c.automation_length_cap_enabled}
+                            disabled={!c.automation_length_cap_enabled}
                             onChange={(e) => updateLocalField(c.id, { automation_length_cap_max: Number(e.target.value) })}
                             onBlur={() => persistChannel(c.id)}
                             style={{ ...inputStyle, marginTop: 4, width: 90, opacity: c.automation_length_cap_enabled ? 1 : 0.5 }}
@@ -1362,7 +1056,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Visual style</div>
                     <select
                       value={c.automation_style || 'facestick'}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_style: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6, maxWidth: c.automation_style === 'custom' ? 320 : undefined }}
                     >
@@ -1378,7 +1071,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       <div style={{ marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 4, padding: 10 }}>
                         <input
                           value={c.automation_custom_style?.label || ''}
-                          disabled={running}
                           onChange={(e) =>
                             updateLocalField(c.id, { automation_custom_style: { ...c.automation_custom_style, label: e.target.value } })
                           }
@@ -1388,7 +1080,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                         />
                         <ExpandableTextarea
                           value={c.automation_custom_style?.description || ''}
-                          disabled={running}
                           onChange={(e) =>
                             updateLocalField(c.id, { automation_custom_style: { ...c.automation_custom_style, description: e.target.value } })
                           }
@@ -1401,7 +1092,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                           <span style={{ fontSize: 11, color: T.textSecondary, fontFamily: FONT.ui }}>Start from preset</span>
                           <select
                             value=""
-                            disabled={running}
                             onChange={(e) => {
                               const presetKey = e.target.value;
                               e.target.value = '';
@@ -1428,7 +1118,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Image provider</div>
                     <select
                       value={c.automation_image_provider}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_image_provider: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
@@ -1444,7 +1133,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Voice engine</div>
                     <select
                       value={c.automation_voice_engine}
-                      disabled={running}
                       onChange={(e) => {
                         const engine = e.target.value;
                         // Switching engines can leave automation_voice pointing at a voice id from
@@ -1466,7 +1154,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Voice</div>
                     <select
                       value={c.automation_voice || defaultVoiceForEngine(c.automation_voice_engine)}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_voice: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
@@ -1503,7 +1190,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       min="0.7"
                       max="1.2"
                       step="0.05"
-                      disabled={running}
                       value={Number(c.automation_speech_speed) || 1.0}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_speech_speed: Number(e.target.value) })}
                       style={{ width: '100%', marginTop: 6 }}
@@ -1514,7 +1200,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Language</div>
                     <select
                       value={c.automation_language || 'English'}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_language: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
@@ -1530,7 +1215,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>Format</div>
                     <select
                       value={c.automation_format || '16:9'}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_format: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
@@ -1543,7 +1227,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <div style={label}>YouTube category</div>
                     <select
                       value={c.automation_youtube_category || '27'}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_youtube_category: e.target.value })}
                       style={{ ...inputStyle, marginTop: 6 }}
                     >
@@ -1572,7 +1255,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                     <input
                       type="checkbox"
                       checked={!!c.automation_made_for_kids}
-                      disabled={running}
                       onChange={(e) => updateAndSaveImmediately(c.id, { automation_made_for_kids: e.target.checked })}
                     />
                     Made for kids
@@ -1599,7 +1281,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       <input
                         type="checkbox"
                         checked={!!c.automation_generate_shorts}
-                        disabled={running}
                         onChange={(e) => updateAndSaveImmediately(c.id, { automation_generate_shorts: e.target.checked })}
                       />
                       Auto-generate a teaser Short
@@ -1627,7 +1308,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                         <input
                           type="checkbox"
                           checked={c.automation_shorts_auto_publish !== false}
-                          disabled={running}
                           onChange={(e) => updateAndSaveImmediately(c.id, { automation_shorts_auto_publish: e.target.checked })}
                         />
                         Auto-publish the Short
@@ -1644,7 +1324,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                   </div>
                   <ExpandableTextarea
                     value={c.automation_directive || ''}
-                    disabled={running}
                     onChange={(e) => updateLocalField(c.id, { automation_directive: e.target.value })}
                     onBlur={() => persistChannel(c.id)}
                     placeholder="e.g. Make a 5-part series on unusual local customs around the world, one country per video, avoid repeating countries already covered."
@@ -1665,7 +1344,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                         type="number"
                         min="0"
                         value={c.automation_title_max_chars || 0}
-                        disabled={running}
                         onChange={(e) => updateLocalField(c.id, { automation_title_max_chars: Math.max(0, Number(e.target.value) || 0) })}
                         onBlur={() => persistChannel(c.id)}
                         style={{ ...inputStyle, width: 80 }}
@@ -1676,7 +1354,6 @@ export default function AutomationStep({ userId, isMobile, onRunUpdate, onSchedu
                       <input
                         type="checkbox"
                         checked={c.automation_title_no_colon === true}
-                        disabled={running}
                         onChange={(e) => updateAndSaveImmediately(c.id, { automation_title_no_colon: e.target.checked })}
                       />
                       No colon in title

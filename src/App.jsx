@@ -89,11 +89,11 @@ export default function App() {
   const [session, setSession] = useState(undefined);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 760);
   const [tab, setTab] = useState('channels');
-  // Lightweight, App-level mirror of whatever the automation engine is doing right now — set by
-  // AutomationStep.jsx (see its onRunUpdate prop below) from runAutomationCycle/runFullPipeline's
-  // onProgress events, independent of which tab/screen the user actually has open. null whenever no
-  // real (non-dry-run) automation cycle is currently running. Shape: { channelId, channelName,
-  // videoId, phase, phaseDetail, project, log }.
+  // Lightweight, App-level mirror of whatever the automation engine is doing right now — fed by the
+  // background scheduler's onProgress (see the startScheduler effect below) and by a few other
+  // trigger paths ("Generate Short", per-video Resume/Publish now) that feed the same shape,
+  // independent of which tab/screen the user actually has open. null whenever no real cycle is
+  // currently running. Shape: { channelId, channelName, videoId, phase, phaseDetail, project, log }.
   const [currentAutomationRun, setCurrentAutomationRun] = useState(null);
   // Count of videos across every channel that are genuinely just sitting there — waitingReason
   // 'idle' from src/lib/db.js's listIncompleteVideos, NOT 'awaiting_batch' (those are legitimately
@@ -232,11 +232,11 @@ export default function App() {
   }, [session?.user?.id]);
 
   // Starts/stops the scheduler's 60s heartbeat whenever enabled changes (or a session appears) —
-  // onProgress feeds the exact same currentAutomationRun mirror AutomationStep.jsx's own manual
-  // runs use (see applyProgressToRun, src/lib/automationScheduler.js), so "Return to automation"
-  // works identically regardless of which one is actually driving a given cycle. onUpdate is
-  // omitted: it only feeds AutomationStep.jsx's own local per-channel progress line, which doesn't
-  // exist at this level and isn't needed here — the mirror only cares about phase-level onProgress.
+  // onProgress feeds the currentAutomationRun mirror (see applyProgressToRun,
+  // src/lib/automationScheduler.js), so "Return to automation" shows live progress for whichever
+  // channel's slot is currently running. onUpdate is omitted: it only feeds a local per-channel
+  // progress line that doesn't exist at this level and isn't needed here — the mirror only cares
+  // about phase-level onProgress.
   useEffect(() => {
     if (!session?.user?.id || !schedulerEnabled) {
       stopSchedulerTimer();
@@ -1209,7 +1209,6 @@ export default function App() {
           <AutomationStep
             userId={session.user?.id}
             isMobile={isMobile}
-            onRunUpdate={setCurrentAutomationRun}
             onSchedulerEnabledChange={setSchedulerEnabled}
           />
         )}
