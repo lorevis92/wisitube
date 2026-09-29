@@ -34,7 +34,13 @@ const RENDER_TIMEOUT_MS = 30 * 60 * 1000;
 const THUMBNAIL_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 const THUMBNAIL_RESTORE_TIMEOUT_MS = 3 * 60 * 1000;
 const YOUTUBE_PUBLISH_TIMEOUT_MS = 25 * 60 * 1000;
-import { getTopicSuggestions, startTopicSuggestion, isCompliantTitle } from '../contentProgramManager';
+import {
+  getTopicSuggestions,
+  startTopicSuggestion,
+  isCompliantTitle,
+  findRecentDuplicateSubjectVideo,
+  DuplicateSubjectGuardError,
+} from '../contentProgramManager';
 import { createShortRecord } from '../shortsEngine';
 import { runFullPipeline } from './fullPipelineRecipe';
 import { determineResumePhase, trackResumeAttempt, shouldRunPhase, RESUME_PHASE_PUBLISH, RESUMABLE_VIDEO_WINDOW_MS, MAX_RESUME_ATTEMPTS } from '../videoResumption';
@@ -376,6 +382,17 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
           );
         }
       }
+      // Independent second line of defense against duplicate videos (see
+      // findRecentDuplicateSubjectVideo's own comment in contentProgramManager.js) — checked against
+      // real persisted videos, not the suggestion pool, and BEFORE startTopicSuggestion below so a
+      // blocked duplicate never consumes/removes the suggestion from that pool.
+      const recentDuplicate = findRecentDuplicateSubjectVideo(existingVideos, picked.subject);
+      if (recentDuplicate) {
+        throw new DuplicateSubjectGuardError(
+          `blocked "${picked.title}" — subject "${picked.subject}" matches video ${recentDuplicate.id} ("${recentDuplicate.displayTitle || recentDuplicate.titles?.[recentDuplicate.selectedTitle] || ''}") created ${Math.round((Date.now() - recentDuplicate.createdAt) / 1000)}s ago on this channel`
+        );
+      }
+
       // Same mechanism as ChannelDashboardStep.jsx's "Start this video" — removes `picked` from the
       // shared cached list and backfills it, so the dashboard stops showing an idea this automation
       // cycle just committed to as a real video.
@@ -385,6 +402,11 @@ export async function runStaticBackgroundPipeline(channel, { userId, onProgress,
     await logStep(channelId, null, 'suggestion', 'success', `chose "${suggestion.title}"${suggestion.series ? ` (series: ${suggestion.series})` : ''}`);
     report('suggestion', `Chose "${suggestion.title}"`);
   } catch (err) {
+    if (err instanceof DuplicateSubjectGuardError) {
+      await logStep(channelId, null, 'suggestion', 'duplicate_blocked', err.message);
+      report('suggestion', err.message);
+      return { videoId: null, youtubeVideoId: null, costUsd: 0, skipped: true, reasonLogged: true, reason: err.message };
+    }
     await logStep(channelId, null, 'suggestion', 'error', String(err?.message || err));
     throw err;
   }

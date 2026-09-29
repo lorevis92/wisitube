@@ -42,6 +42,11 @@ async function postJSON(url, body) {
 
 const normalizeTitle = (t) => (t || '').toLowerCase().trim();
 
+// Thrown by the recipes' suggestion phase when findRecentDuplicateSubjectVideo finds a match — a
+// distinct type so the phase's own catch block can tell "deliberately blocked a duplicate" apart
+// from a genuine failure and log/return accordingly, instead of surfacing it as a channel error.
+export class DuplicateSubjectGuardError extends Error {}
+
 // Per-channel, generic title guard (AutomationStep.jsx, near "Current initiative") — never
 // rewrites or truncates a title, only says whether an already-proposed one is usable as-is. Both
 // checks are opt-in per field: automation_title_max_chars === 0 means no length limit,
@@ -94,6 +99,31 @@ function nonTerminalVideoTitles(videos) {
 // would look.
 function nonTerminalVideoSubjects(videos) {
   return [...new Set(nonTerminalVideos(videos).map((v) => (v.subject || '').trim()).filter(Boolean))];
+}
+
+// Independent second line of defense against duplicate videos, on top of automationScheduler.js's
+// lock fix — the lock closes the two race conditions found there, but this exists so a DIFFERENT,
+// not-yet-discovered cause producing the same symptom (two videos on the same subject from one
+// channel) still gets caught, right at the one place every automation path funnels through before
+// it commits to generating (both recipes' suggestion phase, right before the video record is
+// created). Deliberately independent of startTopicSuggestion/the suggestion pool: even if the pool
+// itself is what's broken (stale cache, a suggestion not actually removed, etc.), this still catches
+// the duplicate by checking real persisted videos, not the pool's own bookkeeping.
+//
+// windowMs is intentionally short (10 min, DUPLICATE_SUBJECT_WINDOW_MS below) — this is a guard
+// against near-simultaneous duplicate generation, not a general anti-repetition rule (that's
+// nonTerminalVideoSubjects/avoidSubjects above, which already spans every non-terminal video
+// regardless of age). A legitimate revisit of the same subject weeks or months later must not be
+// blocked by this.
+export const DUPLICATE_SUBJECT_WINDOW_MS = 10 * 60 * 1000;
+
+export function findRecentDuplicateSubjectVideo(videos, subject, windowMs = DUPLICATE_SUBJECT_WINDOW_MS) {
+  const normalized = (subject || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const cutoff = Date.now() - windowMs;
+  return (
+    (videos || []).find((v) => v.createdAt && v.createdAt >= cutoff && (v.subject || '').trim().toLowerCase() === normalized) || null
+  );
 }
 
 // dismissed_suggestions (existing behavior, unchanged) + non-terminal video titles (the fix above),
