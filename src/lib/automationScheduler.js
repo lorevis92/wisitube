@@ -16,6 +16,7 @@
 import {
   getSchedulerSettings,
   saveSchedulerSettings,
+  claimSchedulerLock,
   logAutomationStep,
   getLastRealAutomationLogEntry,
   listIncompleteVideos,
@@ -209,95 +210,100 @@ async function withSchedulerLock({ label, resetInterval }, task) {
     return { started: false, reason: 'another cycle claimed the lock in this same browser tab a moment ago — try again shortly' };
   }
 
-  console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to call getSchedulerSettings()`);
-  const settings = await getSchedulerSettings();
-  console.warn('[run-cycle-debug] getSchedulerSettings() returned', settings);
-  if (settings.currentlyRunning) {
-    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) bailing out — DB says currently_running is already true`, {
-      currentRunStartedAt: settings.currentRunStartedAt,
-      elapsedMs: settings.currentRunStartedAt ? Date.now() - settings.currentRunStartedAt : null,
-    });
-    const { stale, startedAt, heartbeatAt, heartbeatAgeMs } = lockStaleness(settings);
-    const elapsedMs = startedAt ? Date.now() - startedAt : null;
-    const elapsed = startedAt ? formatElapsed(elapsedMs) : 'an unknown amount of time';
-    const startedAtText = startedAt ? new Date(startedAt).toLocaleString() : 'an unknown time';
-    const heartbeatText = heartbeatAt
-      ? `last heartbeat ${formatElapsed(heartbeatAgeMs)} ago`
-      : 'no heartbeat recorded (lock predates the heartbeat mechanism)';
-    let lastLineText = 'no recent automation log entry found to diagnose further';
-    try {
-      // Deliberately NOT listAutomationLog({ limit: 1 }) — that's a global "most recent row"
-      // query, which once this branch itself starts writing step:'scheduler'/'blocked' rows every
-      // tick would just keep finding its own last message (see getLastRealAutomationLogEntry's own
-      // comment for the runaway-recursion bug that caused). This excludes those rows at the query
-      // level so it always finds genuine cycle activity, regardless of how many blocked ticks have
-      // piled up since.
-      const l = await getLastRealAutomationLogEntry();
-      if (l) {
-        const ago = l.createdAt ? formatElapsed(Date.now() - l.createdAt) : 'an unknown time';
-        lastLineText = `last known log line: channel ${l.channelId || '—'}, step "${l.step}" → ${l.status}${l.message ? ` ("${l.message}")` : ''}, ${ago} ago`;
-      }
-    } catch (err) {
-      lastLineText = `could not read the automation log to diagnose further: ${String(err.message || err)}`;
-    }
-
-    // Orphaned lock — the holder's heartbeat has gone quiet (or, for a pre-heartbeat lock, it's
-    // simply older than the legacy threshold). Auto-release and fall through to acquire fresh, so
-    // this same tick recovers instead of the scheduler sitting idle until someone clicks
-    // "Force unlock" (which is exactly what happened before this).
-    if (stale) {
-      const staleMessage = `stale lock auto-released (started ${startedAtText}, ${elapsed} ago; ${heartbeatText}) — ${lastLineText}`;
-      console.warn('[automationScheduler] auto-releasing stale lock:', staleMessage);
-      try {
-        // A distinct status, never 'success' or 'blocked' — this must stay visibly different in the
-        // history from an ordinary cycle outcome, since it's recovering from an abnormal shutdown,
-        // not reporting one.
-        await logAutomationStep(null, null, 'scheduler', 'stale_lock_released', staleMessage);
-      } catch (err) {
-        console.error('[automationScheduler] failed to log the stale-lock release', err);
-      }
-      try {
-        await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
-      } catch (err) {
-        console.error('[automationScheduler] failed to release the stale lock', err);
-        return { started: false, reason: `${staleMessage} — but releasing the lock itself failed: ${String(err.message || err)}` };
-      }
-      // Falls through — settings.currentlyRunning is now stale, not current, so the acquire-and-run
-      // logic below proceeds exactly as if this had been a normal, unlocked tick.
-    } else {
-      return {
-        started: false,
-        reason: `an automation ${label === 'resume' ? 'cycle or resume' : 'cycle'} has been running for ${elapsed} (started ${startedAtText}; ${heartbeatText}) — ${lastLineText}`,
-      };
-    }
-  }
-
-  // BUG FIX: claimedLocally = true and the initial "acquire the lock" write used to sit BEFORE this
-  // try/finally. If that write itself threw (a network drop, an expired session, anything) the
-  // exception propagated straight out — claimedLocally was left stuck true for the rest of this
-  // tab's lifetime (every later call, from the scheduler's own tick or a manual "Run real cycle"
-  // click, would immediately hit the branch above and return its hardcoded "a moment ago" message
-  // forever, regardless of how much real time had actually passed — that's exactly the stale-message
-  // symptom this fix addresses), and if the write had actually landed server-side despite the
-  // client-side failure (an ambiguous "committed but response lost" case), currently_running was
-  // left stuck true in the database too, since the task — and the finally that releases the DB lock
-  // — was never even reached. Wrapping the acquire itself in this try/finally guarantees
-  // claimedLocally always gets released, whatever fails.
-  console.warn(`[run-cycle-debug] withSchedulerLock(${label}) acquiring lock — claimedLocally = true`);
+  // Claimed HERE, synchronously, before the very first await below — not after it, which is where
+  // this used to sit. The gap between the check above and the first await is where two calls in the
+  // SAME tab (the scheduler's own periodic tick and a manual "Run real cycle" click, or two ticks
+  // from two independent timers) could both pass the `if (claimedLocally)` check before either had
+  // set it — both would then go on to read currently_running as false and both write it true,
+  // running two real cycles at once. That is exactly how the same Content Program Manager suggestion
+  // got picked and turned into two videos before either cycle's own pick had a chance to remove it
+  // from the pool: claimSchedulerLock (db.js, used below) is a real DB-level compare-and-swap that
+  // closes the matching cross-tab/cross-session version of this same race — this closes the same-tab
+  // version of it. Wrapped in try/finally (moved here along with the flag, for the same reason it was
+  // originally wrapped further down: if anything below throws — a network drop, an expired session,
+  // anything — claimedLocally must still get released, or every later call in this tab would
+  // immediately hit the branch above forever, regardless of how much real time had actually passed.
   claimedLocally = true;
   let heartbeatTimer = null;
   try {
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to call getSchedulerSettings()`);
+    const settings = await getSchedulerSettings();
+    console.warn('[run-cycle-debug] getSchedulerSettings() returned', settings);
+    if (settings.currentlyRunning) {
+      console.warn(`[run-cycle-debug] withSchedulerLock(${label}) bailing out — DB says currently_running is already true`, {
+        currentRunStartedAt: settings.currentRunStartedAt,
+        elapsedMs: settings.currentRunStartedAt ? Date.now() - settings.currentRunStartedAt : null,
+      });
+      const { stale, startedAt, heartbeatAt, heartbeatAgeMs } = lockStaleness(settings);
+      const elapsedMs = startedAt ? Date.now() - startedAt : null;
+      const elapsed = startedAt ? formatElapsed(elapsedMs) : 'an unknown amount of time';
+      const startedAtText = startedAt ? new Date(startedAt).toLocaleString() : 'an unknown time';
+      const heartbeatText = heartbeatAt
+        ? `last heartbeat ${formatElapsed(heartbeatAgeMs)} ago`
+        : 'no heartbeat recorded (lock predates the heartbeat mechanism)';
+      let lastLineText = 'no recent automation log entry found to diagnose further';
+      try {
+        // Deliberately NOT listAutomationLog({ limit: 1 }) — that's a global "most recent row"
+        // query, which once this branch itself starts writing step:'scheduler'/'blocked' rows every
+        // tick would just keep finding its own last message (see getLastRealAutomationLogEntry's own
+        // comment for the runaway-recursion bug that caused). This excludes those rows at the query
+        // level so it always finds genuine cycle activity, regardless of how many blocked ticks have
+        // piled up since.
+        const l = await getLastRealAutomationLogEntry();
+        if (l) {
+          const ago = l.createdAt ? formatElapsed(Date.now() - l.createdAt) : 'an unknown time';
+          lastLineText = `last known log line: channel ${l.channelId || '—'}, step "${l.step}" → ${l.status}${l.message ? ` ("${l.message}")` : ''}, ${ago} ago`;
+        }
+      } catch (err) {
+        lastLineText = `could not read the automation log to diagnose further: ${String(err.message || err)}`;
+      }
+
+      // Orphaned lock — the holder's heartbeat has gone quiet (or, for a pre-heartbeat lock, it's
+      // simply older than the legacy threshold). Auto-release and fall through to acquire fresh, so
+      // this same tick recovers instead of the scheduler sitting idle until someone clicks
+      // "Force unlock" (which is exactly what happened before this).
+      if (stale) {
+        const staleMessage = `stale lock auto-released (started ${startedAtText}, ${elapsed} ago; ${heartbeatText}) — ${lastLineText}`;
+        console.warn('[automationScheduler] auto-releasing stale lock:', staleMessage);
+        try {
+          // A distinct status, never 'success' or 'blocked' — this must stay visibly different in the
+          // history from an ordinary cycle outcome, since it's recovering from an abnormal shutdown,
+          // not reporting one.
+          await logAutomationStep(null, null, 'scheduler', 'stale_lock_released', staleMessage);
+        } catch (err) {
+          console.error('[automationScheduler] failed to log the stale-lock release', err);
+        }
+        try {
+          await saveSchedulerSettings({ currentlyRunning: false, lastRunFinishedAt: Date.now() });
+        } catch (err) {
+          console.error('[automationScheduler] failed to release the stale lock', err);
+          return { started: false, reason: `${staleMessage} — but releasing the lock itself failed: ${String(err.message || err)}` };
+        }
+        // Falls through — settings.currentlyRunning is now stale, not current, so the acquire-and-run
+        // logic below proceeds exactly as if this had been a normal, unlocked tick.
+      } else {
+        return {
+          started: false,
+          reason: `an automation ${label === 'resume' ? 'cycle or resume' : 'cycle'} has been running for ${elapsed} (started ${startedAtText}; ${heartbeatText}) — ${lastLineText}`,
+        };
+      }
+    }
+
     stopRequested = false;
     const startedAt = Date.now();
     // lastRunStartedAt drives the scheduler's interval timer — only a real cycle bumps it; a manual
-    // single-video resume must not push the next scheduled cycle out. lastHeartbeatAt is written
-    // SEPARATELY, just below, not in this acquire patch — so a deployment where the DB column isn't
-    // there yet still acquires the lock cleanly and just degrades to the legacy stale threshold.
-    const lockPatch = { currentlyRunning: true, currentRunStartedAt: startedAt };
-    if (resetInterval) lockPatch.lastRunStartedAt = startedAt;
-    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to write currently_running=true to DB`);
-    await saveSchedulerSettings(lockPatch);
-    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) wrote currently_running=true, about to run task()`);
+    // single-video resume must not push the next scheduled cycle out.
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) about to atomically claim the DB lock`);
+    const claimed = await claimSchedulerLock({ currentRunStartedAt: startedAt, lastRunStartedAt: resetInterval ? startedAt : undefined });
+    if (!claimed) {
+      // Someone else's claim won the race between our own read above and this write — the exact
+      // scenario this whole function now exists to make impossible to miss. Not stale (we just read
+      // fresh settings a moment ago), so there is nothing to auto-release; the caller retries on its
+      // own next tick/click, same as any other "blocked" outcome.
+      console.warn(`[run-cycle-debug] withSchedulerLock(${label}) lost the race — claimSchedulerLock returned null`);
+      return { started: false, reason: 'another cycle/resume claimed this lock a moment ago (lost a race at the database level) — try again shortly' };
+    }
+    console.warn(`[run-cycle-debug] withSchedulerLock(${label}) claimed currently_running=true, about to run task()`);
 
     // Keep the liveness signal fresh for as long as this task runs. If this tab is closed / put to
     // sleep / its event loop wedged, these writes simply stop and another acquire attempt reclaims

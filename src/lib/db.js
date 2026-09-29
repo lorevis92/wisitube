@@ -1428,3 +1428,62 @@ export async function saveSchedulerSettings(patch) {
   const data = unwrap(await supabase.from('wisitube_scheduler_settings').upsert(row, { onConflict: 'user_id' }).select().single());
   return fromSchedulerRow(data);
 }
+
+/**
+ * Atomically claims the scheduler's currently_running lock — the fix for a real duplicate-video bug:
+ * automationScheduler.js's withSchedulerLock used to acquire the lock by reading currently_running
+ * (getSchedulerSettings) and, if false, blindly writing it true (saveSchedulerSettings, a plain
+ * upsert) — a classic check-then-act race with a real await gap in between. Two callers racing that
+ * gap (the scheduler's own periodic tick vs. a manual "Run real cycle" click in the same tab, or the
+ * same account open in two browser tabs/devices) could BOTH read false and BOTH then write true,
+ * both believing they alone held the lock — running two full automation cycles concurrently, which
+ * is exactly how the same Content Program Manager suggestion got picked and turned into two videos
+ * before either cycle's own pick had a chance to remove it from the pool.
+ *
+ * `.update(...).eq('currently_running', false)` makes the claim itself a real compare-and-swap:
+ * Postgres serializes concurrent UPDATEs to the same row, so of any number of simultaneous callers,
+ * at most one ever actually matches a row and flips false -> true; every other caller's UPDATE
+ * matches zero rows and .maybeSingle() returns null — a definitive, race-free "someone else already
+ * holds this" signal instead of a blind overwrite. Returns the claimed settings record, or null if
+ * the lock was not acquired (currently held elsewhere).
+ */
+export async function claimSchedulerLock({ currentRunStartedAt, lastRunStartedAt } = {}) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) {
+    throw new Error('No authenticated Supabase session — cannot claim the scheduler lock (the request would be rejected by RLS as anonymous).');
+  }
+
+  const nowIso = new Date().toISOString();
+  const patch = {
+    currently_running: true,
+    current_run_started_at: currentRunStartedAt ? new Date(currentRunStartedAt).toISOString() : nowIso,
+    last_heartbeat_at: nowIso,
+    updated_at: nowIso,
+  };
+  if (lastRunStartedAt) patch.last_run_started_at = new Date(lastRunStartedAt).toISOString();
+
+  const claimed = unwrap(
+    await supabase.from('wisitube_scheduler_settings').update(patch).eq('currently_running', false).select().maybeSingle()
+  );
+  if (claimed) return fromSchedulerRow(claimed);
+
+  // No row matched the conditional update — either the lock is genuinely held elsewhere right now
+  // (the common case this whole function exists to detect correctly), or this user has no settings
+  // row at all yet (every path that enables the scheduler upserts one first, so this is effectively
+  // unreachable in practice, but cheap to handle rather than assume). A fresh read tells the two
+  // apart without guessing.
+  const fresh = await getSchedulerSettings();
+  if (fresh.currentlyRunning) return null; // genuinely locked elsewhere — do not acquire
+
+  // No row / not actually running — safe to upsert directly. The tiny residual race here (two
+  // callers both reaching this exact fallback in the same instant) is the same shape the compare-
+  // and-swap above exists to close, but only for the one-time bootstrap case, never the common path.
+  return saveSchedulerSettings({
+    currentlyRunning: true,
+    currentRunStartedAt: currentRunStartedAt || Date.now(),
+    lastHeartbeatAt: Date.now(),
+    ...(lastRunStartedAt ? { lastRunStartedAt } : {}),
+  });
+}
