@@ -1,7 +1,7 @@
 // Builds a standard .srt caption file from a project's scenes, reusing the exact per-word timing
 // engine.js computes for the on-screen subtitle rendering — so the uploaded captions track always
 // lines up with what viewers see on screen, not an independent guess.
-import { computeWordTimings, splitNarrationHalves, groupWordsIntoBlocks } from './engine';
+import { computeWordTimings, buildBeatTimeline, groupWordsIntoBlocks } from './engine';
 
 function formatSrtTimestamp(seconds) {
   const totalMs = Math.max(0, Math.round(seconds * 1000));
@@ -13,25 +13,24 @@ function formatSrtTimestamp(seconds) {
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
 }
 
-// Absolute (timeline-wide) start/end for every narrated word — each scene's duration is split into
-// two beat halves exactly like drawSubtitle()/drawScene() do, so the timestamps match frame-for-
-// frame. full_pipeline only (see buildSrtFromScenes) — static_background has no beats to split.
+// Absolute (timeline-wide) start/end for every narrated word — each scene is divided among its image
+// beats by the exact same buildBeatTimeline() call drawSubtitle()/drawScene() render from, so the
+// timestamps match frame-for-frame whether a scene carries real narration spans or falls back to an
+// even split. full_pipeline only (see buildSrtFromScenes) — static_background has no beats to split.
 function collectWordEntries(scenes) {
   const entries = [];
   let sceneStart = 0;
   scenes.forEach((scene) => {
-    const duration = (scene.audioDuration || 0) + (scene.pad || 0);
-    const half = Math.max(0.0001, duration / 2);
-    const [firstHalf, secondHalf] = splitNarrationHalves(scene.narration);
-
-    computeWordTimings(firstHalf, half).forEach((t, i) => {
-      entries.push({ word: firstHalf[i], start: sceneStart + t.start, end: sceneStart + t.end });
+    const { durations, texts } = buildBeatTimeline(scene);
+    let beatStart = sceneStart;
+    durations.forEach((beatDuration, b) => {
+      const words = String(texts[b] || '').split(/\s+/).filter(Boolean);
+      computeWordTimings(words, beatDuration).forEach((t, i) => {
+        entries.push({ word: words[i], start: beatStart + t.start, end: beatStart + t.end });
+      });
+      beatStart += beatDuration;
     });
-    computeWordTimings(secondHalf, half).forEach((t, i) => {
-      entries.push({ word: secondHalf[i], start: sceneStart + half + t.start, end: sceneStart + half + t.end });
-    });
-
-    sceneStart += duration;
+    sceneStart += (scene.audioDuration || 0) + (scene.pad || 0);
   });
   return entries;
 }

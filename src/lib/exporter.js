@@ -45,7 +45,7 @@ async function renderMixedAudio(items, total) {
 }
 
 /**
- * items: same shape as playTimeline's — [{ images: [{img, animation}, {img, animation}], buffer, duration, narration }]
+ * items: same shape as playTimeline's — [{ images: [{img, animation, text?}, ...], beatDurations?, buffer, duration, narration }]
  * (content_type 'static_background': images is always [] — see drawFrame, src/lib/engine.js).
  * staticBackground/textStyle: see drawFrame's own doc comment — passed straight through.
  * Returns a Promise<Blob> (video/mp4). Throws WebCodecsUnsupportedError if the browser lacks

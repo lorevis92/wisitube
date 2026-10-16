@@ -24,7 +24,9 @@ export const config = { maxDuration: 120 };
 // below) regardless of whether this default or a channel's override is active.
 const DEFAULT_CREATIVE_DIRECTION = `You are a YouTube scriptwriter continuing a faceless animated video already in progress.
 
-Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers. Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.`;
+Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers. Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.
+
+The image changes where the CONCEPT changes, not halfway through the clock. For each scene, decide where the narration genuinely moves from one idea to the next, and split it there: the first beat covers everything up to that turn, the second covers the rest. One beat may well be much shorter than the other, and that is correct whenever that is where the idea actually turns — never pad or trim the narration to even the two out.`;
 
 // Same "channel voice" role as DEFAULT_CREATIVE_DIRECTION above, for content_type
 // 'static_background' — no image_beats exist in this mode, so every instruction about animations,
@@ -32,6 +34,46 @@ Narration must flow naturally when read aloud in sequence, conversational tone, 
 const DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND = `You are continuing the script for a spoken-narration, language-learning video with a static background already in progress — there is no visual component to write for, only continuous narration.
 
 Narration must flow naturally when read aloud in sequence, calm and measured conversational tone, no scene numbers, no visual cues or stage directions of any kind.`;
+
+// Per-beat narration coverage — what makes each image last as long as the idea it illustrates
+// instead of a flat half of the scene (src/lib/engine.js's buildBeatTimeline derives the beat's real
+// on-screen duration from the span's own length). The narration itself is NEVER changed by this: the
+// spans only mark where it is cut. Shared verbatim by the ordinary scenes schema and the
+// split-script beats schema below, so the two can't drift apart.
+const NARRATION_SPAN_FIELD_DESCRIPTION =
+  'the exact, verbatim slice of this scene\'s narration that this image covers — copied character-for-character from the narration above, never reworded, summarized or translated';
+
+const NARRATION_SPAN_RULES = `- narration_span: the two spans MUST together reconstruct this scene's narration exactly, in order, with nothing added, dropped or reworded — concatenating them (joined by a single space) must give back the narration character-for-character.
+- Cut between the two spans at a sentence boundary, or at a clause boundary (a comma, semicolon, colon, or a conjunction starting a new idea) when the scene is a single sentence. NEVER cut in the middle of a word.
+- Put the cut where the narration's idea actually turns, even if that makes one span much shorter than the other — the image change is meant to land on the turn of the thought, not at the midpoint of the scene.`;
+
+const normalizeSpan = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+// Server-side enforcement of the rule above: any scene whose spans don't rebuild its own narration
+// has them stripped, so the client falls back to dividing that scene evenly (see buildBeatTimeline).
+// Deliberately NOT an error response — a span the model got slightly wrong costs this one scene its
+// variable pacing, which is not worth failing a whole chunk of otherwise good narration and image
+// prompts over (and the client would then regenerate and pay for it all again). Whitespace runs are
+// collapsed before comparing, matching spansCoverNarration's own tolerance client-side: a boundary
+// that moved a single space is still a faithful split. Returns how many scenes were pruned.
+// narrationFor(scene, index) resolves the text the spans must rebuild — it defaults to the scene's
+// own narration field, and the split-script stage overrides it because there the narration lives in
+// the REQUEST (it was already final before this call) rather than in the model's response.
+function pruneInvalidNarrationSpans(scenes, narrationFor = (scene) => scene?.narration) {
+  let dropped = 0;
+  (Array.isArray(scenes) ? scenes : []).forEach((scene, index) => {
+    const beats = Array.isArray(scene?.image_beats) ? scene.image_beats : [];
+    if (!beats.length) return;
+    const spans = beats.map((b) => (typeof b?.narration_span === 'string' ? b.narration_span : ''));
+    const complete = spans.every((s) => s.trim());
+    if (complete && normalizeSpan(spans.join(' ')) === normalizeSpan(narrationFor(scene, index))) return;
+    beats.forEach((b) => {
+      if (b && typeof b === 'object') delete b.narration_span;
+    });
+    dropped++;
+  });
+  return dropped;
+}
 
 // DIAGNOSTIC (not a fix): when the model's JSON can't be parsed/validated, dump everything needed
 // to tell truncation from malformed output from a masked API error — the FULL raw text (Vercel
@@ -574,6 +616,8 @@ The narration for each scene below has ALREADY been written by someone else and 
 
 Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.
 
+The image changes where the CONCEPT changes, not halfway through the clock. For each scene, find where the given narration moves from one idea to the next and split it there — the first beat covers everything up to that turn, the second covers the rest, however uneven that makes them.
+
 You MUST respond with ONLY a valid JSON object. No markdown, no backticks, no preamble, no explanation. Just raw JSON.
 
 JSON schema:
@@ -581,6 +625,7 @@ JSON schema:
   "scenes": [exactly ${sceneCount} objects, in the SAME order as the scenes listed below: {
     "image_beats": [exactly 2 objects: {
       "image_prompt": "${imagePromptFieldDescription}",
+      "narration_span": "${NARRATION_SPAN_FIELD_DESCRIPTION}",
       "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
       "reference_id": string | null,
       "character_id": string | null,
@@ -591,11 +636,13 @@ JSON schema:
 
 Rules:
 - image_prompt must be visually literal (an image model will draw exactly this), always in English.
-- If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterAssignmentSection}`;
+- If no reference photos are listed below, always set reference_id to null.
+${NARRATION_SPAN_RULES}${referenceSection}${characterAssignmentSection}`;
 
-    // Lighter than the default handler's 8000/16-scene budget — this stage never authors narration
-    // (the heaviest part of that budget), only 2 image_beats per scene.
-    const maxTokens = Math.min(12000, 1000 + sceneCount * 500);
+    // Lighter than the default handler's 16-scene budget — this stage never authors narration (the
+    // heaviest part of that budget), only 2 image_beats per scene. The per-scene allowance is up
+    // from 500 because each beat now also echoes back its slice of the given narration.
+    const maxTokens = Math.min(16000, 1000 + sceneCount * 800);
 
     let response;
     try {
@@ -668,6 +715,16 @@ Rules:
     if (!Array.isArray(plan.scenes) || plan.scenes.length !== sceneCount) {
       console.error('[split-script-beats] phase=validate scene count mismatch — got', plan?.scenes?.length, 'expected', sceneCount);
       return res.status(502).json({ error: 'AI response scene count mismatch' });
+    }
+
+    // The narration these spans must reconstruct lives in the REQUEST (`scenes`, already final
+    // before this call), not in the response — the model only sends back beats here.
+    const droppedSpans = pruneInvalidNarrationSpans(plan.scenes, (_scene, i) => scenes[i]);
+    if (droppedSpans > 0) {
+      console.warn(
+        `[split-script-beats] narration_span mismatch on ${droppedSpans}/${sceneCount} scene(s) — ` +
+          'spans dropped, those scenes fall back to an even split'
+      );
     }
 
     return res.status(200).json(plan);
@@ -851,6 +908,7 @@ JSON schema:
     "narration": "${narrationFieldDescription}",
     "image_beats": [exactly 2 objects: {
       "image_prompt": "${imagePromptFieldDescription}",
+      "narration_span": "${NARRATION_SPAN_FIELD_DESCRIPTION}",
       "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
       "reference_id": string | null,
       "character_id": string | null,
@@ -861,7 +919,8 @@ JSON schema:
 
 Rules:
 - image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.
-- If no reference photos are listed below, always set reference_id to null.${referenceSection}${characterAssignmentSection}`;
+- If no reference photos are listed below, always set reference_id to null.
+${NARRATION_SPAN_RULES}${referenceSection}${characterAssignmentSection}`;
 
     const defaultCreativeDirection = isStaticBackground ? DEFAULT_CREATIVE_DIRECTION_STATIC_BACKGROUND : DEFAULT_CREATIVE_DIRECTION;
     const systemPrompt = `${context}\n\n${creativeOverride || defaultCreativeDirection}\n\n${SCHEMA_INSTRUCTIONS}`;
@@ -881,9 +940,11 @@ Rules:
           // A full 16-scene full_pipeline chunk (MAX_SCENES_PER_CALL) is ~2 image_beats/scene with
           // long premium-provider prompts (character proper names + verbatim on-screen text) and
           // was landing right at the old 4000 ceiling — truncated mid-JSON → "Could not parse AI
-          // JSON". 8000 leaves wide margin; the DIAGNOSTIC stop_reason/usage logs below confirm
-          // whether it's now always enough.
-          max_tokens: 8000,
+          // JSON". Raised again to 16000 for narration_span: each scene now also echoes its whole
+          // narration back, split across its two beats, so the output grew by roughly a full copy of
+          // every narration in the chunk. The DIAGNOSTIC stop_reason/usage logs below confirm
+          // whether it's enough.
+          max_tokens: 16000,
           system: systemPrompt,
           messages: [
             {
@@ -969,6 +1030,14 @@ Rules:
     if (!Array.isArray(plan.scenes) || plan.scenes.length === 0) {
       dumpUnparsableSceneResponse('validate-plan-missing-scenes', { anthropicData: data, rawText: raw, cleanText: clean, chapterTitle, sceneCount });
       return res.status(502).json({ error: 'AI response missing scenes' });
+    }
+
+    const droppedSpans = pruneInvalidNarrationSpans(plan.scenes);
+    if (droppedSpans > 0) {
+      console.warn(
+        `[generate-scenes] narration_span mismatch on ${droppedSpans}/${plan.scenes.length} scene(s) ` +
+          `chapter="${chapterTitle}" — spans dropped, those scenes fall back to an even split`
+      );
     }
 
     return res.status(200).json(plan);

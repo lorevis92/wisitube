@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { loadImage, decodeAudio } from '../lib/pollinations';
-import { playTimeline } from '../lib/engine';
+import { playTimeline, buildBeatTimeline } from '../lib/engine';
 import { WebCodecsUnsupportedError } from '../lib/exporter';
 import { uploadMedia, downloadMediaAsBlob } from '../lib/mediaStorage';
 import { updateVideoFields } from '../lib/db';
@@ -231,14 +231,22 @@ export default function ExportStep({ project, setProject, settings, channel, cha
         // buildScenesFromRaw) — same guard renderVideoForExport (src/lib/videoRenderEngine.js) uses.
         const isStaticBackground = settings.contentType === 'static_background';
         const items = await Promise.all(
-          scenes.map(async (s) => ({
-            images: isStaticBackground
-              ? []
-              : await Promise.all((s.images || []).map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))),
-            buffer: await decodeAudio(s.audioUrl),
-            duration: (s.audioDuration || 0) + s.pad,
-            narration: s.narration,
-          }))
+          scenes.map(async (s) => {
+            // Same per-beat timing/caption source the fast path uses (see buildBeatTimeline,
+            // src/lib/engine.js) — the fallback must produce the same cuts, not an even split.
+            const { durations, texts } = isStaticBackground ? { durations: [], texts: [] } : buildBeatTimeline(s);
+            return {
+              images: isStaticBackground
+                ? []
+                : await Promise.all(
+                    (s.images || []).map(async (beat, b) => ({ img: await loadImage(beat.url), animation: beat.animation, text: texts[b] }))
+                  ),
+              beatDurations: durations,
+              buffer: await decodeAudio(s.audioUrl),
+              duration: (s.audioDuration || 0) + s.pad,
+              narration: s.narration,
+            };
+          })
         );
         let staticBackground = null;
         if (isStaticBackground && project.staticBackground) {

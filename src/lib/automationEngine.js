@@ -212,7 +212,13 @@ function estimateFullPipelineCost(channel) {
   } else {
     lengthMinutes = Number(channel.automation_length_minutes) || 5;
   }
-  const totalScenes = Math.max(6, Math.round(lengthMinutes * 12));
+  // Mirrors api/generate-outline.js's own totalScenes formula, including the channel's configured
+  // scenes/minute (automation_scenes_per_minute, default 12) and that endpoint's [2, 60] clamp — a
+  // channel that raised its scene density would otherwise have its budget underestimated here, and
+  // this check is the only thing standing between it and an overspent day.
+  const rawPerMinute = Number(channel.automation_scenes_per_minute);
+  const scenesPerMinute = Number.isFinite(rawPerMinute) && rawPerMinute > 0 ? Math.min(60, Math.max(2, rawPerMinute)) : 12;
+  const totalScenes = Math.max(6, Math.round(lengthMinutes * scenesPerMinute));
   const provider = channel.automation_image_provider || 'pollinations';
   const voiceEngine = channel.automation_voice_engine || 'kokoro';
 

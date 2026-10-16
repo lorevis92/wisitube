@@ -78,9 +78,9 @@ export function computeWordTimings(words, duration) {
 
 // Default cap on how long (in seconds) a single .srt caption block may span before a new one
 // starts — matches how long a real subtitle line comfortably stays on screen. Used by
-// srtBuilder.js for full_pipeline's two-beat-halved narration only — static_background doesn't
-// need an estimated time cap at all, its .srt cues already come one per scene, at the scene's own
-// real duration (see srtBuilder.js's isStaticBackground branch).
+// srtBuilder.js for full_pipeline's per-beat narration only — static_background doesn't need an
+// estimated time cap at all, its .srt cues already come one per scene, at the scene's own real
+// duration (see srtBuilder.js's isStaticBackground branch).
 export const CAPTION_BLOCK_SECONDS = 4;
 
 // Groups a sequence of already-timed entries ({ word, start, end } — e.g. from computeWordTimings)
@@ -102,14 +102,127 @@ export function groupWordsIntoBlocks(entries, maxSeconds = CAPTION_BLOCK_SECONDS
   return blocks;
 }
 
-// Splits a narration into the word groups shown during each of the scene's two image beats — the
-// first Math.ceil(n/2) words during beat 1, the rest during beat 2. For 1-2 total words this
-// already degenerates naturally into "everything in beat 1, nothing in beat 2" rather than an
-// unnatural split, so no extra special-casing is needed.
-export function splitNarrationHalves(narration) {
+// Splits a narration into one word group per beat, used for any scene whose beats carry no explicit
+// narration span: every video created before spans existed, and any scene whose spans stopped
+// matching its narration (see spansCoverNarration). Greedy ceil distribution — each part takes
+// ceil(remainingWords / remainingParts) — which for a 2-beat scene reproduces exactly the old
+// "first Math.ceil(n/2) words, then the rest" behavior, so an existing video's subtitles stay
+// identical word for word. For 1-2 total words it degenerates naturally into "everything in the
+// first beat, nothing in the rest" rather than an unnatural split.
+export function splitNarrationParts(narration, partCount) {
   const words = String(narration || '').split(/\s+/).filter(Boolean);
-  const cut = Math.ceil(words.length / 2);
-  return [words.slice(0, cut), words.slice(cut)];
+  const parts = [];
+  const n = Math.max(1, partCount);
+  let taken = 0;
+  for (let p = 0; p < n; p++) {
+    const take = Math.ceil((words.length - taken) / (n - p));
+    parts.push(words.slice(taken, taken + take));
+    taken += take;
+  }
+  return parts;
+}
+
+// Floor/ceiling on how long a single image may hold the frame. The floor is not arbitrary: BEAT_FADE
+// (0.3s) of every beat is spent cross-fading, which at 2s is a tolerable 15% of the beat and below
+// ~1.5s starts to read as a dissolve rather than a cut. The ceiling is where a Ken Burns move over a
+// still image stops feeling like motion.
+export const MIN_BEAT_SECONDS = 2;
+export const MAX_BEAT_SECONDS = 8;
+
+const normalizeNarration = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+// True when every beat of this scene carries a narration span AND those spans, in order, reconstruct
+// the scene's own narration. api/generate-scenes.js already validates this server-side and drops the
+// spans when they don't line up, so this is the client's own backstop — it also catches a scene
+// whose narration was rewritten AFTER its spans were written (repetitionAudit.js clears them for
+// exactly that reason; this covers anything already saved in that state). Whitespace runs are
+// collapsed on both sides first: a split that moved a single space across a boundary is still a
+// faithful one, and throwing it away would needlessly fall back to even timing.
+export function spansCoverNarration(scene) {
+  const beats = scene?.images || [];
+  if (beats.length < 2) return false;
+  if (!beats.every((b) => typeof b?.narrationSpan === 'string' && b.narrationSpan.trim())) return false;
+  return normalizeNarration(beats.map((b) => b.narrationSpan).join(' ')) === normalizeNarration(scene?.narration);
+}
+
+// Keeps every beat inside [MIN_BEAT_SECONDS, MAX_BEAT_SECONDS] while holding the sum exactly at
+// `total` — the sum IS this scene's audio length, so shedding even a few tenths here would desync
+// every scene after it. When the range simply cannot contain `total` (a short scene can't give both
+// beats 2s; a long one can't keep both under 8s without more beats than exist), there is nothing to
+// honour and an even split is the best available answer.
+function clampBeatDurations(raw, total) {
+  const n = raw.length;
+  if (!n) return [];
+  if (total < n * MIN_BEAT_SECONDS || total > n * MAX_BEAT_SECONDS) return raw.map(() => total / n);
+
+  const out = raw.map((d) => Math.min(MAX_BEAT_SECONDS, Math.max(MIN_BEAT_SECONDS, d)));
+  // Push whatever the clamp added or removed back onto the beats that still have room for it.
+  // Bounded by n passes: each pass either settles the total or saturates at least one more beat.
+  for (let pass = 0; pass < n; pass++) {
+    const diff = total - out.reduce((a, b) => a + b, 0);
+    if (Math.abs(diff) < 1e-9) break;
+    const movable = out.map((_, i) => i).filter((i) => (diff > 0 ? out[i] < MAX_BEAT_SECONDS : out[i] > MIN_BEAT_SECONDS));
+    if (!movable.length) break;
+    const share = diff / movable.length;
+    movable.forEach((i) => {
+      out[i] = Math.min(MAX_BEAT_SECONDS, Math.max(MIN_BEAT_SECONDS, out[i] + share));
+    });
+  }
+  // Float residue only (the loop converges to ~1e-15) — parked on the longest beat so the sum is
+  // exact rather than merely close.
+  const residue = total - out.reduce((a, b) => a + b, 0);
+  if (residue !== 0) {
+    let longest = 0;
+    out.forEach((d, i) => {
+      if (d > out[longest]) longest = i;
+    });
+    out[longest] += residue;
+  }
+  return out;
+}
+
+/**
+ * Per-beat timing and caption text for one scene — the single source of truth for "when does the
+ * image change, and which words are on screen while it's up". Shared by drawFrame below, by the
+ * three places that build render items (videoRenderEngine.js, EditorStep.jsx, ExportStep.jsx) and by
+ * srtBuilder.js, so the exported MP4, the live preview and the .srt track can never disagree.
+ *
+ * With spans: each beat lasts as long as its own words take to speak, estimated with
+ * computeWordTimings — the same character-proportional model the .srt timestamps already use, so an
+ * image cut and its caption always land on the same instant — then clamped (see above). Without
+ * them: an even split, which for the 2-beat scenes every pre-span video is made of is exactly the
+ * `duration / 2` this module used to hardcode, frame for frame.
+ *
+ * Returns { durations: number[], texts: string[] }, both one entry per beat, durations summing to
+ * the scene's full (audio + pad) length.
+ */
+export function buildBeatTimeline(scene) {
+  const beats = scene?.images || [];
+  const duration = (scene?.audioDuration || 0) + (scene?.pad || 0);
+  if (!beats.length) return { durations: [], texts: [] };
+
+  if (!spansCoverNarration(scene)) {
+    return {
+      durations: beats.map(() => duration / beats.length),
+      texts: splitNarrationParts(scene?.narration, beats.length).map((words) => words.join(' ')),
+    };
+  }
+
+  const texts = beats.map((b) => b.narrationSpan.trim());
+  // Word timings are computed across the WHOLE scene and each span's boundary is then read off them,
+  // rather than timing each span on its own — timing them separately would hand every span an equal
+  // share of the scene and discard the very fact (one span takes longer to speak than the other)
+  // this function exists to use.
+  const perSpanWords = texts.map((t) => t.split(/\s+/).filter(Boolean));
+  const timings = computeWordTimings(perSpanWords.flat(), duration);
+  const raw = [];
+  let cursor = 0;
+  perSpanWords.forEach((words) => {
+    const startAt = cursor === 0 ? 0 : timings[cursor - 1].end;
+    cursor += words.length;
+    raw.push(Math.max(0, timings[cursor - 1].end - startAt));
+  });
+  return { durations: clampBeatDurations(raw, duration), texts };
 }
 
 function drawSubtitle(ctx, W, H, words) {
@@ -246,24 +359,48 @@ function drawBeat(ctx, W, H, beat, p, alpha) {
   ctx.globalAlpha = 1;
 }
 
-// Single source of truth for "which half of the scene are we in" — shared by the image beats and
-// the subtitles so the two switch at exactly the same instant.
+// Single source of truth for "which beat are we in" — shared by the image beats and the subtitles so
+// the two switch at exactly the same instant. Boundaries come from item.beatDurations when the
+// caller computed them (buildBeatTimeline above); an item without them falls back to an even split,
+// which for a 2-beat scene is the `duration / 2` this used to hardcode — so every video created
+// before per-beat durations existed renders exactly as it did.
 function sceneBeatState(item, local) {
-  const half = Math.max(0.0001, item.duration / 2);
-  const inSecondBeat = local >= half;
-  const beatLocal = inSecondBeat ? local - half : local;
-  return { half, inSecondBeat, beatLocal };
+  const count = Math.max(1, (item.images || []).length);
+  const durations =
+    Array.isArray(item.beatDurations) && item.beatDurations.length === count
+      ? item.beatDurations
+      : new Array(count).fill(Math.max(0.0001, item.duration) / count);
+
+  let index = 0;
+  let start = 0;
+  for (let i = 0; i < count; i++) {
+    index = i;
+    const end = start + durations[i];
+    if (local < end || i === count - 1) break;
+    start = end;
+  }
+  return { index, beatLocal: local - start, beatDuration: Math.max(0.0001, durations[index]) };
+}
+
+// The words on screen during one beat: that beat's own narration span when the item carries it
+// (item.images[i].text, set by the item builders from buildBeatTimeline), otherwise this beat's share
+// of an even word split — which is what the old two-halves behavior was.
+function beatWords(item, index) {
+  const beats = item.images || [];
+  const text = beats[index]?.text;
+  if (typeof text === 'string' && text.trim()) return text.split(/\s+/).filter(Boolean);
+  return splitNarrationParts(item.narration, Math.max(1, beats.length))[index] || [];
 }
 
 // local: seconds elapsed since this scene started (clamped to [0, item.duration] by the caller).
 function drawScene(ctx, W, H, item, local, alpha = 1) {
-  const { half, inSecondBeat, beatLocal } = sceneBeatState(item, local);
-  const beatP = Math.min(1, Math.max(0, beatLocal / half));
+  const { index, beatLocal, beatDuration } = sceneBeatState(item, local);
+  const beatP = Math.min(1, Math.max(0, beatLocal / beatDuration));
 
-  drawBeat(ctx, W, H, item.images[inSecondBeat ? 1 : 0], beatP, alpha);
-  if (inSecondBeat && beatLocal < BEAT_FADE) {
-    // Cross-fade the outgoing beat 1's final frame out on top of the incoming beat 2.
-    drawBeat(ctx, W, H, item.images[0], 1, alpha * (1 - beatLocal / BEAT_FADE));
+  drawBeat(ctx, W, H, item.images[index], beatP, alpha);
+  if (index > 0 && beatLocal < BEAT_FADE) {
+    // Cross-fade the outgoing beat's final frame out on top of the incoming one.
+    drawBeat(ctx, W, H, item.images[index - 1], 1, alpha * (1 - beatLocal / BEAT_FADE));
   }
 }
 
@@ -322,9 +459,8 @@ export function drawFrame(ctx, items, t, { W, H, subtitles = false, staticBackgr
     drawScene(ctx, W, H, prev, prev.duration, 1 - local / FADE);
   }
   if (subtitles) {
-    const { inSecondBeat } = sceneBeatState(it, local);
-    const [firstHalfWords, secondHalfWords] = splitNarrationHalves(it.narration);
-    drawSubtitle(ctx, W, H, inSecondBeat ? secondHalfWords : firstHalfWords);
+    const { index } = sceneBeatState(it, local);
+    drawSubtitle(ctx, W, H, beatWords(it, index));
   }
 
   return idx;
@@ -339,9 +475,11 @@ export function pickMime() {
 }
 
 /**
- * items: [{ images: [{img: HTMLImageElement, animation}, {img, animation}], buffer: AudioBuffer, duration: number, narration }]
- * Each item's duration is split evenly between its two image beats, with a short crossfade at
- * the midpoint. duration already includes any per-scene padding (>= buffer.duration).
+ * items: [{ images: [{img: HTMLImageElement, animation, text?}, ...], beatDurations?: number[],
+ * buffer: AudioBuffer, duration: number, narration }]
+ * Each item's duration is divided among its image beats by beatDurations (buildBeatTimeline), or
+ * evenly when the caller didn't compute them, with a short crossfade at each boundary. duration
+ * already includes any per-scene padding (>= buffer.duration).
  * Returns a controller: { stop(), total, blobPromise (only when record=true) }
  */
 export async function playTimeline({ canvas, items, subtitles = false, staticBackground = null, textStyle = null, record = false, onProgress, onDone }) {

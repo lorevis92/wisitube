@@ -68,6 +68,11 @@ function buildScenesFromRaw(rawScenes, isStaticBackground) {
       images: beats.map((b) => ({
         id: beatIdCounter++,
         prompt: b.image_prompt || '',
+        // The verbatim slice of this scene's narration this image covers (api/generate-scenes.js) —
+        // what makes the image change where the idea turns instead of at the scene's midpoint. null
+        // whenever the server dropped it for not reconstructing the narration exactly, in which case
+        // engine.js's buildBeatTimeline divides the scene evenly, same as before spans existed.
+        narrationSpan: typeof b.narration_span === 'string' && b.narration_span.trim() ? b.narration_span.trim() : null,
         animation: b.animation || 'zoom_in',
         referenceId: b.reference_id || null,
         characterId: b.character_id || null,

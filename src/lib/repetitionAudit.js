@@ -137,6 +137,16 @@ function applyAudit(scenes, actions) {
       // no `images` field at all — a merge there just combines the narration.
       if (Array.isArray(earliest.images)) ns.images = earliest.images.map((im) => ({ ...im }));
     }
+    // Any scene whose narration this audit changed (a lightly edited "keep", or a merge that
+    // concatenated two scenes' text behind one scene's beats) no longer matches the narration spans
+    // its beats were written against — those spans would place the image cut at a point in a text
+    // that no longer exists. Dropping them here makes engine.js's buildBeatTimeline divide the scene
+    // evenly instead, which is exactly the pacing such a scene would have had before spans existed.
+    // Only the span field is touched: the beats array itself is never lengthened, shortened or
+    // reordered, so a pending Gemini Batch's sceneId:beatIndex results still land on the right beat.
+    if (ns !== s && ns.narration !== s.narration && Array.isArray(ns.images)) {
+      ns = { ...ns, images: ns.images.map((im) => (im.narrationSpan ? { ...im, narrationSpan: null } : im)) };
+    }
     out.push(ns);
   }
 

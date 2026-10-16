@@ -1012,7 +1012,7 @@ export default function AutomationStep({ userId, isMobile, onSchedulerEnabledCha
                   <div>
                     <div style={label}>
                       Scenes per minute
-                      <InfoHint text="Higher = faster image changes, lower = slower. This is approximate — actual pacing also depends on how much text the AI writes per scene. Only applies to full_pipeline videos with a fixed target length (ignored when 'Let AI decide the ideal length' is on). Each scene always shows exactly 2 images, split evenly — this controls how many scenes (and therefore roughly how many seconds per image) the video ends up with." />
+                      <InfoHint text="Higher = faster image changes, lower = slower. This is approximate — actual pacing also depends on how much text the AI writes per scene. Only applies to full_pipeline videos with a fixed target length (ignored when 'Let AI decide the ideal length' is on). Each scene shows 2 images, and each one stays up for as long as the part of the narration it illustrates takes to speak (between 2 and 8 seconds) — so this sets the overall density, while the exact cut lands where the idea turns." />
                     </div>
                     <input
                       type="number"

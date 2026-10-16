@@ -65,16 +65,23 @@ export function getAvgAudioTime() {
   return avgTime(AUDIO_KEY, DEFAULT_AUDIO_S);
 }
 
-// Matches the server-side totalScenes formula in api/generate-outline.js.
-export function estimateSceneCount(lengthMinutes) {
-  return Math.max(6, Math.round((Number(lengthMinutes) || 0) * 12));
+// Matches the server-side totalScenes formula in api/generate-outline.js, including its per-channel
+// scenes/minute setting (db.js's automation_scenes_per_minute, default 12) and its [2, 60] clamp —
+// callers that don't know the channel's value simply omit it and get the same 12 the server falls
+// back to.
+export const DEFAULT_SCENES_PER_MINUTE = 12;
+
+export function estimateSceneCount(lengthMinutes, scenesPerMinute = DEFAULT_SCENES_PER_MINUTE) {
+  const perMinute = Number(scenesPerMinute);
+  const safePerMinute = Number.isFinite(perMinute) && perMinute > 0 ? Math.min(60, Math.max(2, perMinute)) : DEFAULT_SCENES_PER_MINUTE;
+  return Math.max(6, Math.round((Number(lengthMinutes) || 0) * safePerMinute));
 }
 
 // How long the chunked api/generate-scenes.js calls alone are expected to take for a video of
 // this length — split out so screens shown before scene-writing starts (e.g. TitleSelectStep's
 // outline loader) can subtract it from the full estimate instead of promising work not yet begun.
-export function estimateScenesChunkSeconds(lengthMinutes) {
-  const sceneCount = estimateSceneCount(lengthMinutes);
+export function estimateScenesChunkSeconds(lengthMinutes, scenesPerMinute = DEFAULT_SCENES_PER_MINUTE) {
+  const sceneCount = estimateSceneCount(lengthMinutes, scenesPerMinute);
   const chunkCount = Math.max(1, Math.ceil(sceneCount / MAX_SCENES_PER_CHUNK));
   return chunkCount * SCENES_PER_CHUNK_S;
 }
@@ -93,11 +100,11 @@ function batchImageEta(imageProvider, hasImagesToGenerate) {
   return imageProvider === 'nanobanana-batch' && hasImagesToGenerate ? 'minutes-to-hours' : null;
 }
 
-export function estimateTotalSeconds({ lengthMinutes, modelWarm, imageProvider }) {
-  const sceneCount = estimateSceneCount(lengthMinutes);
+export function estimateTotalSeconds({ lengthMinutes, modelWarm, imageProvider, scenesPerMinute = DEFAULT_SCENES_PER_MINUTE }) {
+  const sceneCount = estimateSceneCount(lengthMinutes, scenesPerMinute);
   const avgImage = getAvgImageTime();
   const avgAudio = getAvgAudioTime();
-  const scriptPhasesS = TITLES_PHASE_S + OUTLINE_PHASE_S + estimateScenesChunkSeconds(lengthMinutes);
+  const scriptPhasesS = TITLES_PHASE_S + OUTLINE_PHASE_S + estimateScenesChunkSeconds(lengthMinutes, scenesPerMinute);
   const isBatch = imageProvider === 'nanobanana-batch';
   const imageSeconds = isBatch ? 0 : sceneCount * IMAGE_BEATS_PER_SCENE * (avgImage + 1.5);
   const syncSeconds = scriptPhasesS + imageSeconds + sceneCount * avgAudio + (modelWarm ? 0 : 90);

@@ -159,6 +159,8 @@ function buildScenesFromRaw(rawScenes, sceneIdBase = 1, beatIdBase = 1) {
       images: beats.map((b, beatIdx) => ({
         id: beatIdBase + sceneIdx * 2 + beatIdx, // exactly 2 beats per scene (enforced above)
         prompt: b.image_prompt || '',
+        // See App.jsx's own buildScenesFromRaw for what this is and what a null means.
+        narrationSpan: typeof b.narration_span === 'string' && b.narration_span.trim() ? b.narration_span.trim() : null,
         animation: b.animation || 'zoom_in',
         referenceId: b.reference_id || null,
         characterId: b.character_id || null,

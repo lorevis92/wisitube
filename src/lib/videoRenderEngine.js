@@ -10,6 +10,7 @@
 // already is — callers should catch WebCodecsUnsupportedError (still exported by exporter.js,
 // re-export not needed here) and fall back to that existing path themselves.
 import { loadImage, decodeAudio } from './pollinations';
+import { buildBeatTimeline } from './engine';
 import { renderToMp4 } from './exporter';
 
 /**
@@ -42,15 +43,24 @@ export async function renderVideoForExport(project, settings, { onProgress, sign
     }
   }
 
+  // Per-beat durations and caption text are resolved here, once per scene, from that scene's own
+  // narration spans — drawFrame then just reads them off the item (see buildBeatTimeline,
+  // src/lib/engine.js). A scene without usable spans gets an even split, exactly as before.
   const items = await Promise.all(
-    project.scenes.map(async (s) => ({
-      images: isStaticBackground
-        ? []
-        : await Promise.all((s.images || []).map(async (beat) => ({ img: await loadImage(beat.url), animation: beat.animation }))),
-      buffer: await decodeAudio(s.audioUrl),
-      duration: (s.audioDuration || 0) + s.pad,
-      narration: s.narration,
-    }))
+    project.scenes.map(async (s) => {
+      const { durations, texts } = isStaticBackground ? { durations: [], texts: [] } : buildBeatTimeline(s);
+      return {
+        images: isStaticBackground
+          ? []
+          : await Promise.all(
+              (s.images || []).map(async (beat, b) => ({ img: await loadImage(beat.url), animation: beat.animation, text: texts[b] }))
+            ),
+        beatDurations: durations,
+        buffer: await decodeAudio(s.audioUrl),
+        duration: (s.audioDuration || 0) + s.pad,
+        narration: s.narration,
+      };
+    })
   );
 
   // project.staticBackground.url is a blob: URL — either still live from this session's own

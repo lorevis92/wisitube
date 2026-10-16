@@ -34,7 +34,9 @@ For every real, named, identifiable person in the character_bible (historical fi
 
   scenes: `You are a YouTube scriptwriter continuing a faceless animated video already in progress.
 
-Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers. Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.`,
+Narration must flow naturally when read aloud in sequence, conversational tone, no scene numbers. Vary the animations; never use the same one twice in a row within a scene, and avoid repeating the same animation across consecutive scenes. Each scene's two image_beats must be visually distinct from each other — a different subject, moment, or camera framing that both illustrate the same narration from two angles. Never make the two beats the same image concept restated.
+
+The image changes where the CONCEPT changes, not halfway through the clock. For each scene, decide where the narration genuinely moves from one idea to the next, and split it there: the first beat covers everything up to that turn, the second covers the rest. One beat may well be much shorter than the other, and that is correct whenever that is where the idea actually turns — never pad or trim the narration to even the two out.`,
 
   programManager: `You are an expert YouTube content strategist and program manager for a faceless channel. Your job is to look holistically at a channel — its niche, its editorial guidelines, and every video already made — and propose the next videos that will make the channel grow and stay coherent and bingeable. Think like a channel owner planning an editorial calendar, not like someone generating random ideas. Consider: gaps in coverage (important subjects/angles not yet covered), opportunities for SERIES (groups of 3-5 connected videos under a theme), natural progressions from existing content, and what would genuinely interest this audience. Use web search to stay current on the niche (trending topics, recent events, popular subjects people are searching for right now). Avoid suggesting anything too similar to videos already made.`,
 };
@@ -75,6 +77,7 @@ JSON schema:
     "narration": "what the voiceover says for this scene, 1-2 short punchy sentences, max 200 characters, written in [the video's narration language]",
     "image_beats": [exactly 2 objects: {
       "image_prompt": [concrete visual description — exact wording depends on the chosen image provider],
+      "narration_span": "the exact, verbatim slice of this scene's narration that this image covers — copied character-for-character from the narration above, never reworded, summarized or translated",
       "animation": one of "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "drift_up" | "static",
       "reference_id": string | null,
       "character_id": string | null,
@@ -86,7 +89,12 @@ JSON schema:
 Rules:
 - image_prompt must be visually literal (an image model will draw exactly this), always in English regardless of narration language.
 - If no reference photos are listed below, always set reference_id to null.
-- [If reference photos or a character bible were provided: additional guidance on when reference_id/character_id are required.]`,
+- narration_span: the two spans MUST together reconstruct this scene's narration exactly, in order, with nothing added, dropped or reworded — concatenating them (joined by a single space) must give back the narration character-for-character.
+- Cut between the two spans at a sentence boundary, or at a clause boundary (a comma, semicolon, colon, or a conjunction starting a new idea) when the scene is a single sentence. NEVER cut in the middle of a word.
+- Put the cut where the narration's idea actually turns, even if that makes one span much shorter than the other — the image change is meant to land on the turn of the thought, not at the midpoint of the scene.
+- [If reference photos or a character bible were provided: additional guidance on when reference_id/character_id are required.]
+
+Each beat's narration_span decides how long that image actually stays on screen (clamped to 2-8 seconds) — a scene whose spans don't reconstruct its narration exactly has them discarded server-side and falls back to splitting the scene evenly between its two images.`,
 
   programManager: `You MUST respond with ONLY valid JSON, no markdown, no preamble. Schema: { "analysis": "2-3 sentence holistic read of where the channel stands and what it needs", "suggestions": [6-8 objects: { "title": "clickable video title", "angle": "one sentence on what makes it interesting / why now", "series": "series name if part of a proposed series, else null", "priority": "high|medium|low" }] }. If a refinement instruction is provided, bias all suggestions toward it.`,
 };

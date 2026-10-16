@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { T, FONT, card, label, btnPrimary, btnGhost, inputStyle, mono } from '../theme';
 import { loadImage, decodeAudio, createSilentBuffer } from '../lib/pollinations';
-import { playTimeline, ANIMATION_LIST } from '../lib/engine';
+import { playTimeline, buildBeatTimeline, ANIMATION_LIST } from '../lib/engine';
 import BackgroundStyleSection from '../components/BackgroundStyleSection';
 
 export default function EditorStep({ project, setProject, settings, onExport, channelId, videoId, userId, isMobile }) {
@@ -41,20 +41,23 @@ export default function EditorStep({ project, setProject, settings, onExport, ch
     const items = await Promise.all(
       slice.map(async (s, sliceIdx) => {
         const sceneNum = fromIdx + sliceIdx + 1;
+        // Same per-beat timing/caption source the real export uses (see buildBeatTimeline,
+        // src/lib/engine.js), so the preview shows the exact cut points the MP4 will have.
+        const { durations, texts } = isStaticBackground ? { durations: [], texts: [] } : buildBeatTimeline(s);
         const images = isStaticBackground
           ? []
           : await Promise.all(
               (s.images || []).map(async (beat, b) => {
                 if (!beat.url || beat.status === 'error') {
                   skipped.push(`Scene ${sceneNum} beat ${b + 1}`);
-                  return { img: null, animation: beat.animation };
+                  return { img: null, animation: beat.animation, text: texts[b] };
                 }
                 try {
-                  return { img: await loadImage(beat.url), animation: beat.animation };
+                  return { img: await loadImage(beat.url), animation: beat.animation, text: texts[b] };
                 } catch (err) {
                   console.error('[EditorStep] beat image failed to load, using placeholder', beat.url, err);
                   skipped.push(`Scene ${sceneNum} beat ${b + 1}`);
-                  return { img: null, animation: beat.animation };
+                  return { img: null, animation: beat.animation, text: texts[b] };
                 }
               })
             );
@@ -75,6 +78,7 @@ export default function EditorStep({ project, setProject, settings, onExport, ch
 
         return {
           images,
+          beatDurations: durations,
           buffer,
           duration: (s.audioDuration || 0) + s.pad,
           narration: s.narration,

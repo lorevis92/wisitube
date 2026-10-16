@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { T, FONT, card, label, btnGhost } from '../theme';
 import { resolveStyle } from '../lib/pollinations';
-import { estimateTotalSeconds, estimateScenesChunkSeconds } from '../lib/estimator';
+import { estimateTotalSeconds, estimateScenesChunkSeconds, DEFAULT_SCENES_PER_MINUTE } from '../lib/estimator';
 import { isModelWarm } from '../lib/tts';
 import FullScreenLoader from '../components/FullScreenLoader';
 import { channelCharactersForPrompt, channelCharacterReferenceStubs } from '../lib/channelCharacters';
@@ -40,7 +40,7 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
           aiDecidesLength: settings.aiDecidesLength === true,
           // Same per-channel pacing default automation uses (AutomationStep.jsx's "Scenes per
           // minute") — only actually applied server-side for a full_pipeline, fixed-length video.
-          scenesPerMinute: channel?.automation_scenes_per_minute || 12,
+          scenesPerMinute: channel?.automation_scenes_per_minute || DEFAULT_SCENES_PER_MINUTE,
           style: resolveStyle(settings).label,
           imageProvider: settings.imageProvider,
           contentType: settings.contentType,
@@ -66,13 +66,17 @@ export default function TitleSelectStep({ titleOptions, settings, onOutlineReady
   }
 
   // Scene-writing hasn't started yet at this point — that portion of the estimate is shown again,
-  // more accurately (with a real progress bar), once it actually begins.
+  // more accurately (with a real progress bar), once it actually begins. scenesPerMinute is the same
+  // per-channel value sent to api/generate-outline.js above, so the estimate is based on the scene
+  // count this video will really be asked for rather than the old fixed 12/minute.
+  const scenesPerMinute = channel?.automation_scenes_per_minute || DEFAULT_SCENES_PER_MINUTE;
   const { syncSeconds, imageEta } = estimateTotalSeconds({
     lengthMinutes: settings.lengthMinutes,
     modelWarm: isModelWarm(),
     imageProvider: settings.imageProvider,
+    scenesPerMinute,
   });
-  const estimate = Math.max(0, syncSeconds - estimateScenesChunkSeconds(settings.lengthMinutes));
+  const estimate = Math.max(0, syncSeconds - estimateScenesChunkSeconds(settings.lengthMinutes, scenesPerMinute));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
